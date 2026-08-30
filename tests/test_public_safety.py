@@ -438,10 +438,46 @@ class GitStateIsPublishable(unittest.TestCase):
         if not self.info.is_repo:
             self.skipTest("not a git repository yet")
 
-    def test_a_no_remote_is_configured(self) -> None:
-        # Publishing is a separate, deliberate act. A remote appearing here
-        # would mean this tree could push somewhere without a human decision.
-        self.assertEqual(list(self.info.remotes), [])
+    def test_a_configured_remotes_are_public_safe(self) -> None:
+        # A published clone necessarily has an origin. The invariant is that a
+        # remote cannot embed credentials or name a machine-local path. Empty is
+        # valid before publication; normal HTTPS/SSH remotes are valid after it.
+        self.assertEqual(leakscan.unsafe_remote_urls(self.info), ())
+
+    def test_a2_remote_policy_accepts_credential_free_https_and_ssh(self) -> None:
+        info = leakscan.GitInfo(
+            is_repo=True,
+            shallow=False,
+            commit_count=1,
+            remote_urls=(
+                leakscan.RemoteUrl("origin", "fetch", "https://example.com/owner/repo.git"),
+                leakscan.RemoteUrl("origin", "push", "git@example.com:owner/repo.git"),
+                leakscan.RemoteUrl("mirror", "fetch", "ssh://git@example.com/owner/repo.git"),
+            ),
+        )
+        self.assertEqual(leakscan.unsafe_remote_urls(info), ())
+
+    def test_a3_remote_policy_refuses_credentials_and_local_paths(self) -> None:
+        urls = (
+            "https://user:secret@example.com/owner/repo.git",
+            "file:" + _j("/", "/", "/ho", "me/") + "someone/private/repo",
+            "../private/repo",
+            _j("/ho", "me/") + "someone/private/repo",
+            "http://example.com/owner/repo.git",
+            "https://localhost/owner/repo.git",
+            "ssh://root@example.com/owner/repo.git",
+            "git@example.com:/absolute/repo.git",
+        )
+        info = leakscan.GitInfo(
+            is_repo=True,
+            shallow=False,
+            commit_count=1,
+            remote_urls=tuple(leakscan.RemoteUrl("origin", "fetch", url) for url in urls),
+        )
+        self.assertEqual(
+            tuple(remote.url for remote in leakscan.unsafe_remote_urls(info)),
+            urls,
+        )
 
     def test_b_history_is_not_shallow(self) -> None:
         # A shallow clone silently reduces the history scan's coverage, so the

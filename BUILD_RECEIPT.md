@@ -128,12 +128,12 @@ standard library.
 
 | Command | Exit | What it reported |
 | --- | --- | --- |
-| `python3 -m unittest discover -s tests -t .` | **0** | `Ran 387 tests` / `OK`, 0 skipped |
+| `python3 -m unittest discover -s tests -t .` | **0** | `Ran 389 tests` / `OK`, 0 skipped |
 | `python3 -m compileall -q src tests examples tools` | **0** | silent, so every tracked tree byte-compiles |
 | `<venv>/bin/black --check .` | **0** | `62 files would be left unchanged` |
 | `<venv>/bin/mypy` | **0** | `Success: no issues found in 40 source files` |
 | `python3 tools/leakscan.py --selftest` | **0** | 27 rules, each fires on its positive sample and stays silent on its negative one |
-| `python3 tools/leakscan.py .` | **0** | `clean`: 109 tracked files, 1 commit scanned, 0 allowlist entries, no remotes |
+| `python3 tools/leakscan.py .` | **0** | `clean`: 109 tracked files, 1 commit scanned, 0 allowlist entries; configured fetch/push remote URLs checked |
 | `python3 examples/build_fixtures.py --check` | **0** | `8 fixture(s) match the builder exactly` |
 | `python3 tests/fixtures/build_fixtures.py` | **0** | `wrote 10 fixture file(s)`, and `git status` stayed clean, so they reproduce |
 | `<venv>/bin/asi --config config/example.config.toml doctor` | **0** | `verdict: ready`, with the isolation and permission lines below |
@@ -245,10 +245,10 @@ on purpose.
 | --- | --- |
 | Tracked files | 109 |
 | Source modules (`src/`) | 40, 9,222 lines |
-| Test files | 18, 5,730 lines, of which 15 are test modules |
-| Test methods | 387 |
+| Test files | 19, 6,164 lines, of which 15 are test modules |
+| Test methods | 389 |
 | Documentation files under `docs/` | 6, 1,336 lines |
-| Leak scanner | 694 lines, 27 rules, 0 allowances |
+| Leak scanner | 784 lines, 27 rules, 0 allowances, configured remote URLs checked |
 | Rubrics | 5 (2 enabled in the example configuration) |
 | Synthetic conversation fixtures | 8 |
 | Example skills | 4 across 2 roots, 1 carrying an executable payload |
@@ -278,8 +278,9 @@ on purpose.
 
 ## Deliberately not done
 
-- **No remote is configured, and nothing was pushed.** `git remote -v` is empty
-  and a test asserts it. Publishing is a separate, deliberate act.
+- **Publishing is complete to a private repository.** `origin` is configured with a
+  credential-free HTTPS URL. The leak scanner checks every fetch and push URL and
+  refuses embedded credentials, local paths, private hosts and non-HTTPS/SSH schemes.
 - **No scheduler was installed.** `scheduler-template` prints to stdout; the
   templates under `packaging/` install nothing.
 - **No hosted-model path for a private source.** Not an omission: a hosted model
@@ -293,20 +294,42 @@ Making this repository public should require no cleanup pass, and that is checke
 rather than asserted: MIT licensed, no upload-blocking packaging classifier, no
 absolute path under any user home directory, empty runtime dependencies, no
 organisation, product or personal identifier in tracked content, tracked paths,
-commit metadata **or reachable history**, and no remote. History is a single clean
-root commit, so there is no earlier revision to inspect. `tools/leakscan.py`
+commit metadata **or reachable history**; configured remote URLs are credential-free
+HTTPS or git-only SSH to public hosts. History begins at the clean public snapshot;
+the later CI correction adds no private source material. `tools/leakscan.py`
 covers all of those surfaces and its rules are two-sided, because on a clean tree
 a rule that matches everything and a rule that matches nothing print the same
 word.
+
+## Post-publication CI correction
+
+The first private-remote build exposed one incorrect pre-publication invariant: the
+public-safety suite asserted that no Git remote existed. That was true before the
+push and false by construction in every GitHub Actions checkout, where `origin` is
+necessarily configured. All three Python matrix legs failed only that assertion;
+the end-to-end job passed.
+
+The replacement invariant checks the property that matters after publication: every
+fetch and push URL must be credential-free HTTPS or git-only SSH to a public host.
+It refuses embedded credentials, local/file paths, private or local hostnames,
+non-global IPs, non-HTTPS/SSH schemes and unsafe SSH usernames. The policy is
+two-sided, with accepted HTTPS/SSH controls and eight rejected URL shapes. CI's
+checkout and Python setup actions were also upgraded to current Node 24 releases
+and pinned to immutable commit SHAs, removing the Node 20 deprecation warnings.
+
+Local verification after the correction: 389 tests pass, formatting and typing are
+clean, and the leak scanner accepts the real credential-free `origin` after checking
+both its fetch and push URLs. The remote CI result is recorded by the commit's
+GitHub Actions run, not predicted in this receipt.
 
 ## Final state
 
 | Property | Value |
 | --- | --- |
-| Commits | 1 (clean root) |
+| Commits | 2 (one clean public snapshot plus this post-publication CI fix) |
 | Tracked files | 109 |
 | `git status --porcelain` | empty |
-| `git remote -v` | empty |
-| Reflog / backup refs / tags | none; reflogs expired and unreachable objects pruned |
-| Test methods | 387, all passing, none skipped |
-| `python3 tools/leakscan.py` | `clean`, 109 tracked files, 1 commit scanned |
+| `git remote -v` | credential-free HTTPS `origin`, fetch and push URLs checked |
+| Reflog / refs | normal local and `origin/main` refs after publication; no backup refs or tags |
+| Test methods | 389, all passing locally, none skipped |
+| `python3 tools/leakscan.py` | `clean`, 109 tracked files, reachable history and configured fetch/push remote URLs scanned |

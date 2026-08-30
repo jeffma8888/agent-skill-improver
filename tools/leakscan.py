@@ -22,6 +22,7 @@ What is scanned
 * the whole reachable HISTORY (``git log --all -p``), because deleting a secret
   in a later commit does not remove it from the repository
 * commit metadata: author name, author email, subject and body
+* configured Git remote URLs, which must be credential-free public HTTPS/SSH
 
 Reporting
 ---------
@@ -42,6 +43,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 
 MAX_FILE_BYTES = 2_000_000
 CONTEXT_CHARS = 34
@@ -466,12 +469,20 @@ def scan_text(
 # --------------------------------------------------------------------------
 # Git plumbing
 # --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RemoteUrl:
+    name: str
+    direction: str
+    url: str
+
+
 @dataclass
 class GitInfo:
     is_repo: bool
     shallow: bool
     commit_count: int
     remotes: tuple[str, ...] = ()
+    remote_urls: tuple[RemoteUrl, ...] = ()
     notes: list[str] = field(default_factory=list)
 
 
@@ -493,7 +504,25 @@ def git_info(root: Path) -> GitInfo:
     count_proc = _git(root, "rev-list", "--all", "--count")
     count = int(count_proc.stdout.strip() or "0") if count_proc.returncode == 0 else 0
     remotes = tuple(x for x in _git(root, "remote").stdout.split() if x)
-    info = GitInfo(is_repo=True, shallow=shallow, commit_count=count, remotes=remotes)
+    remote_urls: list[RemoteUrl] = []
+    for name in remotes:
+        for direction, args in (
+            ("fetch", ("remote", "get-url", "--all", name)),
+            ("push", ("remote", "get-url", "--all", "--push", name)),
+        ):
+            result = _git(root, *args)
+            if result.returncode != 0:
+                continue
+            for url in result.stdout.splitlines():
+                if url.strip():
+                    remote_urls.append(RemoteUrl(name=name, direction=direction, url=url.strip()))
+    info = GitInfo(
+        is_repo=True,
+        shallow=shallow,
+        commit_count=count,
+        remotes=remotes,
+        remote_urls=tuple(remote_urls),
+    )
     if shallow:
         info.notes.append(
             "repository is SHALLOW: the history scan below covers only the commits present "
@@ -503,6 +532,52 @@ def git_info(root: Path) -> GitInfo:
     if count == 0:
         info.notes.append("no commits yet, so there is no history to scan")
     return info
+
+
+_SAFE_SCP_REMOTE = re.compile(
+    r"\Agit@(?P<host>[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?):" r"(?P<path>[^/\s][^\s]*)\Z"
+)
+
+
+def _host_is_public(host: str) -> bool:
+    lowered = host.rstrip(".").lower()
+    if not lowered or lowered == "localhost" or lowered.endswith(".localhost"):
+        return False
+    if lowered.endswith(".local") or "." not in lowered:
+        return False
+    try:
+        address = ip_address(lowered)
+    except ValueError:
+        return True
+    return address.is_global
+
+
+def remote_url_is_public_safe(url: str) -> bool:
+    """Accept only credential-free HTTPS or git-only SSH to a public host."""
+    if not url or any(ch.isspace() or ord(ch) < 32 for ch in url):
+        return False
+    if scan_text(url, scope="git-remote", location="configured remote"):
+        return False
+    scp = _SAFE_SCP_REMOTE.fullmatch(url)
+    if scp:
+        return _host_is_public(scp.group("host"))
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"https", "ssh"} or not parsed.hostname:
+        return False
+    if not _host_is_public(parsed.hostname):
+        return False
+    if parsed.password is not None or parsed.query or parsed.fragment:
+        return False
+    if parsed.scheme == "https" and parsed.username is not None:
+        return False
+    if parsed.scheme == "ssh" and parsed.username not in {None, "git"}:
+        return False
+    return bool(parsed.path and parsed.path != "/" and not parsed.path.startswith("//"))
+
+
+def unsafe_remote_urls(info: GitInfo) -> tuple[RemoteUrl, ...]:
+    """Configured remotes that are local, credential-bearing, or otherwise unsafe."""
+    return tuple(remote for remote in info.remote_urls if not remote_url_is_public_safe(remote.url))
 
 
 def tracked_files(root: Path) -> list[str]:
@@ -614,6 +689,7 @@ def report(findings: list[Finding], *, files: int, info: GitInfo, notes: list[st
     if info.is_repo:
         print(f"  commits scanned  {info.commit_count}" + ("  (SHALLOW)" if info.shallow else ""))
         print(f"  remotes          {', '.join(info.remotes) if info.remotes else 'none'}")
+        print(f"  remote URLs      {len(info.remote_urls)} checked")
     else:
         print("  commits scanned  0  (not a git repository)")
     for note in info.notes:
@@ -622,7 +698,10 @@ def report(findings: list[Finding], *, files: int, info: GitInfo, notes: list[st
         print(f"  note: {note}")
 
     if not findings:
-        print("\nRESULT: clean. No banned pattern in tracked content, tracked paths, or history.")
+        print(
+            "\nRESULT: clean. No banned pattern in tracked content, tracked paths, history, "
+            "or configured remotes."
+        )
         return
 
     print(f"\nRESULT: {len(findings)} finding(s) in {len(group(findings))} location(s).")
@@ -681,6 +760,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("than a publish would upload, so this is reported rather than guessed.\n")
 
     findings, notes, files = scan_tracked(root)
+    for remote in unsafe_remote_urls(info):
+        findings.append(
+            Finding(
+                scope="git-remote",
+                location=f"remote {remote.name} ({remote.direction})",
+                rule_id="unsafe-git-remote",
+                excerpt="<redacted unsafe remote URL>",
+                why="the remote is local, credential-bearing, non-HTTPS/SSH, or names private infrastructure",
+                remediation="use a credential-free HTTPS URL or git@host:owner/repository SSH URL",
+            )
+        )
     if not args.no_history:
         findings.extend(scan_history(root, info))
     else:
