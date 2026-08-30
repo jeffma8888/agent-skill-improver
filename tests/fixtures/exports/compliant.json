@@ -1,0 +1,158 @@
+{
+  "elements": [
+    {
+      "createdAt": 1700000000000,
+      "id": "1700000000001-11",
+      "kind": "workspaceChange",
+      "path": "/tmp/asi-fixture-workspace-a",
+      "position": 0,
+      "threadId": "1700000000001-1"
+    },
+    {
+      "author": "operator",
+      "createdAt": 1700000001000,
+      "id": "1700000000001-12",
+      "kind": "message",
+      "origin": "user-input",
+      "position": 1,
+      "role": "user",
+      "threadId": "1700000000001-1"
+    },
+    {
+      "content": "Add a module docstring to helper.py. Read the file first and run the tests after.",
+      "createdAt": 1700000002000,
+      "id": "1700000000001-13",
+      "kind": "text",
+      "parentId": "1700000000001-12",
+      "position": 2,
+      "threadId": "1700000000001-1"
+    },
+    {
+      "createdAt": 1700000003000,
+      "id": "1700000000001-14",
+      "kind": "message",
+      "position": 3,
+      "role": "assistant",
+      "threadId": "1700000000001-1"
+    },
+    {
+      "createdAt": 1700000004000,
+      "id": "1700000000001-15",
+      "kind": "agentMode",
+      "mode": "auto",
+      "parentId": "1700000000001-14",
+      "position": 4,
+      "threadId": "1700000000001-1"
+    },
+    {
+      "content": "Read the file before editing it; the instruction is explicit.",
+      "createdAt": 1700000005000,
+      "durationMs": 120,
+      "id": "1700000000001-16",
+      "kind": "thinking",
+      "parentId": "1700000000001-14",
+      "position": 5,
+      "signature": "synthetic",
+      "threadId": "1700000000001-1"
+    },
+    {
+      "artifacts": [],
+      "createdAt": 1700000006000,
+      "durationMs": 40,
+      "id": "1700000000001-17",
+      "input": {
+        "path": "helper.py"
+      },
+      "kind": "tool",
+      "name": "view",
+      "output": "1 | def parse(line):\n2 |     return line.split()\n",
+      "parentId": "1700000000001-14",
+      "position": 6,
+      "status": "done",
+      "threadId": "1700000000001-1"
+    },
+    {
+      "content": "The file has no module docstring. Adding one now.",
+      "createdAt": 1700000007000,
+      "id": "1700000000001-18",
+      "kind": "text",
+      "parentId": "1700000000001-14",
+      "position": 7,
+      "threadId": "1700000000001-1"
+    },
+    {
+      "artifacts": [],
+      "createdAt": 1700000008000,
+      "durationMs": 40,
+      "id": "1700000000001-19",
+      "input": {
+        "new": "\"\"\"Parsing helpers.\"\"\"\n\n\ndef parse",
+        "old": "def parse",
+        "path": "helper.py"
+      },
+      "kind": "tool",
+      "name": "edit",
+      "output": "edited helper.py: 1 replacement",
+      "parentId": "1700000000001-14",
+      "position": 8,
+      "status": "done",
+      "threadId": "1700000000001-1"
+    },
+    {
+      "artifacts": [],
+      "createdAt": 1700000009000,
+      "durationMs": 40,
+      "id": "1700000000001-20",
+      "input": {
+        "command": "python3 -m pytest -q tests/test_helper.py"
+      },
+      "kind": "tool",
+      "name": "Bash",
+      "output": "4 passed in 0.11s",
+      "parentId": "1700000000001-14",
+      "position": 9,
+      "status": "done",
+      "threadId": "1700000000001-1"
+    },
+    {
+      "content": "Added the module docstring to helper.py and ran the tests: 4 passed. The edit is verified by the test run above.",
+      "createdAt": 1700000010000,
+      "id": "1700000000001-21",
+      "kind": "text",
+      "parentId": "1700000000001-14",
+      "position": 10,
+      "threadId": "1700000000001-1"
+    },
+    {
+      "createdAt": 1700000011000,
+      "id": "1700000000001-22",
+      "kind": "taskCompletion",
+      "label": "Add a docstring",
+      "outputTail": "",
+      "position": 11,
+      "status": "done",
+      "taskId": "task-1",
+      "threadId": "1700000000001-1"
+    }
+  ],
+  "thread": {
+    "accumulatedTelemetry": {},
+    "createdAt": 1700000000000,
+    "draft": "",
+    "folderId": null,
+    "id": "1700000000001-1",
+    "lastContextWindow": 200000,
+    "lastInputTokens": 4096,
+    "modelOverride": null,
+    "parentThreadId": null,
+    "pinned": false,
+    "position": 0,
+    "profileName": "default",
+    "source": "desktop",
+    "status": "idle",
+    "title": "Add a docstring to the parser helper",
+    "titleGenerated": true,
+    "updatedAt": 1700000900000,
+    "workspacePath": "/tmp/asi-fixture-workspace-a"
+  }
+}

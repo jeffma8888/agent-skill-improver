@@ -1,0 +1,206 @@
+# ---------------------------------------------------------------------------
+# agent-skill-improver -- example configuration
+#
+# This file is deliberately SELF-CONTAINED and machine-independent. Out of the
+# box it reads synthetic conversations from `examples/fixtures/`, inspects the
+# synthetic skill tree in `examples/skills/`, and calls a deterministic offline
+# fake model. There is no network, no credential, and no path outside this
+# repository, so `asi daily` works on a fresh clone.
+#
+# To point it at a real environment, copy this file to `config/local.toml`
+# (gitignored) and change [source] and [[skill_root]]. Read
+# docs/PRIVACY_AND_THREAT_MODEL.md first: real conversations are private content.
+# ---------------------------------------------------------------------------
+
+[run]
+# Everything the loop reads or writes lands here. Gitignored, local only.
+state_dir = "state"
+# DRY RUN IS THE DEFAULT. `asi daily` reports what it would do and persists
+# nothing until `--commit`. Even with --commit it never writes a skill file.
+dry_run = true
+# Fixing the seed makes nonces and blind A/B assignment reproducible, so two
+# runs over the same inputs produce byte-identical artifacts.
+seed = "example-seed"
+
+[source]
+# Two kinds, and the choice decides more than where the data comes from.
+#
+#   "fixtures"          reads export-shaped JSON from a directory. SYNTHETIC, so
+#                       it is the only kind that may run the model roles without
+#                       an OS sandbox. That is what keeps public CI portable.
+#   "conversation-cli"  shells out to your conversation tool. Reads real history,
+#                       so it is classified PRIVATE and the model roles are
+#                       refused unless they run inside a verified local
+#                       no-egress sandbox. See docs/PRIVACY_AND_THREAT_MODEL.md.
+#
+# The classification is derived from this value. There is deliberately no key
+# anywhere in this table that says "trust me": an unknown key in [source] is a
+# hard error, precisely so a trust label cannot be typed here and mistaken for
+# one that has an effect.
+kind = "fixtures"
+fixtures_dir = "examples/fixtures"
+
+# --- settings used when kind = "conversation-cli" -------------------------
+# Argv TEMPLATES, so this repository never has to name anybody's tool. Put the
+# real executable and arguments in config/local.toml, which is gitignored.
+#
+# Placeholders: {since} {limit} {query} {workspace} {thread_id}. An argument that
+# is exactly one placeholder is DROPPED when its value is empty, so an unset
+# query does not become a bare "" that matches nothing.
+#
+# Your tool has to satisfy two documented contracts, both described in the
+# adapters: a discovery line grammar (numbered `N. "TITLE" (YYYY-MM-DD)`, an
+# optional indented `Workspace: <path>`, and `Thread: <id>` with any suffix
+# ignored) and the element-graph export JSON.
+discovery_argv = ["conversation-cli", "search", "--after", "{since}", "-n", "{limit}"]
+# Appended only when [source].query is set AND {query} does not already appear
+# above -- put {query} inline in discovery_argv if your tool takes it positionally.
+query_argv = ["{query}"]
+workspace_argv = ["-w", "{workspace}"]
+export_argv = ["conversation-cli", "export", "--thread", "{thread_id}"]
+# Discovery window. Always paired with an explicit limit below.
+since = "1d"
+# ALWAYS set explicitly. The interface's own default page size is small, so a
+# harvester that relies on it reads the most recently touched sliver of the
+# corpus -- which is disproportionately orchestrator traffic when a loop runs
+# continuously. A page that comes back exactly full is reported as a PAGE, never
+# as a total.
+discovery_limit = 40
+query = ""
+# Empty means "every workspace the source will return".
+workspaces = []
+# Keep the raw export under state/raw/ for auditing. Private content; gitignored.
+keep_raw = true
+output_excerpt_chars = 2000
+timeout_seconds = 180
+# 0 means no cap. A cap is recorded on the conversation as `truncated`.
+max_messages = 0
+
+[selection]
+# How many conversations one run may ingest.
+max_conversations_per_run = 8
+# "class"     -- human vs orchestrated vs unknown (DEFAULT, and the one that
+#                matters: in an orchestrated environment machine traffic can be
+#                ~96% of threads, so any other dimension drowns the human
+#                sessions where a skill actually mis-served a person)
+# "workspace" -- one bucket per workspace path
+# "date"      -- one bucket per updated date
+#
+# Selection is round-robin across buckets, best-first inside a bucket. It is
+# never `sorted(items)[:limit]`: whenever the sort key correlates with the thing
+# being selected, a prefix is a permanent filter rather than a sample.
+fairness_dimension = "class"
+# Title markers that identify orchestrator-generated threads. Heuristic on
+# purpose, and configurable because hard-coding one orchestrator's title makes
+# the classifier useless everywhere else. An unmatched thread is "unknown" and
+# gets its own bucket -- never folded into "human".
+agent_title_markers = ["Orchestrator Run", "autonomous iteration", "dispatcher"]
+
+[caps]
+# Bounds that keep one run reviewable and stop the queue growing without limit.
+max_candidates_per_run = 3
+# Backlog guard: when this many candidates already await review, the next run
+# stands down instead of adding to the pile. Nothing is discarded.
+max_open_candidates = 8
+max_failures_per_candidate = 6
+max_skills_per_run = 3
+max_extra_holdout_conversations = 3
+
+[prompt]
+# Budget per model call. When the budget binds, transcript blocks are dropped
+# from the MIDDLE and the number dropped is stated in the prompt -- head
+# truncation would systematically grade only the opening of a conversation.
+max_transcript_chars = 24000
+max_message_chars = 4000
+max_skill_text_chars = 24000
+# Best-effort secret redaction before anything leaves the machine. A reduction of
+# risk, not a guarantee; see docs/PRIVACY_AND_THREAT_MODEL.md.
+redact_secrets = true
+
+[gate]
+# What a candidate must clear before a human is even offered the choice.
+# FAIL -> INSUFFICIENT earns no credit: a change that makes the scorer unable to
+# decide is not a fix.
+min_fixes = 1
+max_regressions = 0
+# PASS -> INSUFFICIENT on a holdout is a loss of evidence, not a neutral result.
+max_holdout_degradations = 0
+# Without a holdout, "no regressions" is an unsupported claim.
+min_holdout_cases = 1
+require_judge = true
+min_judge_preference_ratio = 0.5
+# Refuse the gate when the judge runs the same command as the improver. A judge
+# sharing a model with the thing it grades is grading its own homework.
+require_independent_judge = true
+
+[guard]
+# Skills that are never a proposal target, whatever the scores say. Anything
+# holding a safety rule or an executable payload belongs here. This tool's own
+# source, config and rubrics are protected unconditionally and are NOT
+# configurable -- a loop that can edit its own examiner has no gate at all.
+protected_skill_ids = ["example-guardrails"]
+
+[rubrics]
+# Rubrics are versioned files on disk, loaded read-only and hashed. Their hash is
+# recorded on every scorecard, so a rubric edit can never be mistaken for a
+# behaviour change. The loop cannot write them.
+dir = "../rubrics"
+enabled = ["evidence-discipline", "instruction-following"]
+# The library holds more rubrics than this (see docs/RUBRICS.md). Only the
+# enabled ones cost a model call, so enabling everything is not free.
+
+# --- skill roots ---------------------------------------------------------
+# Order matters only through `precedence`. Exactly one root should be
+# canonical+editable; everything else is a mirror that is read but never written.
+[[skill_root]]
+id = "example-canonical"
+path = "examples/skills"
+precedence = 10
+canonical = true
+editable = true
+kind = "custom"
+note = "synthetic skill tree shipped with the repo so the example runs offline"
+
+[[skill_root]]
+id = "example-mirror"
+path = "examples/skills-mirror"
+precedence = 50
+canonical = false
+editable = false
+kind = "mirror"
+note = "a deliberately DIVERGENT copy: editing it would be overwritten by the next sync, or never reach whatever loads the canonical file"
+
+# --- model roles ---------------------------------------------------------
+# A "model" is any command that reads one JSON object on stdin and writes one
+# JSON object on stdout.
+#
+# For a PRIVATE source the model must be LOCAL. The child process gets a minimal
+# environment built from a short allowlist, and a variable whose NAME looks like a
+# credential, token or proxy setting is a refusal rather than a silent drop -- so
+# a hosted-API wrapper cannot work here, by construction. That is deliberate: a
+# hosted model needs egress, and egress is the leg being removed. The sandbox
+# permits none, so a local model needs no credential either.
+#
+# Each call also gets a fresh 0700 directory that is the only path it may write,
+# is where HOME and TMPDIR point, and is deleted when the call returns.
+[model.defaults]
+timeout_seconds = 120
+max_output_bytes = 4194304
+
+[model.scorer]
+argv = ["python3", "examples/fake_model.py", "--role", "scorer"]
+model_label = "offline-fake-scorer"
+
+[model.improver]
+argv = ["python3", "examples/fake_model.py", "--role", "improver"]
+model_label = "offline-fake-improver"
+
+# HONESTY NOTE about the line below. All three roles here are the same offline
+# script with different flags, so the independence check (which compares
+# commands) passes. That is a property of this EXAMPLE, not evidence that the
+# example has a genuinely independent judge. With real models, point [model.judge]
+# at a different model family from [model.improver] -- otherwise a passing gate
+# mostly measures self-consistency.
+[model.judge]
+argv = ["python3", "examples/fake_model.py", "--role", "judge"]
+model_label = "offline-fake-judge"

@@ -1,0 +1,76 @@
+{
+  "elements": [
+    {
+      "author": "operator",
+      "createdAt": 1700000000000,
+      "id": "1700000000001-11",
+      "kind": "message",
+      "origin": "user-input",
+      "position": 0,
+      "role": "user",
+      "threadId": "1700000000004-1"
+    },
+    {
+      "content": "Explain how the retry policy works in client.py.",
+      "createdAt": 1700000001000,
+      "id": "1700000000001-12",
+      "kind": "text",
+      "parentId": "1700000000001-11",
+      "position": 1,
+      "threadId": "1700000000004-1"
+    },
+    {
+      "createdAt": 1700000002000,
+      "id": "1700000000001-13",
+      "kind": "message",
+      "position": 2,
+      "role": "assistant",
+      "threadId": "1700000000004-1"
+    },
+    {
+      "artifacts": [],
+      "createdAt": 1700000003000,
+      "durationMs": 40,
+      "id": "1700000000001-14",
+      "input": {
+        "path": "client.py"
+      },
+      "kind": "tool",
+      "name": "view",
+      "output": "1 | RETRIES = 3\n2 | BACKOFF = 2.0\n",
+      "parentId": "1700000000001-13",
+      "position": 3,
+      "status": "done",
+      "threadId": "1700000000004-1"
+    },
+    {
+      "content": "client.py retries 3 times with a backoff factor of 2.0, as shown in the file above. I did not find a circuit breaker, so I cannot say whether one exists elsewhere.",
+      "createdAt": 1700000004000,
+      "id": "1700000000001-15",
+      "kind": "text",
+      "parentId": "1700000000001-13",
+      "position": 4,
+      "threadId": "1700000000004-1"
+    }
+  ],
+  "thread": {
+    "accumulatedTelemetry": {},
+    "createdAt": 1700000000000,
+    "draft": "",
+    "folderId": null,
+    "id": "1700000000004-1",
+    "lastContextWindow": 200000,
+    "lastInputTokens": 4096,
+    "modelOverride": null,
+    "parentThreadId": null,
+    "pinned": false,
+    "position": 0,
+    "profileName": "default",
+    "source": "desktop",
+    "status": "idle",
+    "title": "Explain the retry policy",
+    "titleGenerated": true,
+    "updatedAt": 1700000900000,
+    "workspacePath": "/tmp/asi-fixture-workspace-d"
+  }
+}

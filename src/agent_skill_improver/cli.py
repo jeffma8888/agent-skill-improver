@@ -1,0 +1,900 @@
+"""Command line interface.
+
+Command surface, and which of them can change anything on disk:
+
+    doctor              read-only. Validates config and reports what is wired.
+    skills              read-only. Skill inventory, canonical vs mirror, load warnings.
+    rubrics             read-only.
+    discover            read-only. Lists thread ids the source would ingest.
+    daily               writes only under the gitignored state directory.
+                        DRY RUN BY DEFAULT; --commit persists candidates and the checkpoint.
+    candidates          read-only.
+    review              read-only. Prints the argument, the diff, and the approval token.
+    apply               THE ONLY command that writes a skill file. Human-gated.
+    rollback            restores a previously applied candidate from its backup.
+    scheduler-template  prints a launchd or cron template. Installs nothing.
+    selftest            re-checks the structural safety invariants on this checkout.
+
+``apply`` refuses to run when the automation marker is set, which the daily driver
+always sets, and it needs both a content-derived token and an explicit
+acknowledgement flag.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import os
+import sys
+from pathlib import Path
+from typing import Any, Sequence
+
+from . import __version__
+from .clock import SystemClock, iso
+from .config import SOURCE_FIXTURES, Config, load_config, package_dir
+from .domain.approval import HumanApproval, automation_active
+from .domain.isolation import (
+    MODE_NONE,
+    SOURCE_CLASS_PRIVATE,
+    SOURCE_CLASS_SYNTHETIC,
+    decide as decide_isolation,
+    source_class,
+)
+from .errors import AsiError, ConfigError
+from .jsonio import dumps
+from .app.state import DIR_MODE, STATE_FILE_MODE, StateStore
+from .app.wiring import build_runner, build_skill_store, build_source, build_state
+
+ENV_CONFIG = "ASI_CONFIG"
+
+
+def _require_isolation(config: Config, state: StateStore) -> None:
+    """Refuse before any command reads a private source.
+
+    Built here rather than passed in, so a command cannot accidentally check a
+    different runner from the one it is about to use.
+    """
+    runner = build_runner(config, state)
+    decide_isolation(
+        source_kind=config.source.kind,
+        runner_isolation=runner.isolation(),
+        roles=sorted(config.model_roles),
+    ).require()
+
+
+def repo_root() -> Path:
+    return package_dir().parent.parent
+
+
+def default_config_path() -> Path:
+    from_env = os.environ.get(ENV_CONFIG)
+    if from_env:
+        return Path(from_env).expanduser()
+    local = repo_root() / "config" / "local.toml"
+    if local.is_file():
+        return local
+    return repo_root() / "config" / "example.config.toml"
+
+
+def _load(args: argparse.Namespace) -> Config:
+    path = Path(args.config).expanduser() if args.config else default_config_path()
+    return load_config(path)
+
+
+def _emit(payload: Any, *, as_json: bool, lines: Sequence[str] = ()) -> None:
+    if as_json:
+        sys.stdout.write(dumps(payload))
+    else:
+        for line in lines:
+            sys.stdout.write(line + "\n")
+
+
+# -- commands ------------------------------------------------------------
+def cmd_doctor(args: argparse.Namespace) -> int:
+    problems: list[str] = []
+    warnings: list[str] = []
+    try:
+        config = _load(args)
+    except ConfigError as exc:
+        sys.stderr.write(f"config error: {exc}\n")
+        return 2
+    store = build_skill_store(config)
+    missing = [r.id for r in store.missing_roots()]
+    if missing:
+        warnings.append(f"skill root(s) not present on this machine: {', '.join(missing)}")
+    if not store.existing_roots():
+        problems.append("no configured skill root exists; nothing can be discovered")
+    for role in ("scorer", "improver", "judge"):
+        if role not in config.model_roles:
+            problems.append(f"no [model.{role}] command configured")
+    independence = config.evaluator_independence()
+    if not independence["judge_independent"]:
+        warnings.append(
+            "judge and improver are not distinct commands: the gate will refuse candidates while "
+            "[gate].require_independent_judge is true, because a self-graded preference is not "
+            "independent evidence"
+        )
+    canonical_roots = [r.id for r in config.skill_roots if r.canonical and r.editable]
+    if not canonical_roots:
+        warnings.append("no skill root is marked canonical+editable; proposals will be refused")
+    snapshots = store.snapshots()
+    broken = [s for s in snapshots if not s.loads]
+    state = build_state(config)
+
+    # The isolation decision comes BEFORE anything touches the source, so
+    # `doctor` on a host with no sandbox mechanism reports the refusal rather
+    # than a preflight result that implies the run could proceed.
+    runner = build_runner(config, state)
+    isolation = decide_isolation(
+        source_kind=config.source.kind,
+        runner_isolation=runner.isolation(),
+        roles=sorted(config.model_roles),
+    )
+    if not isolation.satisfied:
+        problems.append(
+            f"isolation not satisfied for a {isolation.source_class} source: "
+            + "; ".join(isolation.reasons)
+        )
+
+    # Existing state may predate the permission policy, or have been created
+    # under a permissive umask. Repair it here rather than only checking, because
+    # a doctor that reports a problem it could have fixed is asking a human to
+    # run chmod for it.
+    permissions_repaired: list[str] = []
+    permission_problems: list[str] = []
+    if config.state_dir.exists():
+        permissions_repaired = state.repair_permissions()
+        permission_problems = state.permission_problems()
+        if permission_problems:
+            problems.append(
+                f"{len(permission_problems)} path(s) under {config.state_dir} are not "
+                f"owner-only even after an attempted repair: {permission_problems[0]}"
+            )
+
+    source = build_source(config, state)
+    source_status = "ok"
+    try:
+        source.preflight()
+    except AsiError as exc:
+        source_status = str(exc)
+        problems.append(f"source unavailable: {exc}")
+
+    payload = {
+        "version": __version__,
+        "config_path": str(config.config_path),
+        "state_dir": str(config.state_dir),
+        "dry_run_default": config.dry_run,
+        "source": {
+            "kind": config.source.kind,
+            "status": source_status,
+            "source_class": isolation.source_class,
+        },
+        "isolation": isolation.to_dict(),
+        "state_permissions": {
+            "dir_mode": oct(DIR_MODE),
+            "file_mode": oct(STATE_FILE_MODE),
+            "repaired": permissions_repaired,
+            "still_wrong": permission_problems,
+        },
+        "roles_configured": sorted(config.model_roles),
+        "skill_roots": [{**r.to_dict(), "exists": r.path.is_dir()} for r in config.skill_roots],
+        "skills_discovered": len(store.known_skill_ids()),
+        "skills_that_do_not_load": [{"skill_id": s.skill_id, "path": str(s.path)} for s in broken],
+        "skills_with_executable_payloads": [
+            {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
+            for s in snapshots
+            if s.payload_files
+        ],
+        "selection": config.selection.to_dict(),
+        "evaluator_independence": independence,
+        "rubrics": [
+            {"id": r.id, "version": r.version, "criteria": list(r.criterion_ids)}
+            for r in config.rubrics
+        ],
+        "gate": config.gate.to_dict(),
+        "protected_paths": [str(p) for p in config.protected_paths],
+        "automation_marker_set": automation_active(),
+        "problems": problems,
+        "warnings": warnings,
+    }
+    lines = [
+        f"agent-skill-improver {__version__}",
+        f"config       {config.config_path}",
+        f"state        {config.state_dir}  (gitignored, local only)",
+        f"source       {config.source.kind} -> {source_status}  " f"[{isolation.source_class}]",
+        f"isolation    mode={isolation.mode} verified={isolation.verified} "
+        f"required={isolation.required} satisfied={isolation.satisfied}",
+        f"state perms  dirs {oct(DIR_MODE)} / files {oct(STATE_FILE_MODE)}, "
+        f"{len(permissions_repaired)} repaired, {len(permission_problems)} still wrong",
+        f"roles        {', '.join(sorted(config.model_roles)) or '<none configured>'}",
+        f"skill roots  {len(config.skill_roots)} configured, {len(store.existing_roots())} present",
+        f"skills       {len(store.known_skill_ids())} discovered, {len(broken)} do not load, "
+        f"{sum(1 for s in snapshots if s.payload_files)} carry executable payloads",
+        f"selection    bounded by {config.selection.fairness_dimension!r}, "
+        f"max {config.selection.max_conversations_per_run}/run, round-robin (never a sorted prefix)",
+        f"judge        {'independent of the improver' if independence['judge_independent'] else 'NOT independent of the improver'}",
+        f"rubrics      {', '.join(r.id for r in config.rubrics)}",
+        f"dry run      {config.dry_run} (default for `asi daily`)",
+    ]
+    for warning in warnings:
+        lines.append(f"WARN  {warning}")
+    for problem in problems:
+        lines.append(f"PROBLEM  {problem}")
+    lines.append("verdict: " + ("problems found" if problems else "ready"))
+    _emit(payload, as_json=args.json, lines=lines)
+    return 1 if problems else 0
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    config = _load(args)
+    store = build_skill_store(config)
+    groups = store.groups()
+    payload = {"groups": [g.to_dict() for g in groups]}
+    lines = []
+    for group in groups:
+        canonical = group.canonical
+        head = f"{group.skill_id}"
+        if canonical is None:
+            head += "  [NO CANONICAL EDITABLE COPY -- proposals refused]"
+        else:
+            head += f"  canonical={canonical.root_id} sha={canonical.sha256[:12]}"
+            if not canonical.loads:
+                head += "  [DOES NOT LOAD]"
+        if group.mirrors:
+            head += f"  mirrors={','.join(m.root_id for m in group.mirrors)}"
+        if group.divergent_mirrors:
+            head += f"  DIVERGENT={','.join(m.root_id for m in group.divergent_mirrors)}"
+        lines.append(head)
+    lines.append(
+        f"{len(groups)} logical skill(s); "
+        f"{sum(1 for g in groups if g.is_mirrored)} mirrored; "
+        f"{sum(1 for g in groups if g.divergent_mirrors)} with divergent mirrors"
+    )
+    _emit(payload, as_json=args.json, lines=lines)
+    return 0
+
+
+def cmd_rubrics(args: argparse.Namespace) -> int:
+    config = _load(args)
+    payload = {"rubrics": [r.to_dict() for r in config.rubrics]}
+    lines = []
+    for rubric in config.rubrics:
+        lines.append(
+            f"{rubric.id} v{rubric.version}  {rubric.title}  sha={rubric.source_sha256[:12]}"
+        )
+        for crit in rubric.criteria:
+            lines.append(f"  - {crit.id} (weight {crit.weight}) {crit.title}")
+    _emit(payload, as_json=args.json, lines=lines)
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    config = _load(args)
+    state = build_state(config)
+    # `discover` reads the private source, so it carries the same gate as
+    # `daily`. It is enforced before preflight for the same reason: a refusal
+    # after the first subprocess call is a report, not a boundary.
+    _require_isolation(config, state)
+    source = build_source(config, state)
+    source.preflight()
+    # discover_page, not discover: this command exists to answer "what would be
+    # ingested", and that answer is wrong without saying whether the list is the
+    # whole population or one bounded page. Dropping the flag here was the
+    # original defect -- the honesty existed in the domain and never reached the
+    # one command a human runs to ask the question.
+    page = source.discover_page(
+        since=args.since or config.source.since,
+        limit=args.limit or config.source.discovery_limit,
+        workspace=args.workspace,
+        query=config.source.query or None,
+    )
+    found = list(page.threads)
+    payload = {
+        "threads": [t.to_dict() for t in found],
+        "page": page.to_dict(),
+        "is_total": page.is_total,
+        "truncated_by_limit": page.truncated_by_limit,
+        "honesty_note": page.honesty_note,
+    }
+    lines = [f"{t.thread_id}  {t.workspace}  {t.title[:60]}" for t in found]
+    lines.append(f"{len(found)} thread(s) returned, limit {page.limit}")
+    lines.append(
+        "this is the WHOLE population the source would return"
+        if page.is_total
+        else "this is a PAGE, not a total: " + page.honesty_note
+    )
+    _emit(payload, as_json=args.json, lines=lines)
+    return 0
+
+
+def cmd_daily(args: argparse.Namespace) -> int:
+    from .app.daily import run_daily
+
+    config = _load(args)
+    if not args.allow_missing_roles:
+        config.require_roles("scorer", "improver", "judge")
+    state = build_state(config)
+    runner = build_runner(config, state)
+    # run_daily enforces this too -- that is the load-bearing check, since it is
+    # the one a library caller cannot skip. Enforcing here as well means the CLI
+    # refuses before `source.preflight()` runs a subprocess.
+    decide_isolation(
+        source_kind=config.source.kind,
+        runner_isolation=runner.isolation(),
+        roles=sorted(config.model_roles),
+    ).require()
+    source = build_source(config, state)
+    source.preflight()
+    store = build_skill_store(config)  # read-only, always
+    receipt = run_daily(
+        config,
+        source=source,
+        runner=runner,
+        skill_store=store,
+        state=state,
+        clock=SystemClock(),
+        day=args.day,
+        commit=bool(args.commit),
+        seed=args.seed,
+    )
+    if args.json:
+        sys.stdout.write(dumps(receipt.to_dict()))
+    else:
+        sys.stdout.write(receipt.summary_line() + "\n")
+        for note in receipt.notes:
+            sys.stdout.write(f"note: {note}\n")
+        sys.stdout.write(f"receipt: {state.receipt_path(receipt.day, dry_run=receipt.dry_run)}\n")
+    return 0 if receipt.status in ("ok", "stood-down", "partial") else 1
+
+
+def cmd_candidates(args: argparse.Namespace) -> int:
+    config = _load(args)
+    state = StateStore(config.state_dir)
+    items = state.list_candidates() if args.all else state.open_candidates()
+    payload = {
+        "candidates": [
+            {
+                "id": c.id,
+                "status": c.status,
+                "skill_id": c.target.skill_id,
+                "canonical_path": c.target.canonical_path,
+                "gate_passed": bool((c.validation or {}).get("gate", {}).get("passed")),
+                "added_lines": c.patch.added_lines,
+                "removed_lines": c.patch.removed_lines,
+                "created_at": c.created_at,
+            }
+            for c in items
+        ]
+    }
+    lines = [
+        f"{c.id}  {c.status:<12} {c.target.skill_id:<28} "
+        f"gate={'pass' if (c.validation or {}).get('gate', {}).get('passed') else 'fail'} "
+        f"+{c.patch.added_lines}/-{c.patch.removed_lines}"
+        for c in items
+    ]
+    lines.append(f"{len(items)} candidate(s)")
+    _emit(payload, as_json=args.json, lines=lines)
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    from .app.promote import review_report
+
+    config = _load(args)
+    state = StateStore(config.state_dir)
+    candidate = state.read_candidate(args.candidate_id)
+    report = review_report(candidate)
+    if args.json:
+        sys.stdout.write(dumps(report))
+        return 0
+    out = [
+        f"candidate     {report['candidate_id']}  ({report['status']})",
+        f"skill         {report['skill_id']}",
+        f"file          {report['canonical_path']}",
+        f"base sha256   {report['base_sha256']}",
+        f"gate          {'PASS' if report['gate'].get('passed') else 'FAIL'}",
+    ]
+    for reason in report["gate"].get("reasons", []):
+        out.append(f"  gate reason: {reason}")
+    metrics = report["gate"].get("metrics", {})
+    if metrics:
+        out.append(
+            "  metrics: fixes={fixes} regressions={regressions} holdouts={holdout_cases} "
+            "judge_pref={judge_candidate_preference_ratio}".format(
+                fixes=metrics.get("fixes"),
+                regressions=metrics.get("regressions"),
+                holdout_cases=metrics.get("holdout_cases"),
+                judge_candidate_preference_ratio=metrics.get("judge_candidate_preference_ratio"),
+            )
+        )
+    out += [
+        "",
+        "HYPOTHESIS",
+        report["hypothesis"],
+        "",
+        "INTENDED CHANGE",
+        report["intended_change"],
+        "",
+        "RISKS",
+    ]
+    out += [f"  - {r}" for r in report["risks"]]
+    out += ["", "ROLLBACK", report["rollback"], ""]
+    if report["mirror_paths"]:
+        out.append("MIRROR COPIES (not written by apply):")
+        out += [f"  - {p}" for p in report["mirror_paths"]]
+        out.append("")
+    out += ["EVIDENCE (rubric failures this claims to fix)"]
+    for failure in report["rubric_failures"]:
+        refs = ", ".join(f"{e['element_id']}@{e['position']}" for e in failure["evidence"])
+        out.append(
+            f"  - {failure['criterion_id']} in conversation {failure['conversation_id']}"
+            + (f" [{refs}]" if refs else " [no evidence refs]")
+        )
+    out += ["", "DIFF", report["diff"] or "(empty)"]
+    for note in report["notes"]:
+        out.append(f"note: {note}")
+    out += [
+        "",
+        "To promote this change, review the diff above, then run:",
+        f"  {report['apply_command']}",
+        "",
+        "Nothing has been written to any skill file yet.",
+    ]
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    from .app.promote import apply_candidate
+
+    config = _load(args)
+    state = build_state(config)
+    candidate = state.read_candidate(args.candidate_id)
+    approval = HumanApproval.from_cli(
+        token=args.approve,
+        acknowledged=bool(args.i_reviewed_this),
+        operator=args.operator or os.environ.get("USER", ""),
+        note=args.note or "",
+    )
+    store = build_skill_store(config, writable=True)
+    result = apply_candidate(
+        candidate,
+        approval=approval,
+        skill_store=store,
+        state=state,
+        clock=SystemClock(),
+        operator=args.operator or os.environ.get("USER", ""),
+    )
+    if args.json:
+        sys.stdout.write(dumps(result))
+    else:
+        write = result["write"]
+        sys.stdout.write(
+            "\n".join(
+                [
+                    f"applied {result['candidate_id']} to {write['path']}",
+                    f"  previous sha256 {write['previous_sha256']}",
+                    f"  new sha256      {write['new_sha256']}",
+                    f"  backup          {write['backup_path']}",
+                    f"  rollback        asi rollback {result['candidate_id']}",
+                    f"  (or manually)   {write['rollback_command']}",
+                ]
+            )
+            + "\n"
+        )
+    return 0
+
+
+def cmd_rollback(args: argparse.Namespace) -> int:
+    from .app.promote import rollback_candidate
+
+    config = _load(args)
+    state = build_state(config)
+    candidate = state.read_candidate(args.candidate_id)
+    store = build_skill_store(config, writable=True)
+    result = rollback_candidate(candidate, skill_store=store, state=state, clock=SystemClock())
+    if args.json:
+        sys.stdout.write(dumps(result))
+    else:
+        sys.stdout.write(f"rolled back {result['candidate_id']}: {result['result']}\n")
+    return 0
+
+
+def cmd_scheduler_template(args: argparse.Namespace) -> int:
+    path = (
+        repo_root()
+        / "packaging"
+        / (
+            "launchd/com.local.agent-skill-improver.plist.template"
+            if args.flavor == "launchd"
+            else "cron/crontab.template"
+        )
+    )
+    if not path.is_file():
+        sys.stderr.write(f"template not found: {path}\n")
+        return 2
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("__REPO__", str(repo_root()))
+    text = text.replace("__PYTHON__", sys.executable)
+    text = text.replace("__CONFIG__", str(default_config_path()))
+    sys.stdout.write(text)
+    sys.stderr.write(
+        "\nThis template was printed, not installed. Nothing is scheduled. "
+        "Read docs/SCHEDULING.md before enabling it.\n"
+    )
+    return 0
+
+
+def _leading_statements_source(source: str, function: str, count: int) -> str:
+    """The first ``count`` executable statements of ``function``, as source text.
+
+    Parsed rather than read off the first few lines, because the docstring is a
+    statement to Python and is not one to a reader: a textual check would either
+    match the docstring or have to guess where it ends. The ordering matters here
+    and is not cosmetic -- an isolation check placed after the source is read has
+    already lost, so the invariant is "leading", not "present anywhere".
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover - source in this repo always parses
+        return ""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
+            body = list(node.body)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                body = body[1:]
+            return "\n".join(ast.unparse(stmt) for stmt in body[:count])
+    return ""
+
+
+def _sorted_prefix_slices(source: str) -> list[int]:
+    """Line numbers where a ``sorted(...)`` result is sliced, e.g. ``sorted(x)[:n]``.
+
+    Structural on purpose. The obvious implementation is a substring search for
+    the shape, and it produced a false positive against the module docstring that
+    DOCUMENTS the anti-pattern -- a checker that cannot tell an occurrence from an
+    explanation of an occurrence. Parsing instead means comments, docstrings and
+    prose can say the words freely while real code cannot use the construct.
+
+    Scope is stated rather than implied: this catches the direct form only. A
+    sorted list bound to a name and sliced later is not detected here, which is
+    what the round-robin tests in the suite are for.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover - source in this repo always parses
+        return []
+    hits: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Slice):
+            continue
+        value = node.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "sorted"
+        ):
+            hits.append(node.lineno)
+    return sorted(hits)
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    """Re-check the structural safety invariants on this checkout.
+
+    These are read off the source, not from a config file, because the point is
+    to catch a *code* change that quietly removed an interlock. The test suite
+    asserts the same things; this command exists so an operator can check a
+    deployed checkout without the tests.
+    """
+    checks: list[tuple[str, bool, str]] = []
+    daily_src = (package_dir() / "app" / "daily.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "daily does not import the promotion path",
+            not _module_imported(daily_src, "promote"),
+            "app/daily.py must not import app.promote; promotion is a human-only path",
+        )
+    )
+    checks.append(
+        (
+            "daily never calls the skill write method",
+            "write_canonical" not in _referenced_names(daily_src),
+            "app/daily.py must not call write_canonical (prose may name it; code may not)",
+        )
+    )
+    checks.append(
+        (
+            "daily refuses a writable skill store",
+            "refuses a writable skill store" in daily_src,
+            "run_daily must raise when handed a writable store",
+        )
+    )
+    store_src = (package_dir() / "adapters" / "skill_fs.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "skill store defaults to read-only",
+            "read_only: bool = True" in store_src,
+            "FilesystemSkillStore must default to read_only=True",
+        )
+    )
+    checks.append(
+        (
+            "only the skill document is writable",
+            "_assert_document" in store_src and "NonDocumentWriteRefused" in store_src,
+            "the write path must refuse any filename other than SKILL.md",
+        )
+    )
+    approval_src = (package_dir() / "domain" / "approval.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "approval refuses when the automation marker is set",
+            "AutomationRefused" in approval_src,
+            "HumanApproval.from_cli must refuse under automation",
+        )
+    )
+    selection_src = (package_dir() / "domain" / "selection.py").read_text(encoding="utf-8")
+    sliced = _sorted_prefix_slices(selection_src)
+    checks.append(
+        (
+            "selection never truncates a sorted list",
+            not sliced,
+            "bounding by a sorted prefix is a permanent filter, not a sample"
+            + (
+                f" (found at line{'s' if len(sliced) > 1 else ''} {', '.join(map(str, sliced))})"
+                if sliced
+                else ""
+            ),
+        )
+    )
+    scoring_src = (package_dir() / "domain" / "scoring.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "an unresolvable citation cannot yield a decided verdict",
+            "downgraded_from" in scoring_src and "does not resolve in conversation" in scoring_src,
+            "a FAIL whose evidence does not resolve must become INSUFFICIENT",
+        )
+    )
+    prompts_src = (package_dir() / "app" / "prompts.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "untrusted content is fenced and forged delimiters neutralized",
+            "wrap_untrusted" in prompts_src and "NEUTRALIZED" in prompts_src,
+            "captured content must be quoted as data, never spliced in as instruction",
+        )
+    )
+    # Behavioural rather than textual: the classification is called, so a rename
+    # or a widened set is caught, which grepping for a constant name would not be.
+    checks.append(
+        (
+            "only the synthetic fixture kind escapes confinement",
+            source_class(SOURCE_FIXTURES) == SOURCE_CLASS_SYNTHETIC
+            and source_class("conversation-cli") == SOURCE_CLASS_PRIVATE
+            and source_class("anything-added-later") == SOURCE_CLASS_PRIVATE,
+            "source classification must fail closed: unknown kinds are private",
+        )
+    )
+    checks.append(
+        (
+            "a private source with unconfined roles refuses",
+            not decide_isolation(
+                source_kind="conversation-cli",
+                runner_isolation={"mode": MODE_NONE, "verified": False},
+                roles=["scorer"],
+            ).satisfied,
+            "IsolationRequired must be raised before a private source is read",
+        )
+    )
+    daily_first = _leading_statements_source(daily_src, "run_daily", 2)
+    checks.append(
+        (
+            "the isolation check leads the daily pass",
+            "decide_isolation" in daily_first and ".require()" in daily_first,
+            "run_daily must decide and require isolation in its first two "
+            "statements, before the lock, the skill hash and any export",
+        )
+    )
+    checks.append(
+        (
+            "state directories are owner-only and artifacts are owner-read-write",
+            DIR_MODE == 0o700 and STATE_FILE_MODE == 0o600,
+            "state/ holds verbatim private transcripts; 0700 dirs and 0600 files",
+        )
+    )
+    pyproject = repo_root() / "pyproject.toml"
+    # Assembled from fragments so this file does not itself contain the banned
+    # classifier. tools/leakscan.py bans the literal in tracked content, and a
+    # checker that trips its own privacy gate gets excluded from that gate --
+    # which is exactly the fail-open hole worth avoiding here.
+    blocking_classifier = "Priv" + "ate :: Do " + "Not Upl" + "oad"
+    checks.append(
+        (
+            "package metadata carries no upload-blocking classifier",
+            (not pyproject.is_file())
+            or blocking_classifier not in pyproject.read_text(encoding="utf-8"),
+            "the repository is public-ready and must not be marked unpublishable",
+        )
+    )
+    ok = all(passed for _, passed, _ in checks)
+    payload = {
+        "checks": [
+            {"name": name, "passed": passed, "requirement": requirement}
+            for name, passed, requirement in checks
+        ],
+        "passed": ok,
+    }
+    lines = [f"{'ok  ' if passed else 'FAIL'} {name}" for name, passed, _ in checks]
+    lines.append("selftest: " + ("passed" if ok else "FAILED"))
+    _emit(payload, as_json=args.json, lines=lines)
+    return 0 if ok else 1
+
+
+def _imported_modules(source: str) -> set[str]:
+    """Every module name this source actually imports, from the parse tree.
+
+    The first version of this scanned lines containing ``" import "`` and it was
+    wrong for an instructive reason: ``app/daily.py`` documents the interlock in
+    its own docstring ("this module does not import ... app.promote"), that
+    sentence contains the word ``import``, and the checker read the sentence as
+    evidence of the thing the sentence denies. Parsing removes the whole class:
+    prose may discuss any module, only real imports count.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover - source in this repo always parses
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            base = "." * node.level + (node.module or "")
+            names.add(base)
+            for alias in node.names:
+                names.add(
+                    f"{base}.{alias.name}" if base and not base.endswith(".") else base + alias.name
+                )
+    return names
+
+
+def _module_imported(source: str, leaf: str) -> bool:
+    """True when any import in ``source`` names ``leaf`` as a dotted component."""
+    return any(leaf in module.split(".") for module in _imported_modules(source))
+
+
+def _referenced_names(source: str) -> set[str]:
+    """Every identifier and attribute name used in code (not in comments or strings)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover
+        return set()
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            out.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            out.add(node.attr)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.keyword) and node.arg:
+            out.add(node.arg)
+    return out
+
+
+# -- parser --------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="asi",
+        description=(
+            "Safe, human-gated daily self-improvement loop for agent skills. "
+            "Automation scores, isolates, proposes and validates; only a human promotes."
+        ),
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"agent-skill-improver {__version__}"
+    )
+    config_help = (
+        f"path to config TOML (default: ${ENV_CONFIG}, else config/local.toml, "
+        "else config/example.config.toml)"
+    )
+    parser.add_argument("--config", help=config_help)
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # Accepted either before or after the subcommand. `default=SUPPRESS` is what
+    # makes that work: without it the subparser would write its own False over a
+    # value the user already supplied at the top level.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", help=config_help, default=argparse.SUPPRESS)
+    common.add_argument(
+        "--json", action="store_true", help="machine-readable output", default=argparse.SUPPRESS
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add(name: str, help_text: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=help_text, parents=[common])
+
+    add("doctor", "validate configuration and report what is wired").set_defaults(func=cmd_doctor)
+    add("skills", "skill inventory: canonical vs mirror, load warnings").set_defaults(
+        func=cmd_skills
+    )
+    add("rubrics", "show loaded rubrics").set_defaults(func=cmd_rubrics)
+
+    p_discover = add("discover", "list conversations the source would ingest")
+    p_discover.add_argument("--since", help="time window, e.g. 1d, 7d, 2026-08-01")
+    p_discover.add_argument("--limit", type=int)
+    p_discover.add_argument("--workspace")
+    p_discover.set_defaults(func=cmd_discover)
+
+    p_daily = add(
+        "daily",
+        "one daily pass: ingest, score, isolate, propose, validate (DRY RUN by default)",
+    )
+    p_daily.add_argument(
+        "--commit",
+        action="store_true",
+        help="persist candidates and the checkpoint. Still never writes a skill file.",
+    )
+    p_daily.add_argument("--day", help="run id / idempotence key, defaults to today (UTC)")
+    p_daily.add_argument("--seed", help="deterministic seed for nonces and blind judging")
+    p_daily.add_argument(
+        "--allow-missing-roles",
+        action="store_true",
+        help="do not fail fast when a model role is unconfigured (for partial runs)",
+    )
+    p_daily.set_defaults(func=cmd_daily)
+
+    p_candidates = add("candidates", "list candidate proposals")
+    p_candidates.add_argument("--all", action="store_true", help="include applied and rejected")
+    p_candidates.set_defaults(func=cmd_candidates)
+
+    p_review = add("review", "print a candidate's full argument, diff and approval token")
+    p_review.add_argument("candidate_id")
+    p_review.set_defaults(func=cmd_review)
+
+    p_apply = add("apply", "THE ONLY command that writes a skill file (human-gated)")
+    p_apply.add_argument("candidate_id")
+    p_apply.add_argument("--approve", help="approval token printed by `asi review`")
+    p_apply.add_argument(
+        "--i-reviewed-this",
+        action="store_true",
+        dest="i_reviewed_this",
+        help="explicit acknowledgement, recorded in the receipt",
+    )
+    p_apply.add_argument("--operator", help="who is promoting this")
+    p_apply.add_argument("--note", help="free-text note for the receipt")
+    p_apply.set_defaults(func=cmd_apply)
+
+    p_rollback = add("rollback", "restore an applied candidate from its backup")
+    p_rollback.add_argument("candidate_id")
+    p_rollback.set_defaults(func=cmd_rollback)
+
+    p_sched = add("scheduler-template", "print a launchd or cron template (installs nothing)")
+    p_sched.add_argument("flavor", choices=("launchd", "cron"))
+    p_sched.set_defaults(func=cmd_scheduler_template)
+
+    add("selftest", "re-check the structural safety invariants").set_defaults(func=cmd_selftest)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    if not hasattr(args, "json"):
+        args.json = False
+    if not hasattr(args, "config"):
+        args.config = None
+    try:
+        return int(args.func(args))
+    except AsiError as exc:
+        sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+        return 3
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"not found: {exc}\n")
+        return 4
+    except BrokenPipeError:  # pragma: no cover - piping into head/less
+        return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

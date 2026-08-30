@@ -1,0 +1,58 @@
+{
+  "elements": [
+    {
+      "createdAt": 1756000000000,
+      "id": "el-conv-human-0005-0000",
+      "kind": "context",
+      "position": 0,
+      "text": "workspace: alpha; profile: example",
+      "threadId": "conv-human-0005"
+    },
+    {
+      "author": "human",
+      "createdAt": 1756000001000,
+      "id": "el-conv-human-0005-0001",
+      "kind": "message",
+      "origin": "user",
+      "position": 1,
+      "role": "user",
+      "threadId": "conv-human-0005"
+    },
+    {
+      "content": "Why is this test flaky?",
+      "createdAt": 1756000002000,
+      "id": "el-conv-human-0005-0002",
+      "kind": "text",
+      "parentId": "el-conv-human-0005-0001",
+      "position": 2,
+      "threadId": "conv-human-0005"
+    },
+    {
+      "createdAt": 1756000003000,
+      "id": "el-conv-human-0005-0003",
+      "kind": "message",
+      "origin": "assistant",
+      "position": 3,
+      "role": "assistant",
+      "threadId": "conv-human-0005"
+    },
+    {
+      "content": "Looking into the ordering assumption now. [[DEFER]]",
+      "createdAt": 1756000004000,
+      "id": "el-conv-human-0005-0004",
+      "kind": "text",
+      "parentId": "el-conv-human-0005-0003",
+      "position": 4,
+      "threadId": "conv-human-0005"
+    }
+  ],
+  "thread": {
+    "agentName": "",
+    "createdAt": 1756000000000,
+    "id": "conv-human-0005",
+    "profileName": "example",
+    "title": "Investigate the flaky test",
+    "updatedAt": 1756000005000,
+    "workspacePath": "/workspaces/alpha"
+  }
+}

@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# PRIVACY-CRITICAL. Everything the loop ingests or produces lives under
+# state/ and is never tracked. Raw conversation exports contain private
+# content; see docs/PRIVACY_AND_THREAT_MODEL.md.
+# ---------------------------------------------------------------------------
+state/
+*.state/
+**/raw/
+**/quarantine/
+**/deferred/
+**/candidates/
+**/backups/
+**/receipts/
+
+# Secrets / local model wiring
+.env
+.env.*
+secrets.toml
+*.secret
+*.pem
+*.key
+
+# Local operator overrides (may name private paths)
+config/local.toml
+config/*.local.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+*.swp

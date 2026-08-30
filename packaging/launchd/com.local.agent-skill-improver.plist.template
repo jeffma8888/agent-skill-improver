@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for the daily pass. PRINTED, NEVER INSTALLED.
+
+  The scheduler-template command substitutes __REPO__, __PYTHON__ and __CONFIG__
+  and writes the result to stdout. Nothing is scheduled until you copy it into
+  your own LaunchAgents directory and run launchctl yourself. Read
+  docs/SCHEDULING.md first, in particular the part about what this job may and
+  may not do.
+
+  What this job runs: the daily driver in commit mode. That ingests, scores,
+  isolates, proposes and validates, and writes only under the gitignored state
+  directory. It can never modify a skill file: the driver refuses a writable
+  skill store, it does not import the promotion module at all, and it hashes the
+  skill tree before and after so a mutation from any source is visible in the
+  receipt.
+
+  Promotion is deliberately absent from this file. The apply command refuses to
+  run when the automation marker is set, and the daily driver always sets it.
+  Adding an apply step here does not work, and that is by design.
+
+  Note on XML: comments in a property list may not contain a double hyphen, so
+  flags are named in prose here rather than typed literally.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.agent-skill-improver</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>agent_skill_improver</string>
+    <string>--config</string>
+    <string>__CONFIG__</string>
+    <string>daily</string>
+    <string>--commit</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <!-- Once a day. StartCalendarInterval fires on a wall clock match, so a run
+       missed while the machine was asleep is simply skipped rather than queued.
+       That is the safer default here: the loop is idempotent per UTC day, so the
+       next day's run picks up where this one left off, and deferred records are
+       retried by design. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>17</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Both streams go to the gitignored state tree. They can contain excerpts of
+       private conversation content, so treat them exactly like state/raw/. -->
+  <key>StandardOutPath</key>
+  <string>__REPO__/state/daily.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/state/daily.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>

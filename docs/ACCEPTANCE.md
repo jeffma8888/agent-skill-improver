@@ -1,0 +1,255 @@
+# Acceptance: findings to implementation to test
+
+The design of this repository was set by a hostile architecture review whose
+brief was to find how a skill self-improvement loop produces "confident,
+well-documented, self-referential garbage". Its verdict was **build the scoring
+half, do not build the closed loop**.
+
+This document is the answer sheet. Every row names the finding, where the answer
+lives in the source, and the test that proves it. The test names are real: a
+test in `tests/test_acceptance_map.py` asserts that every test named here exists
+in the suite, so this table cannot rot into a list of claims about tests that
+were renamed or deleted.
+
+Read it as a *map*, not as evidence. The evidence is the test run.
+
+## The verdict, honoured directly
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| The improver must not write to a skill without a human merge | The daily path has no write capability at all: it takes a read-only skill store, and `apply` is a separate command | `app/daily.py`, `app/promote.py`, `adapters/skill_fs.py` | `test_a_writable_skill_store_is_refused_outright`, `test_the_daily_module_does_not_import_the_promotion_module` |
+| The improver must not be able to edit its own examiner | The rubric directory, the package source, the config and the state directory are all protected paths, derived in code, not read from configuration | `domain/skills.py`, `config.py` | `test_the_rubric_directory_is_protected`, `test_the_protected_set_is_not_taken_from_configuration`, `test_a_write_inside_a_protected_path_is_refused` |
+| No metric may count proposals, merges or "gaps closed" | The gate measures fixed cases, regressions, holdout preservation and judge preference. Proposal count is reported as a fact and is never a success criterion | `domain/validation.py`, `app/receipt.py` | `test_replaying_nothing_is_not_a_pass`, `test_the_policy_is_recorded_with_the_decision` |
+| No improvement claim without a holdout frozen before the proposal existed | The holdout is built from the passing cases at scoring time, before any candidate is generated; a gate with no holdout cannot pass | `domain/scoring.py`, `domain/validation.py` | `test_passing_cases_become_the_holdout_set`, `test_no_holdout_means_the_no_regression_claim_is_unsupported`, `test_a_holdout_degradation_is_not_treated_as_neutral` |
+
+## Corpus composition: the majority class is the machine
+
+The review measured 4,809 of 5,000 threads in a 30-day window carrying one
+orchestrator title (96.2%), leaving 191 human sessions. A judge pointed at "all
+conversations" scores machine traffic almost all of the time, and the scarce
+class is the valuable one.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| Selection must not let the majority class crowd out the minority | Selection is round-robin across authorship buckets, best-first inside a bucket, and reports its coverage | `domain/selection.py` | `test_round_robin_reaches_every_class_within_the_same_budget`, `test_a_thin_bucket_contributes_all_it_has_and_no_budget_is_wasted`, `test_bucket_coverage_reports_a_narrow_run_as_narrow` |
+| A ranked prefix is a filter, not a sample | A test demonstrates the failure directly: sorting the corpus and taking a prefix excludes the minority class entirely | `domain/selection.py` | `test_a_sorted_prefix_would_exclude_the_minority_class_entirely` |
+| A title-only guess must not be reported as authorship | Two vocabularies. Discovery may only say `orchestrated` or `not-agent-titled`; only a fetched transcript can say `human-authored`, and `unknown` is never folded into `human` | `domain/authorship.py` | `test_the_pre_fetch_vocabulary_does_not_contain_human`, `test_the_post_fetch_vocabulary_keeps_unknown_separate_from_human`, `test_no_user_turn_is_unknown_and_never_folded_into_human` |
+| Orchestrator markers differ between installations | The marker list is configuration, and matching is word-boundary aware so `redispatchered` is not a false hit for `dispatcher` | `domain/authorship.py`, `config.py` | `test_markers_are_configurable_because_one_orchestrator_is_not_all_of_them`, `test_marker_matching_respects_word_boundaries` |
+| An unclassifiable record must not be silently dropped | Unclassified items get their own bucket and still reach the gate | `domain/selection.py` | `test_an_unclassifiable_item_gets_its_own_bucket_rather_than_being_dropped` |
+
+## Discovery: the default page is 3.9% of one day
+
+The review measured a default page size of 10 against 256 threads in a day, and
+noted the most recently touched threads are disproportionately loop iterations.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A page must never be reported as a total | `DiscoveryPage` derives `is_total` from the relationship between the returned count and the requested limit; an exactly-full page is never a total | `domain/discovery.py` | `test_a_short_page_is_a_total`, `test_an_exactly_full_page_is_never_reported_as_a_total`, `test_the_truncation_flag_is_derived_not_supplied` |
+| The limit must be explicit, never left to a default | The source always renders its limit into the configured argv, including a limit of 1 | `adapters/conversation_cli.py` | `test_the_source_always_passes_its_limit_explicitly`, `test_a_limit_of_one_is_still_sent_rather_than_treated_as_falsey` |
+| A failed page must not read as an empty page | An error page carries no threads, is not a total, and is distinguishable from a successful empty page | `domain/discovery.py` | `test_an_error_page_is_not_a_total_and_carries_no_threads`, `test_an_error_page_is_distinct_from_an_empty_successful_page` |
+| Merging pages must not manufacture completeness | One truncated or failed page makes the whole merge non-total; every page is preserved for audit | `domain/discovery.py` | `test_one_truncated_page_makes_the_whole_merge_non_total`, `test_one_failed_page_makes_the_whole_merge_non_total`, `test_every_page_is_preserved_in_the_summary_for_audit` |
+| The operator must see the honesty flag, not just the JSON | `discover` prints whether the result is a page or the whole population | `cli.py` | `test_03_discover_is_honest_about_its_page`, `test_03c_the_human_readable_output_says_it_too` |
+
+## Evidence sufficiency: the interface is a summariser
+
+The review's fatal finding: through the supported interface the loop cannot
+observe which skill was loaded, which tools ran, what diff was produced, or
+whether anything exited non-zero. A rubric asking "did the agent use the skill
+correctly" asks a judge to infer an unobservable, and it will comply.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A verdict must be refusable, not just pass or fail | Three verdicts, and only two of them are decided. INSUFFICIENT is a first-class outcome | `domain/scoring.py` | `test_three_verdicts_are_distinct_and_only_two_are_decided` |
+| A claim with no resolvable citation must earn nothing | Every FAIL and every PASS must cite an element that resolves by id **and** position; anything else is downgraded to INSUFFICIENT with a reason | `domain/scoring.py`, `domain/conversation.py` | `test_fail_with_no_evidence_is_downgraded`, `test_fail_with_an_invented_element_id_is_downgraded`, `test_fail_with_the_right_id_but_wrong_position_is_downgraded`, `test_pass_is_held_to_the_same_standard_as_fail` |
+| An unmentioned criterion must not become a pass | Absence is INSUFFICIENT; an unknown criterion is recorded as extraneous rather than dropped | `domain/scoring.py` | `test_an_unmentioned_criterion_becomes_insufficient_never_pass`, `test_an_unknown_criterion_is_recorded_as_extraneous_not_dropped` |
+| Skill attribution must abstain when unobservable | Attribution is graded: an observed path in tool IO outranks a bare mention, a rubric prior is labelled a prior, and nothing observed yields an explicit unattributed marker | `domain/scoring.py` | `test_a_skill_path_in_tool_io_outranks_a_bare_mention`, `test_a_rubric_prior_alone_is_marked_as_a_prior_with_low_confidence`, `test_nothing_observed_and_no_prior_yields_an_explicit_unattributed_marker` |
+| Only decided failures may become work | Only FAIL becomes a failure case; INSUFFICIENT never does | `domain/failure.py` | `test_only_fail_becomes_a_failure_case`, `test_insufficient_never_becomes_a_failure_case` |
+| Downgrades must be visible in the receipt | Downgraded verdicts are counted and reported | `domain/scoring.py`, `app/receipt.py` | `test_downgraded_verdicts_are_countable_for_the_receipt` |
+| The transport truncates from the front | Normalisation records that it truncated and how many messages it kept, rather than silently scoring an opening | `domain/conversation.py` | `test_max_messages_truncates_and_says_so` |
+
+## One judge, one model family
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A judge from the same configuration as the improver is not independent | The gate refuses by default when the judge command is not independent of the improver command; the opt-out is explicit and recorded | `config.py`, `domain/validation.py` | `test_a_non_independent_judge_fails_the_gate_by_default`, `test_the_independence_requirement_can_be_switched_off_explicitly`, `test_independence_is_recorded_in_the_metrics_either_way` |
+| A cosmetic label must not manufacture independence | Independence is fingerprinted on the argument vector only. Free-text model labels are reported and never counted | `config.py` | `test_independence_is_recorded_in_the_metrics_either_way` |
+| Position must not be a signal to the judge | Arms are assigned blind from the run seed, both arms always appear exactly once, and the assignment varies across cases | `domain/validation.py` | `test_arms_are_assigned_from_the_seed_and_are_stable`, `test_both_arms_are_always_present_exactly_once`, `test_the_assignment_varies_across_cases_so_position_is_not_a_signal` |
+| A tie must not be scored as a win | Ties are excluded from the ratio; only ties means no decided judgements and no pass | `domain/validation.py` | `test_ties_are_excluded_from_the_ratio_rather_than_counted_as_wins`, `test_only_ties_means_no_decided_judgements_and_no_pass` |
+| A failing gate must report every reason | All reasons are collected, not just the first | `domain/validation.py` | `test_every_failing_reason_is_reported_not_just_the_first` |
+
+## Rubrics are configuration, and configuration is the examiner
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A rubric must be versioned and hashed | Each rubric carries a declared version and the hash of the file it was read from; an undeclared edit changes the hash | `domain/rubric.py` | `test_a_rubric_carries_its_declared_version`, `test_an_edit_changes_the_hash_even_when_the_version_does_not`, `test_the_hash_is_serialized_so_it_reaches_the_artifacts` |
+| A rubric must state when the answer is insufficient | Every criterion in every shipped rubric declares `insufficient_when` | `rubrics/*.toml` | `test_every_criterion_states_when_the_answer_is_insufficient` |
+| A missing rubric must be an error, not a silent skip | An enabled rubric that does not exist is a configuration error | `config.py` | `test_a_missing_enabled_rubric_is_a_configuration_error` |
+
+## Skills are code, not documents
+
+The review counted 15 executable payload files across the local skill tree,
+including a git-safety hook and loop launchers, and stated plainly that write
+access to skills is arbitrary code execution including write access to the
+guardrails.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| Only the document may ever be written | Any write whose target is not the skill document is refused, and the document check runs before the hash check | `adapters/skill_fs.py` | `test_only_the_skill_document_is_writable`, `test_the_document_check_runs_before_the_hash_check` |
+| Executable payloads must be surfaced, not ignored | The inventory reports payloads by extension and by executable bit, and rolls them up across copies | `domain/skills.py` | `test_a_shell_script_beside_a_skill_is_a_payload`, `test_the_executable_bit_counts_even_with_an_unremarkable_name`, `test_the_group_rolls_payloads_up_across_copies` |
+| Backslash and quoted filenames must not mangle path handling | Payload detection is done on real paths, never through a shell | `domain/skills.py` | `test_a_filename_containing_a_backslash_is_handled`, `test_a_filename_with_spaces_and_quotes_is_handled` |
+| A broken-frontmatter skill must not look successful | A `SKILL.md` with no opening delimiter loads with a reported warning instead of reading as empty | `domain/skills.py` | `test_a_missing_opening_delimiter_is_reported_not_ignored` |
+
+## Mirror topology: twelve names, two trees, no arbiter
+
+The review found twelve skill names existing as independent, diverged copies in
+two trees, mirror scripts forming a cycle with no arbiter, and a mirror that was
+1-of-23 installed while reporting success.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A write must never land in a mirror | Mirror targets are refused and the refusal names the canonical path | `domain/skills.py`, `adapters/skill_fs.py` | `test_a_mirror_copy_is_refused_with_the_canonical_path_named` |
+| The refusal must not be bypassable by path spelling | Comparison is on normalised, resolved paths, and an unrecognised target is refused rather than assumed safe | `domain/skills.py`, `adapters/skill_fs.py` | `test_a_mirror_reached_through_a_redundant_path_segment_is_still_refused`, `test_a_mirror_reached_through_a_symlinked_root_is_still_refused`, `test_an_unrecognised_skill_document_is_refused_not_assumed_safe` |
+| Divergence must be reported, not resolved silently | The inventory reports canonical-versus-mirror divergence and mirror-only skills | `domain/skills.py` | `test_divergence_between_canonical_and_mirror_is_reported`, `test_a_mirror_only_skill_has_no_canonical_copy` |
+| A relocated tree must not read as a mutation | The tree digest is keyed on the root id plus the path relative to that root | `adapters/skill_fs.py` | `test_relocating_a_root_does_not_look_like_a_skill_mutation`, `test_a_file_moving_between_roots_still_changes_the_digest` |
+
+## A whole-tree veto is a ratchet
+
+The review named a publication script whose single regex hit aborts every skill,
+and identified it as the same structural defect that cost twelve days elsewhere.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| One bad record must not veto a batch | Records are quarantined, deferred or refused individually; the rest of the batch still scores | `app/daily.py`, `app/state.py` | `test_malformed_records_are_quarantined_while_the_rest_are_scored`, `test_a_model_that_returns_garbage_quarantines_only_that_record` |
+| Unreachable is not a verdict | A source that cannot be reached defers rather than failing the run or quarantining anything | `app/daily.py` | `test_an_unreachable_source_defers_rather_than_failing_the_run` |
+| A refusal must name its reason and its stage | Every isolated record gets its own file carrying a reason and the stage that produced it | `app/state.py` | `test_each_quarantined_record_gets_its_own_file_with_a_reason`, `test_a_shape_defect_and_a_model_defect_are_recorded_at_different_stages` |
+| The three isolation states must stay distinct | Quarantine, defer and refuse are three states, and a deferred record can later clear | `app/state.py` | `test_quarantine_defer_and_refuse_are_three_distinct_states`, `test_a_deferred_record_can_be_cleared_when_it_later_succeeds` |
+| A leak scan must not stop at the first hit | The scanner reports every finding grouped by location and says so in its own output | `tools/leakscan.py` | `test_a_every_rule_is_two_sided`, `test_a_no_tracked_file_content_matches_any_rule` |
+| A backlog must stand the run down, not silently grow | When the backlog exceeds its bound the run stands down and discards nothing | `app/daily.py` | `test_a_backlog_stands_the_run_down_without_discarding_anything` |
+
+## Untrusted content is data
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| Conversation text must reach a model as quoted data | Content is wrapped in a nonce-delimited fence and the system prompt states the contract | `app/prompts.py` | `test_content_is_placed_inside_an_explicit_fence`, `test_the_scorer_states_the_contract`, `test_the_improver_states_the_contract`, `test_the_judge_states_the_contract` |
+| A forged delimiter must not end the fence | Forged opening and closing delimiters are neutralized, visibly, and the nonce cannot be replayed from inside the content | `app/prompts.py` | `test_a_forged_opening_delimiter_is_neutralized`, `test_a_forged_closing_delimiter_cannot_end_the_fence_early`, `test_the_nonce_cannot_be_replayed_from_inside_the_content`, `test_neutralization_is_visible_rather_than_silent` |
+| Hostile text must survive verbatim so it can be scored | The content is not scrubbed; it is fenced. What the agent did with it is the thing being graded | `app/prompts.py` | `test_hostile_instructions_survive_verbatim_as_data` |
+| The fence must not be the only defence | The prompt also forbids changing the output schema or the rubric, and a schema violation is refused downstream regardless | `app/prompts.py`, `domain/scoring.py` | `test_the_untrusted_rule_forbids_changing_the_output_schema`, `test_the_untrusted_rule_forbids_changing_the_rubric`, `test_a_fatal_contract_violation_raises` |
+| Malformed model output must be refused, not repaired | JSON is recovered from prose and fences, but an unbalanced object is refused rather than patched up | `jsonio.py` | `test_an_unbalanced_object_is_refused_rather_than_repaired`, `test_a_json_array_is_refused_because_the_contract_says_object` |
+
+## The lethal trifecta, removed mechanically
+
+Private conversation content is attacker-influenceable, the model roles are
+arbitrary child processes, and a child with the parent environment and an open
+socket is a finished exfiltration path. Fencing and redaction reduce the chance
+of cooperation; they do not remove the capability, so they are not counted here.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A private source must not be read at all unless the roles are confined | The isolation decision is the first statement of `run_daily`, before the lock, the skill hash and discovery, so no export happens on a misconfigured run | `domain/isolation.py`, `app/daily.py` | `test_a_private_source_with_unconfined_roles_refuses_before_the_source_is_touched`, `test_the_control_proceeds_and_the_source_is_actually_called`, `test_a_runner_that_cannot_describe_its_isolation_is_treated_as_unconfined` |
+| The exception must be mechanical, not a trust label | The requirement is derived from `[source].kind` alone; the `[source]` schema is closed, so an unrecognised key is a configuration error rather than a new opt-out, and an unknown kind classifies as private | `domain/isolation.py`, `config.py` | `test_the_fixture_corpus_runs_with_no_os_sandbox`, `test_the_exception_is_derived_from_the_source_kind_and_nowhere_else`, `test_an_unknown_source_kind_classifies_as_private`, `test_an_unknown_source_key_is_a_hard_configuration_error`, `test_the_control_shows_the_same_table_loads_without_the_label` |
+| A prompt fence must not be accepted as a boundary | The fence and the redactor both remain in place and neither changes the decision | `app/prompts.py`, `domain/isolation.py` | `test_a_fence_exists_and_still_does_not_satisfy_the_check`, `test_redaction_being_enabled_does_not_satisfy_it_either` |
+| An unsupported host must fail closed, not degrade | Detection is injectable and returns nothing when the mechanism is absent; a detected-but-unverified mechanism is refused too | `adapters/sandbox.py`, `app/wiring.py` | `test_a_host_with_no_mechanism_detects_nothing`, `test_linux_without_bubblewrap_detects_nothing`, `test_macos_without_sandbox_exec_detects_nothing`, `test_the_control_detects_the_mechanism_when_it_is_present`, `test_no_mechanism_means_the_decision_refuses_rather_than_degrades`, `test_a_detected_but_unverified_mechanism_is_also_refused` |
+| The confinement must be measured, not requested | A real child under the real OS sandbox is proved unable to open a socket to a listener this process owns, or to write outside its private directory, while an unsandboxed control does all three and a no-op wrapper fails verification | `adapters/sandbox.py` | `test_the_unsandboxed_control_can_do_all_three_things`, `test_the_sandbox_blocks_an_outbound_socket`, `test_the_sandbox_blocks_a_write_outside_the_private_directory`, `test_the_sandbox_still_allows_a_write_inside_the_private_directory`, `test_the_overall_verdict_is_ok_and_names_what_it_checked`, `test_verification_fails_when_the_wrapper_does_nothing` |
+| The generated profile must deny before it allows | The macOS profile is asserted to place the network and write denials before the single writable subpath, because a later rule wins; the bubblewrap argv is asserted to unshare the network and bind the root read-only | `adapters/sandbox.py` | `test_the_profile_denies_network_and_writes_then_allows_only_the_workdir`, `test_the_wrapper_passes_the_profile_inline_and_keeps_the_argv_intact`, `test_the_bubblewrap_wrapper_unshares_the_network_and_binds_root_read_only`, `test_the_no_op_isolation_returns_the_argv_unchanged` |
+| The child must not inherit the environment | The child gets an allowlist plus a per-call `HOME` and temp directory; credential, token and proxy names are absent, and a credential placed in a role's own env is refused rather than dropped quietly | `domain/isolation.py`, `adapters/model_command.py` | `test_no_credential_token_or_proxy_name_reaches_the_child`, `test_the_control_shows_the_child_env_is_not_simply_empty`, `test_home_and_tmpdir_point_at_the_per_call_directory_not_the_real_home`, `test_the_per_call_directory_is_owner_only_and_does_not_outlive_the_call`, `test_a_credential_placed_in_role_env_is_refused_not_silently_dropped`, `test_the_control_shows_a_harmless_role_env_value_is_accepted`, `test_a_missing_parent_path_falls_back_rather_than_producing_an_unusable_child`, `test_the_denied_substring_list_covers_the_obvious_conventions`, `test_an_ordinary_name_is_not_flagged` |
+| There must be no way to opt out for a private source | No flag, config key or environment variable relaxes the requirement, and the refusal says why a hosted model is not an alternative | `domain/isolation.py` | `test_no_opt_out_or_override_flag_exists_anywhere_in_the_package`, `test_the_control_finds_a_flag_that_really_does_exist`, `test_the_refusal_message_says_why_a_hosted_model_is_not_an_option` |
+| The mode must be auditable after the fact | The resolved mode is part of every command id and the decision is written into every receipt, including how many variables were dropped and without naming them | `adapters/model_command.py`, `app/receipt.py` | `test_the_mode_appears_in_every_command_id`, `test_an_os_sandbox_produces_a_different_command_id_for_the_same_argv`, `test_the_receipt_records_the_decision_including_the_dropped_variable_count`, `test_the_runner_reports_a_dropped_count_without_naming_the_variables` |
+| The probe must not become a second failure mode | Verification reports every outcome instead of raising, and targets a listener this process owns rather than a public address | `adapters/sandbox.py` | `test_the_probe_reports_every_outcome_instead_of_raising`, `test_the_probe_targets_a_listener_this_process_owns` |
+| An operator must be able to check a deployed tree without the suite | `asi selftest` re-derives the classification, the refusal, the statement ordering and the state modes from the deployed source, and the ordering check is proved to fail when the call is not leading | `cli.py` | `test_the_selftest_names_the_isolation_and_permission_invariants`, `test_every_selftest_check_passes_on_this_source`, `test_the_ordering_check_would_fail_if_the_call_were_not_leading` |
+
+## State holds verbatim private transcripts
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A permissive umask must not decide the mode | Every directory is created `0700` and every artifact written `0600`, set explicitly; the test runs under `umask(0)` and proves the umask really was permissive | `app/state.py`, `jsonio.py` | `test_the_state_root_is_0700_even_under_a_permissive_umask`, `test_every_declared_subdirectory_is_0700`, `test_the_readme_is_0600`, `test_the_umask_really_was_permissive_during_the_test`, `test_the_state_tree_declares_a_sandbox_subdirectory_and_it_is_owner_only` |
+| Raw exports and derived artifacts are equally sensitive | Raw exports, conversations, scorecards, failures, receipts, backups and the lock are all owner-only | `app/state.py`, `adapters/skill_fs.py`, `app/lock.py` | `test_a_raw_export_is_0600`, `test_conversations_scorecards_failures_and_receipts_are_all_0600`, `test_a_backup_directory_is_0700`, `test_the_run_lock_is_0600_even_when_it_already_existed_wider` |
+| The atomic writer must not widen a mode | The mode is applied to the temp file before the rename, so no window exists at a wider mode and nothing is left behind | `jsonio.py` | `test_the_atomic_writer_defaults_to_0600_and_not_to_the_umask`, `test_the_atomic_writer_honours_an_explicit_mode`, `test_write_json_also_lands_0600`, `test_no_temp_file_is_left_behind_at_a_wider_mode` |
+| An already-wide tree is the case a fresh-run check misses | `ensure()` creates, repairs and then verifies; a repair that cannot take effect is a refusal rather than a warning, and a symlink is skipped rather than followed | `app/state.py` | `test_a_pre_existing_world_readable_tree_is_detected`, `test_it_is_repaired_and_the_repair_is_reported`, `test_ensure_repairs_a_pre_existing_tree_rather_than_refusing_it`, `test_a_repair_that_cannot_take_effect_is_a_refusal_not_a_warning`, `test_the_control_shows_a_healthy_tree_does_not_refuse`, `test_a_symlink_in_the_tree_is_skipped_rather_than_followed` |
+
+## Promotion is the only write, and it is deliberately awkward
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| Applying needs a human, provably | Four independent interlocks: an approval token, a typed acknowledgement, a matching base hash, and no automation marker | `domain/approval.py`, `app/promote.py` | `test_08_apply_without_a_token_is_refused`, `test_09_apply_without_the_acknowledgement_is_refused`, `test_10_apply_with_a_wrong_token_is_refused`, `test_11_apply_under_the_automation_marker_is_refused`, `test_12_the_skill_file_is_still_untouched_after_four_refusals` |
+| An approval must not survive a change to what it approved | The token is a **deterministic review interlock, not a security boundary**: it is derived from the candidate id, the base hash and the patch hash with no secret, so anyone who can run this tool can derive one -- what it buys is that an approval cannot outlive an edit to the base or the patch | `domain/approval.py` | `test_the_token_is_bound_to_the_candidate_the_base_and_the_patch`, `test_changing_the_base_hash_invalidates_the_token`, `test_changing_the_patch_invalidates_the_token` |
+| A token must not be recoverable from the artifacts | The token is never written into the receipt | `app/promote.py` | `test_the_token_is_not_written_into_the_receipt` |
+| A stale base must be refused | If the file changed since the candidate was built, apply refuses even with a valid token | `app/promote.py` | `test_18_a_stale_base_is_refused_even_with_a_valid_token` |
+| Every apply must be reversible | A backup is written before the edit, `rollback` restores it, and the restored hash is verified against the recorded base | `app/promote.py`, `adapters/skill_fs.py` | `test_14_a_backup_exists_and_holds_the_previous_text`, `test_16_rollback_restores_the_original_file`, `test_17_the_restored_file_matches_the_recorded_base_hash` |
+| An automation marker must not be clobbered | A pre-existing marker value is restored rather than overwritten | `app/daily.py` | `test_a_pre_existing_marker_value_is_restored_not_clobbered` |
+
+## The daily path cannot mutate anything
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| Prove it structurally, not by inspection | An AST test asserts `app/daily.py` does not import the promotion module and never calls the write method | `app/daily.py` | `test_the_daily_module_does_not_import_the_promotion_module`, `test_the_daily_module_never_calls_the_write_method` |
+| Prove it observationally too | A full pass leaves the skill tree digest unchanged and no file content altered | `app/daily.py` | `test_the_skill_tree_digest_is_unchanged_by_a_full_pass`, `test_no_skill_file_content_changes_on_disk` |
+| A dry run must persist nothing | `daily` without `--commit` writes no state | `cli.py`, `app/daily.py` | `test_04_a_dry_run_persists_nothing` |
+
+## Repeat runs, locks and determinism
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A same-day re-run must not re-score | The day key is the idempotence key | `app/daily.py` | `test_re_running_the_same_day_does_not_re_score`, `test_a_different_day_is_processed_again` |
+| Two runs must not overlap | An exclusive lock is held for the pass and released even when the body raises | `app/lock.py` | `test_two_runs_cannot_hold_the_lock_at_once`, `test_the_lock_is_released_after_the_block`, `test_the_lock_is_released_even_when_the_body_raises` |
+| Output must be reproducible | Two identical runs produce identical receipts | `app/receipt.py` | `test_two_identical_runs_produce_identical_receipts` |
+
+## Public safety
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| No private content, ever | The scanner covers tracked content, tracked paths, full history and commit metadata; its banned literals are assembled from fragments so its own source is scanned like any other file | `tools/leakscan.py` | `test_a_no_tracked_file_content_matches_any_rule`, `test_b_no_tracked_path_names_a_private_artifact`, `test_c_history_contains_no_banned_literal` |
+| The scanner must be two-sided | Every rule fires on its own positive sample and stays silent on its negative one | `tools/leakscan.py` | `test_a_every_rule_is_two_sided`, `test_c_the_scanner_fires_on_a_planted_absolute_home_path`, `test_e_the_scanner_stays_silent_on_ordinary_prose` |
+| A word-boundary rule is fail-open for a name that appears inside identifiers | The product rule is bounded by letters rather than word characters, because an underscore is a word character and `\b` was silent on the module and filename spellings this tree actually used; the camel-case half is narrowed so it cannot fire on the AWS access-key-id prefix that really occurs here | `tools/leakscan.py` | `test_d2_the_scanner_fires_on_the_internal_agent_product_name`, `test_d3_the_product_rule_respects_word_boundaries`, `test_d3b_the_product_rule_fires_on_the_identifier_form`, `test_d3c_the_product_rule_stays_silent_on_the_aws_key_prefix` |
+| The whole-tree claim must be checkable by hand | A case-insensitive search over every tracked path and body returns zero occurrences of the product name and of the sampled title, using a pattern that is a strict superset of the word-boundary search a reviewer would run | `tools/leakscan.py` | `test_d6_no_tracked_content_names_the_internal_product_or_sampled_title`, `test_d7_that_search_really_would_find_something` |
+| No exemptions may accumulate quietly | The allowance mechanism exists, is printed in every report, and is empty | `tools/leakscan.py` | `test_f_allowances_are_empty` |
+| Fixtures must be synthetic and deterministic | The committed fixtures match their builder byte for byte, and no fixture matches any scanner rule | `examples/build_fixtures.py` | `test_a_committed_fixtures_match_the_builder_byte_for_byte`, `test_e_no_fixture_contains_a_banned_literal` |
+| A public flip must need no cleanup | MIT licensed, no unpublishable classifier, no absolute home paths, empty runtime dependencies, no remote configured | `pyproject.toml`, `LICENSE` | `test_a_no_unpublishable_classifier`, `test_e_no_absolute_home_path_in_packaging_or_config`, `test_c_runtime_dependencies_are_empty`, `test_a_no_remote_is_configured` |
+| Documented commands must be real | Every `asi` command line in the docs is parsed against the real argument parser | `cli.py` | `test_b_every_fenced_command_line_parses_completely`, `test_a_inline_flags_in_docs_are_real` |
+
+## The map is checked against the suite
+
+A table of claims about tests is not evidence, and it decays silently: a renamed
+test leaves the row reading exactly as it did when it was true. So the map is
+verified mechanically, and the verifier is two-sided, because a checker that
+found no references at all would also report that every reference resolved.
+
+| Finding | Answer | Where | Test |
+| --- | --- | --- | --- |
+| A documented test name may be stale | Every test name cited above is required to exist in the suite | `tests/test_acceptance_map.py` | `test_every_test_named_in_the_acceptance_map_exists_in_the_suite`, `test_the_map_references_enough_tests_that_this_check_is_not_vacuous` |
+| A cited name must identify one test | No test name may be declared by two modules, or a row points at two different things | `tests/test_acceptance_map.py` | `test_no_test_name_is_declared_by_two_modules` |
+| The map may cover only a corner of the suite | Every test module must be cited by at least one row | `tests/test_acceptance_map.py` | `test_every_test_module_in_the_suite_is_cited_by_the_map` |
+| A cited source path may not exist | Every backticked artifact in the map is resolved on disk, as a file, a glob or a directory | `tests/test_acceptance_map.py` | `test_every_artifact_named_in_the_acceptance_map_resolves`, `test_the_artifact_resolver_refuses_a_path_that_does_not_exist` |
+| The checker itself may be vacuous | The extractor has a positive control, a prose negative control, and a mutation control that plants a name which does not exist | `tests/test_acceptance_map.py` | `test_the_test_name_extractor_finds_names_that_are_there`, `test_the_test_name_extractor_collects_nothing_from_prose`, `test_a_cited_test_that_does_not_exist_is_reported_missing`, `test_a_cited_test_that_does_exist_is_not_reported_missing` |
+
+## Provenance of the review, and one correction to it
+
+The review that set this design was written against a proposal, not against a
+tree. One of its statements is therefore stale rather than wrong: it recorded
+that the repository did not exist at review time. It does now -- this repository
+is the answer to that review -- and every row above is a claim about code that
+is present here and a test that runs offline.
+
+Nothing else in the review is treated as stale. Its findings are the acceptance
+criteria, including the ones this repository answers by refusing to build the
+feature at all; those are listed in the closing section rather than dropped.
+
+## What this repository deliberately does not do
+
+Stated here because a missing feature is otherwise indistinguishable from an
+oversight.
+
+- **It does not apply anything on a schedule.** There is no code path from a
+  timer to a file write, and `packaging/` prints templates rather than
+  installing them.
+- **It does not edit rubrics.** Not on the daily path, not on the apply path.
+  Changing a rubric is a human edit to a protected file, on purpose.
+- **It does not score continuous quality.** The verdict space is three discrete
+  values, because a 0-to-1 score with no inter-rater reliability was one of the
+  review's named risks.
+- **It does not read raw tool-output logs**, which the review identified as the
+  only place the missing evidence exists and simultaneously as the least
+  curated, highest-sensitivity artifact on the machine. That trade is left to a
+  human decision rather than made silently by a daily job.
+- **It does not claim the mirror problem is solved.** It refuses to write into an
+  ambiguous tree and reports the divergence. Choosing a canonical source is a
+  human act.

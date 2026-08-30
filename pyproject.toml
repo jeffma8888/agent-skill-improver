@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-skill-improver"
+version = "0.1.0"
+description = "Safe, human-gated daily self-improvement loop for agent skills, grounded in a conversation CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["agents", "skills", "evaluation", "self-improvement"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+# Runtime dependencies are intentionally EMPTY. Everything uses the standard
+# library (tomllib, json, hashlib, subprocess, argparse, fcntl, difflib).
+dependencies = []
+
+[project.optional-dependencies]
+# Not required by the test suite. The suite is stdlib `unittest` and runs with
+# `python -m unittest discover -s tests`; these are the format and type gates.
+dev = ["black>=24", "mypy>=1.8"]
+
+[project.scripts]
+asi = "agent_skill_improver.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+# Part of the verification path: see BUILD_RECEIPT.md for the exact command and
+# its real exit code.
+python_version = "3.11"
+files = ["src"]
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+ignore_missing_imports = true

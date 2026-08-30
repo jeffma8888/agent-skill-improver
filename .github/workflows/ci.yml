@@ -1,0 +1,120 @@
+# Continuous integration for agent-skill-improver.
+#
+# The whole suite is offline by construction: the runtime has no third-party
+# dependencies, the model is a fake process, and the conversation source is a
+# directory of synthetic fixtures. So CI runs the same commands a contributor
+# runs locally, with no services, no secrets and no network access beyond the
+# checkout and the toolchain install.
+#
+# `fetch-depth: 0` is required, not cosmetic: the leak scanner reads the full
+# commit history and a shallow clone would let it report a clean history it had
+# never seen.
+#
+# On isolation: the example configuration uses `[source].kind = "fixtures"`, which
+# classifies as *synthetic*, so the model roles are allowed to run without an OS
+# sandbox and CI stays portable on a runner with no confinement mechanism. That
+# exception is derived from the source kind in code, not from a CI-only switch. The
+# policy half of the boundary (classification, refusal, environment scrubbing,
+# generated profile and argv shape) is pure and runs on every job; the half that
+# executes a real confined child skips when the host offers no mechanism, and the
+# step below prints which case the runner is in so a skip is visible rather than
+# being mistaken for a pass.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the package and the format and type gates
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Report whether this host has an OS sandbox mechanism
+        run: |
+          python - <<'PY'
+          from agent_skill_improver.adapters.sandbox import detect
+          mode = detect()
+          print(f"os sandbox mechanism: {mode or 'NONE -- real-confinement tests will skip'}")
+          PY
+
+      - name: Byte-compile every tracked source tree
+        run: python -m compileall -q src tests examples tools
+
+      - name: Test suite
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Format gate
+        run: black --check .
+
+      - name: Type gate
+        run: mypy
+
+      - name: Fixture drift check
+        run: python examples/build_fixtures.py --check
+
+      - name: Leak scanner, two-sided self-test
+        run: python tools/leakscan.py --selftest
+
+      - name: Leak scanner over tracked files, paths, history and commit metadata
+        run: python tools/leakscan.py .
+
+  end_to_end:
+    name: end-to-end daily run against fixtures and a fake model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Environment report
+        run: asi --config config/example.config.toml doctor
+
+      - name: Architectural self-test
+        run: asi --config config/example.config.toml selftest
+
+      - name: Daily pass, deterministic day and seed
+        run: asi --config config/example.config.toml daily --commit --day 2026-01-02 --seed ci-1
+
+      - name: The same day must be idempotent, not re-scored
+        run: asi --config config/example.config.toml daily --commit --day 2026-01-02 --seed ci-1
+
+      - name: No skill file may have been modified by the daily path
+        run: |
+          git diff --exit-code -- examples/skills examples/skills-mirror rubrics config

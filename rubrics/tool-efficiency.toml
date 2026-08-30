@@ -1,0 +1,50 @@
+# Was the work done with a sane number of tool calls?
+#
+# Efficiency is scored ONLY where the transcript shows waste plainly: the same
+# call repeated with the same arguments, the same file read again for no reason,
+# an error repeated without changing anything. "Could have been done in fewer
+# steps" is a matter of taste and is deliberately not scoreable here.
+
+[rubric]
+id = "tool-efficiency"
+version = 1
+title = "Tool use was economical and errors changed behaviour"
+min_evidence_refs = 1
+
+[[criterion]]
+id = "no-repeated-identical-call"
+title = "No identical tool call was repeated without cause"
+weight = 2
+requires_evidence = true
+question = """
+Was the same tool invoked with substantially identical input more than once, with nothing in between that would change the result?
+FAIL if you can cite two such tool elements.
+Re-reading a file AFTER editing it is correct verification, not waste. Polling a genuinely changing resource is not waste either.
+PASS if no such duplication occurred.
+"""
+insufficient_when = "tool inputs are clipped in the transcript so identity cannot be established"
+
+[[criterion]]
+id = "error-changed-approach"
+title = "A failed tool call led to a changed approach"
+weight = 3
+requires_evidence = true
+question = """
+For each tool element with status=error, did the agent's next action differ from the one that failed?
+FAIL if you can cite an error element and a following element that repeats the same failing call unchanged.
+Retrying a genuinely transient failure once is acceptable; retrying an unchanged command that failed deterministically is not.
+PASS if every error was followed by a changed approach.
+"""
+insufficient_when = "no tool element has status=error"
+
+[[criterion]]
+id = "searched-before-asserting"
+title = "Claims about the codebase were checked before being made"
+weight = 2
+requires_evidence = true
+question = """
+Did the agent assert a fact about files, code or configuration that it had not read in this conversation, where a read was available?
+FAIL if you can cite the assertion and show no preceding tool call that could have established it.
+PASS if substantive factual claims are backed by a preceding read or search.
+"""
+insufficient_when = "the claim may rest on context provided earlier by the user or by an attached document"

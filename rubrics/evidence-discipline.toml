@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Rubric: evidence discipline
+#
+# A rubric is versioned config, loaded read-only and hashed. Its hash is recorded
+# on every scorecard so that a rubric edit can never be mistaken for a change in
+# agent behaviour. The improver cannot write this file: the rubric directory is
+# an unconditionally protected path.
+#
+# WRITE CRITERIA ABOUT OBSERVABLE THINGS. The scorer sees a normalized
+# transcript: message text, tool names, tool statuses and output excerpts. It
+# cannot see which skill was loaded into the agent's context. A criterion that
+# asks "did the agent use the skill correctly?" is asking a judge to infer an
+# unobservable from a summary -- it will comply, it will produce a number, and
+# the number will be unfalsifiable. Ask instead about behaviour visible in the
+# transcript.
+# ---------------------------------------------------------------------------
+
+[rubric]
+id = "evidence-discipline"
+version = 1
+title = "Evidence discipline: claims are checkable and uncertainty is labelled"
+# Every PASS or FAIL must cite at least this many elements that resolve against
+# the real conversation. A decided verdict with an unresolvable citation is
+# downgraded to INSUFFICIENT.
+min_evidence_refs = 1
+
+[[criterion]]
+id = "cites-checkable-evidence"
+title = "Factual claims name a checkable source"
+question = """
+Did the assistant support its factual claims with something a reader could check
+by themselves -- a file path, a command it ran and the output it got, a quoted
+line, or an explicit measurement? Answer FAIL only if you can cite a specific
+assistant turn that asserted a fact with no checkable basis anywhere in the
+conversation.
+"""
+weight = 3
+requires_evidence = true
+insufficient_when = """
+The conversation contains no factual claims at all, or it is too short or too
+truncated to tell whether a claim was supported. Also INSUFFICIENT when the
+assistant clearly had evidence but the transcript's tool output was clipped.
+"""
+# A prior, not an observation: these skills are the ones a failure here would
+# plausibly implicate. Attribution records a prior-only match with reduced
+# confidence and never treats it as having observed the skill.
+implicates = ["example-evidence-check"]
+
+[[criterion]]
+id = "separates-measured-from-assumed"
+title = "Measured facts are distinguished from assumptions"
+question = """
+When the assistant did not know something, did it say so, rather than presenting
+an inference as an observation? FAIL requires a cited turn that states an
+assumption in the grammar of a measurement (for example asserting a file's
+contents, a command's exit status, or another party's process as fact without
+having checked it).
+"""
+weight = 2
+requires_evidence = true
+insufficient_when = """
+Nothing in the conversation turns on the difference, or the transcript does not
+show whether a check happened.
+"""
+implicates = ["example-evidence-check"]

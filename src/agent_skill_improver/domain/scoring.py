@@ -1,0 +1,253 @@
+"""Scorecard contract: parse a model's JSON, then *distrust* it correctly.
+
+Two rules carry the honesty of the whole loop and both live here:
+
+1. A ``FAIL`` whose cited evidence does not resolve against the conversation is
+   downgraded to ``INSUFFICIENT``. A confident accusation with a bad citation is
+   the single most dangerous output a scorer can produce, because everything
+   downstream (isolation, proposal, promotion) treats a FAIL as ground truth.
+2. Unknown criterion ids are recorded as *extraneous* rather than silently
+   dropped, and criteria the model never mentioned come back as INSUFFICIENT
+   rather than PASS. Silence is not a pass.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+from .. import SCHEMA_SCORECARD
+from .conversation import EvidenceRef, NormalizedConversation
+from .rubric import Rubric, Verdict
+
+MAX_RATIONALE_CHARS = 2000
+
+
+@dataclass(frozen=True)
+class CriterionScore:
+    criterion_id: str
+    verdict: Verdict
+    rationale: str
+    evidence: tuple[EvidenceRef, ...] = ()
+    confidence: float | None = None
+    # Set when the raw verdict was changed by a local rule (e.g. FAIL with
+    # unresolvable evidence -> INSUFFICIENT). Kept so the receipt can be honest
+    # about how many of the model's verdicts we refused to take at face value.
+    downgraded_from: Verdict | None = None
+    downgrade_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "criterion_id": self.criterion_id,
+            "verdict": self.verdict.value,
+            "rationale": self.rationale,
+            "evidence": [e.to_dict() for e in self.evidence],
+            "confidence": self.confidence,
+            "downgraded_from": self.downgraded_from.value if self.downgraded_from else None,
+            "downgrade_reason": self.downgrade_reason,
+        }
+
+
+@dataclass(frozen=True)
+class ScoreCard:
+    conversation_id: str
+    rubric_id: str
+    rubric_version: int
+    rubric_sha256: str
+    scores: tuple[CriterionScore, ...]
+    scorer_role: str = "scorer"
+    scorer_command_id: str = ""
+    extraneous_criterion_ids: tuple[str, ...] = ()
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def score_for(self, criterion_id: str) -> CriterionScore | None:
+        for s in self.scores:
+            if s.criterion_id == criterion_id:
+                return s
+        return None
+
+    @property
+    def failures(self) -> tuple[CriterionScore, ...]:
+        return tuple(s for s in self.scores if s.verdict is Verdict.FAIL)
+
+    @property
+    def passes(self) -> tuple[CriterionScore, ...]:
+        return tuple(s for s in self.scores if s.verdict is Verdict.PASS)
+
+    @property
+    def insufficient(self) -> tuple[CriterionScore, ...]:
+        return tuple(s for s in self.scores if s.verdict is Verdict.INSUFFICIENT)
+
+    @property
+    def downgraded(self) -> tuple[CriterionScore, ...]:
+        return tuple(s for s in self.scores if s.downgraded_from is not None)
+
+    def weighted_fail_score(self, rubric: Rubric) -> int:
+        """Sum of weights of decided failures. INSUFFICIENT contributes zero."""
+        total = 0
+        for s in self.failures:
+            crit = rubric.criterion(s.criterion_id)
+            total += crit.weight if crit else 1
+        return total
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": SCHEMA_SCORECARD,
+            "conversation_id": self.conversation_id,
+            "rubric_id": self.rubric_id,
+            "rubric_version": self.rubric_version,
+            "rubric_sha256": self.rubric_sha256,
+            "scorer_role": self.scorer_role,
+            "scorer_command_id": self.scorer_command_id,
+            "extraneous_criterion_ids": list(self.extraneous_criterion_ids),
+            "notes": list(self.notes),
+            "scores": [s.to_dict() for s in self.scores],
+        }
+
+
+def parse_scorecard(
+    payload: Any,
+    *,
+    rubric: Rubric,
+    conversation: NormalizedConversation,
+    scorer_command_id: str = "",
+) -> ScoreCard:
+    """Turn raw model JSON into a :class:`ScoreCard`, applying trust rules.
+
+    Raises ``ValueError`` when the payload violates the contract badly enough
+    that no verdict at all can be recovered (caller quarantines the record).
+    Individual bad criteria are *not* fatal -- they become INSUFFICIENT.
+    """
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"scorecard must be a JSON object, got {type(payload).__name__}")
+    schema = payload.get("schema")
+    if schema != SCHEMA_SCORECARD:
+        raise ValueError(f"scorecard schema must be {SCHEMA_SCORECARD!r}, got {schema!r}")
+    reported_id = payload.get("conversation_id")
+    if reported_id is not None and str(reported_id) != conversation.thread_id:
+        raise ValueError(
+            "scorecard conversation_id does not match the record being scored "
+            f"({reported_id!r} != {conversation.thread_id!r})"
+        )
+    raw_items = payload.get("criteria")
+    if not isinstance(raw_items, list):
+        raise ValueError("scorecard needs a 'criteria' array")
+
+    known = set(rubric.criterion_ids)
+    seen: dict[str, CriterionScore] = {}
+    extraneous: list[str] = []
+    notes: list[str] = []
+
+    for idx, item in enumerate(raw_items):
+        if not isinstance(item, Mapping):
+            notes.append(f"criteria[{idx}] is not an object; ignored")
+            continue
+        cid = item.get("criterion_id")
+        if not isinstance(cid, str) or not cid.strip():
+            notes.append(f"criteria[{idx}] has no criterion_id; ignored")
+            continue
+        if cid not in known:
+            extraneous.append(cid)
+            notes.append(f"criterion {cid!r} is not in rubric {rubric.id}; ignored")
+            continue
+        if cid in seen:
+            notes.append(f"criterion {cid!r} scored more than once; first verdict kept")
+            continue
+        seen[cid] = _build_score(item, rubric=rubric, conversation=conversation, notes=notes)
+
+    # Criteria the model never mentioned are INSUFFICIENT, never PASS.
+    for cid in rubric.criterion_ids:
+        if cid not in seen:
+            seen[cid] = CriterionScore(
+                criterion_id=cid,
+                verdict=Verdict.INSUFFICIENT,
+                rationale="",
+                downgrade_reason="criterion absent from scorer output",
+            )
+            notes.append(f"criterion {cid!r} absent from scorer output; recorded INSUFFICIENT")
+
+    ordered = tuple(seen[cid] for cid in rubric.criterion_ids)
+    return ScoreCard(
+        conversation_id=conversation.thread_id,
+        rubric_id=rubric.id,
+        rubric_version=rubric.version,
+        rubric_sha256=rubric.source_sha256,
+        scores=ordered,
+        scorer_command_id=scorer_command_id,
+        extraneous_criterion_ids=tuple(sorted(set(extraneous))),
+        notes=tuple(notes),
+    )
+
+
+def _build_score(
+    item: Mapping[str, Any],
+    *,
+    rubric: Rubric,
+    conversation: NormalizedConversation,
+    notes: list[str],
+) -> CriterionScore:
+    cid = str(item["criterion_id"])
+    criterion = rubric.criterion(cid)
+    assert criterion is not None  # guarded by caller
+
+    try:
+        verdict = Verdict.parse(item.get("verdict"))
+    except ValueError as exc:
+        notes.append(f"criterion {cid}: {exc}; recorded INSUFFICIENT")
+        return CriterionScore(
+            criterion_id=cid,
+            verdict=Verdict.INSUFFICIENT,
+            rationale=_clip(item.get("rationale")),
+            downgrade_reason=f"unparseable verdict: {exc}",
+        )
+
+    refs: list[EvidenceRef] = []
+    bad_refs: list[str] = []
+    for raw_ref in item.get("evidence", []) or []:
+        try:
+            refs.append(EvidenceRef.from_dict(raw_ref))
+        except ValueError as exc:
+            bad_refs.append(str(exc))
+
+    unresolved = conversation.unresolved(refs)
+    confidence = item.get("confidence")
+    conf = float(confidence) if isinstance(confidence, (int, float)) else None
+    rationale = _clip(item.get("rationale"))
+
+    # Trust rule: a decided verdict needs resolvable evidence when the
+    # criterion demands it. Otherwise it is INSUFFICIENT, not FAIL.
+    if verdict.is_decided and criterion.requires_evidence:
+        reason = ""
+        if bad_refs:
+            reason = f"malformed evidence refs: {'; '.join(bad_refs)}"
+        elif len(refs) < max(rubric.min_evidence_refs, 1):
+            reason = f"needs >= {max(rubric.min_evidence_refs, 1)} evidence ref(s), got {len(refs)}"
+        elif unresolved:
+            shown = ", ".join(f"{r.element_id}@{r.position}" for r in unresolved[:3])
+            reason = f"evidence does not resolve in conversation: {shown}"
+        if reason:
+            notes.append(f"criterion {cid}: {verdict.value} downgraded to INSUFFICIENT ({reason})")
+            return CriterionScore(
+                criterion_id=cid,
+                verdict=Verdict.INSUFFICIENT,
+                rationale=rationale,
+                evidence=tuple(refs),
+                confidence=conf,
+                downgraded_from=verdict,
+                downgrade_reason=reason,
+            )
+
+    return CriterionScore(
+        criterion_id=cid,
+        verdict=verdict,
+        rationale=rationale,
+        evidence=tuple(refs),
+        confidence=conf,
+    )
+
+
+def _clip(value: Any) -> str:
+    text = value if isinstance(value, str) else ""
+    if len(text) > MAX_RATIONALE_CHARS:
+        return text[:MAX_RATIONALE_CHARS] + " ...[clipped]"
+    return text

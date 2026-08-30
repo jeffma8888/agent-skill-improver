@@ -1,0 +1,74 @@
+{
+  "elements": [
+    {
+      "author": "operator",
+      "createdAt": 1700000000000,
+      "id": "1700000000001-11",
+      "kind": "message",
+      "origin": "user-input",
+      "position": 0,
+      "role": "user",
+      "threadId": "1700000000005-1"
+    },
+    {
+      "content": "Tail the build log.",
+      "createdAt": 1700000001000,
+      "id": "1700000000001-12",
+      "kind": "text",
+      "parentId": "1700000000001-11",
+      "position": 1,
+      "threadId": "1700000000005-1"
+    },
+    {
+      "createdAt": 1700000002000,
+      "id": "1700000000001-13",
+      "kind": "message",
+      "position": 2,
+      "role": "assistant",
+      "threadId": "1700000000005-1"
+    },
+    {
+      "artifacts": [],
+      "createdAt": 1700000003000,
+      "durationMs": 40,
+      "id": "1700000000001-14",
+      "input": "tail -f build.log",
+      "kind": "tool",
+      "name": "Bash",
+      "output": "",
+      "parentId": "1700000000001-13",
+      "position": 3,
+      "status": "running",
+      "threadId": "1700000000005-1"
+    },
+    {
+      "content": "Started tailing the log; it has not finished.",
+      "createdAt": 1700000004000,
+      "id": "1700000000001-15",
+      "kind": "text",
+      "parentId": "1700000000001-13",
+      "position": 4,
+      "threadId": "1700000000005-1"
+    }
+  ],
+  "thread": {
+    "accumulatedTelemetry": {},
+    "createdAt": 1700000000000,
+    "draft": "",
+    "folderId": null,
+    "id": "1700000000005-1",
+    "lastContextWindow": 200000,
+    "lastInputTokens": 4096,
+    "modelOverride": null,
+    "parentThreadId": null,
+    "pinned": false,
+    "position": 0,
+    "profileName": "default",
+    "source": "desktop",
+    "status": "idle",
+    "title": "Tail the build log",
+    "titleGenerated": true,
+    "updatedAt": 1700000900000,
+    "workspacePath": "/tmp/asi-fixture-workspace-d"
+  }
+}

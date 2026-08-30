@@ -1,0 +1,14 @@
+{
+  "elements": {
+    "oops": "this must be an array; the loop quarantines the record"
+  },
+  "thread": {
+    "agentName": "",
+    "createdAt": 1756000000000,
+    "id": "conv-broken-0001",
+    "profileName": "example",
+    "title": "Malformed export fixture",
+    "updatedAt": 1756000000000,
+    "workspacePath": "/workspaces/alpha"
+  }
+}
