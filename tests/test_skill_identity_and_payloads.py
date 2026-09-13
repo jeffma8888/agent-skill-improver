@@ -285,6 +285,13 @@ class WritePathRefusalTests(Harness):
             "the backup must hold the PREVIOUS text, or rollback restores the change",
         )
         self.assertTrue(payload["rollback_command"], "the receipt must say how to undo itself")
+        import shlex
+
+        self.assertEqual(
+            shlex.split(payload["rollback_command"]),
+            ["cp", payload["backup_path"], payload["path"]],
+            "the copy-paste rollback command must preserve paths with spaces or shell syntax as argv",
+        )
         self.assertNotEqual(payload["previous_sha256"], payload["new_sha256"])
 
     def test_a_traversal_style_target_is_still_refused_on_its_filename(self):

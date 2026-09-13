@@ -59,7 +59,7 @@ def build_source(config: Config, state: StateStore) -> Any:
         workspace_argv=config.source.workspace_argv,
         export_argv=config.source.export_argv,
         timeout_seconds=config.source.timeout_seconds,
-        raw_dir=(state.dir("raw") if config.source.keep_raw else None),
+        raw_store=(state if config.source.keep_raw else None),
         output_excerpt_chars=config.source.output_excerpt_chars,
         max_messages=config.source.max_messages,
     )

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -37,6 +38,17 @@ CHALLENGE_DOMAIN = "asi-challenge:v1"
 APPROVAL_DOMAIN = "asi-approve:v1"
 CHALLENGE_LEN = 24
 TOKEN_LEN = 16
+CANDIDATE_ID_RE = re.compile(r"CAND-[A-Za-z0-9][A-Za-z0-9._-]{0,198}\Z")
+
+
+def validate_candidate_id(candidate_id: str) -> str:
+    """Require a lossless path component that is also safe in displayed argv."""
+    if not CANDIDATE_ID_RE.fullmatch(candidate_id):
+        raise ValueError(
+            "candidate id must start with 'CAND-' and contain only ASCII letters, digits, "
+            "dot, underscore or hyphen (maximum 204 characters)"
+        )
+    return candidate_id
 
 
 @dataclass(frozen=True)
@@ -171,6 +183,9 @@ class Candidate:
     improver_command_id: str = ""
     validation: dict[str, Any] | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        validate_candidate_id(self.id)
 
     @property
     def recomputed_patch_sha256(self) -> str:

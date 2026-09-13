@@ -10,8 +10,11 @@ population nobody chose.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from agent_skill_improver.adapters.conversation_cli import ConversationCliSource
+from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.domain.discovery import (
     DiscoveredThread,
     DiscoveryPage,
@@ -126,6 +129,32 @@ class MergeTests(unittest.TestCase):
         merged, summary = merge_pages([])
         self.assertEqual(merged, [])
         self.assertTrue(summary["is_total"])
+
+
+class RawExportConfinementTests(unittest.TestCase):
+    class _Export(ConversationCliSource):
+        def __init__(self, raw: str, **kwargs):
+            super().__init__(**kwargs)
+            self.raw = raw
+
+        def _run(self, argv):  # type: ignore[override]
+            return self.raw
+
+    def test_a_discovered_thread_id_cannot_escape_the_state_raw_directory(self):
+        fixture = Path(__file__).parent / "fixtures" / "exports" / "compliant.json"
+        raw = fixture.read_text(encoding="utf-8")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            state = StateStore(root / "state")
+            state.ensure()
+            source = self._Export(raw, raw_store=state)
+
+            source.fetch("x/../../../outside")
+
+            self.assertFalse((root / "outside.json").exists())
+            written = list((root / "state" / "raw").glob("*.json"))
+            self.assertEqual(len(written), 1)
+            self.assertEqual(written[0].read_text(encoding="utf-8"), raw)
 
 
 class ExplicitLimitTests(unittest.TestCase):

@@ -32,6 +32,7 @@ alone kept the token valid and put unreviewed bytes into a skill file.
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
 
 from pathlib import Path
@@ -42,7 +43,6 @@ from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDA
 from ..domain.integrity import verify_full_integrity
 from ..errors import ApprovalRequired, AutomationRefused, BaseHashMismatch, GateFailed
 from ..hashing import sha256_text, short
-from ..jsonio import write_json
 from .state import StateStore
 
 APPLY_ENV_HINT = (
@@ -104,7 +104,9 @@ def review_report(
         "gate": gate,
         "notes": list(candidate.notes),
         "approval_token": token,
-        "apply_command": (f"asi apply {candidate.id} --approve {token} --i-reviewed-this"),
+        "apply_command": shlex.join(
+            ["asi", "apply", candidate.id, "--approve", token, "--i-reviewed-this"]
+        ),
     }
 
 
@@ -196,7 +198,7 @@ def apply_candidate(
         "gate": gate,
         "mirror_paths_not_written": list(candidate.target.mirror_paths),
     }
-    write_json(state.dir("receipts") / f"apply--{candidate.id}.json", out)
+    state.write_action_receipt("apply", candidate.id, out)
     return out
 
 
@@ -257,5 +259,5 @@ def rollback_candidate(
         "manifest": str(manifest),
         "result": result,
     }
-    write_json(state.dir("receipts") / f"rollback--{candidate.id}.json", out)
+    state.write_action_receipt("rollback", candidate.id, out)
     return out

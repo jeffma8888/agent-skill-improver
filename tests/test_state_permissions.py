@@ -115,6 +115,20 @@ class CreatedTreeIsOwnerOnlyTests(StateTreeHarness):
 
 
 class EveryArtifactIsOwnerOnlyTests(StateTreeHarness):
+    def test_distinct_external_ids_never_collide_on_one_state_leaf(self):
+        store = self.store()
+        store.ensure()
+        first = store.write_raw("a/b", "first")
+        second = store.write_raw("a_b", "second")
+        third = store.write_raw("a?b", "third")
+        fourth = store.write_raw("a:b", "fourth")
+
+        self.assertEqual(len({first, second, third, fourth}), 4)
+        self.assertEqual(first.read_text(encoding="utf-8"), "first")
+        self.assertEqual(second.read_text(encoding="utf-8"), "second")
+        self.assertEqual(third.read_text(encoding="utf-8"), "third")
+        self.assertEqual(fourth.read_text(encoding="utf-8"), "fourth")
+
     def test_a_raw_export_is_0600(self):
         """The most sensitive artifact this tool writes."""
         store = self.store()
@@ -141,7 +155,7 @@ class EveryArtifactIsOwnerOnlyTests(StateTreeHarness):
     def test_a_backup_directory_is_0700(self):
         store = self.store()
         store.ensure()
-        path = store.backup_dir_for("cand-1", "20260102-000000")
+        path = store.backup_dir_for("CAND-1", "20260102-000000")
         self.assertEqual(oct(mode_of(path)), oct(DIR_MODE))
 
     def test_the_atomic_writer_defaults_to_0600_and_not_to_the_umask(self):
@@ -362,9 +376,9 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         store = self.store()
         store.ensure()
         outside = self._outside_dir()
-        (self.root / "backups" / "cand-1--20260102-000000").symlink_to(outside)
+        (self.root / "backups" / "CAND-1--20260102-000000").symlink_to(outside)
         with self.assertRaises(SafetyRefusal) as ctx:
-            store.backup_dir_for("cand-1", "20260102-000000")
+            store.backup_dir_for("CAND-1", "20260102-000000")
         self.assertIn("real directory", str(ctx.exception))
         self._assert_outside_untouched(outside)
 
@@ -373,7 +387,7 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         0700 directory, directly beneath the mandatory ``backups`` directory."""
         store = self.store()
         store.ensure()
-        path = store.backup_dir_for("cand-1", "20260102-000000")
+        path = store.backup_dir_for("CAND-1", "20260102-000000")
         self.assertFalse(path.is_symlink())
         self.assertTrue(path.is_dir())
         self.assertEqual(path.parent, self.root / "backups")
@@ -385,8 +399,19 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         store.ensure()
         outside = self._outside_dir()
         write_json(outside / "backup.json", {"schema": "asi.backup.v1"})
-        (self.root / "backups" / "cand-1--20260102-000000").symlink_to(outside)
-        self.assertIsNone(store.latest_backup_manifest("cand-1"))
+        (self.root / "backups" / "CAND-1--20260102-000000").symlink_to(outside)
+        self.assertIsNone(store.latest_backup_manifest("CAND-1"))
+
+    def test_a_backup_manifest_leaf_symlink_is_not_selected(self):
+        store = self.store()
+        store.ensure()
+        outside = self.root.parent / "outside-manifest.json"
+        outside.write_text('{"schema": "asi.backup.v1"}\n', encoding="utf-8")
+        backup = store.backup_dir_for("CAND-1", "20260102-000000")
+        (backup / "backup.json").symlink_to(outside)
+
+        self.assertIsNone(store.latest_backup_manifest("CAND-1"))
+        self.assertEqual(outside.read_text(encoding="utf-8"), '{"schema": "asi.backup.v1"}\n')
 
     def test_the_control_shows_a_healthy_layout_reports_no_problems(self):
         store = self.store()

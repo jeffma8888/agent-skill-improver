@@ -42,6 +42,7 @@ and nothing is ever promoted again.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -57,9 +58,10 @@ from ..domain.candidate import (
     STATUS_ROLLED_BACK,
     STATUS_VALIDATED,
     Candidate,
+    validate_candidate_id,
 )
 from ..errors import SafetyRefusal, StateUnreadable
-from ..jsonio import FILE_MODE, read_json, write_json, write_text_atomic
+from ..jsonio import FILE_MODE, write_json, write_text_atomic
 
 #: Owner-only on the state root and every directory beneath it.
 DIR_MODE = 0o700
@@ -104,9 +106,15 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def safe_name(value: str) -> str:
-    """A filesystem-safe stem. Never empty, never traverses."""
+    """A readable filesystem-safe stem. Use ``keyed_name`` for exact IDs."""
     cleaned = _UNSAFE.sub("_", value).strip("._-")
     return cleaned or "unnamed"
+
+
+def keyed_name(value: str) -> str:
+    """A readable, collision-resistant stem for an exact untrusted identifier."""
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"{safe_name(value)[:96]}--{digest}"
 
 
 @dataclass(frozen=True)
@@ -275,18 +283,18 @@ class StateStore:
 
     # -- conversations / scorecards / failures ---------------------------
     def write_conversation(self, conversation_id: str, payload: dict[str, Any]) -> Path:
-        path = self.dir("conversations") / f"{safe_name(conversation_id)}.json"
+        path = self.dir("conversations") / f"{keyed_name(conversation_id)}.json"
         write_json(path, payload)
         return path
 
     def read_conversation(self, conversation_id: str) -> dict[str, Any] | None:
-        path = self.dir("conversations") / f"{safe_name(conversation_id)}.json"
-        return read_json(path) if path.is_file() else None
+        path = self.dir("conversations") / f"{keyed_name(conversation_id)}.json"
+        return _read_state_json(path) if path.is_file() else None
 
     def write_scorecard(
         self, conversation_id: str, rubric_id: str, payload: dict[str, Any]
     ) -> Path:
-        name = f"{safe_name(conversation_id)}--{safe_name(rubric_id)}.json"
+        name = f"{keyed_name(conversation_id)}--{keyed_name(rubric_id)}.json"
         path = self.dir("scorecards") / name
         write_json(path, payload)
         return path
@@ -294,20 +302,24 @@ class StateStore:
     def write_failures(
         self, conversation_id: str, rubric_id: str, payload: list[dict[str, Any]]
     ) -> Path:
-        name = f"{safe_name(conversation_id)}--{safe_name(rubric_id)}.json"
+        name = f"{keyed_name(conversation_id)}--{keyed_name(rubric_id)}.json"
         path = self.dir("failures") / name
         write_json(path, {"schema": "asi.failures.v1", "cases": payload})
         return path
 
     def write_raw(self, conversation_id: str, text: str) -> Path:
         """Persist a raw export. The most sensitive artifact this tool writes."""
-        path = self.dir("raw") / f"{safe_name(conversation_id)}.json"
+        path = self.dir("raw") / f"{keyed_name(conversation_id)}.json"
         write_text_atomic(path, text)
         return path
 
     # -- candidates ------------------------------------------------------
     def candidate_path(self, candidate_id: str) -> Path:
-        return self.dir("candidates") / f"{safe_name(candidate_id)}.json"
+        try:
+            validated = validate_candidate_id(candidate_id)
+        except ValueError as exc:
+            raise StateUnreadable(f"invalid candidate id {candidate_id!r}: {exc}") from exc
+        return self.dir("candidates") / f"{validated}.json"
 
     def write_candidate(self, candidate: Candidate) -> Path:
         path = self.candidate_path(candidate.id)
@@ -337,7 +349,7 @@ class StateStore:
                 f"declares id {candidate.id!r}. A candidate is reviewed and approved by id, so "
                 "a record that does not claim the id it was looked up by cannot be acted on."
             )
-        if path.name != f"{safe_name(candidate.id)}.json":
+        if path.name != f"{candidate.id}.json":
             raise StateUnreadable(
                 f"refusing to use {path} as candidate {candidate_id!r}: the record's id "
                 f"{candidate.id!r} does not derive this filename."
@@ -401,11 +413,11 @@ class StateStore:
         return path
 
     def defer(self, record_id: str, *, stage: str, reason: str) -> Path:
-        path = self.dir("deferred") / f"{safe_name(record_id)}.json"
+        path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
         attempts = 1
         if path.is_file():
             try:
-                attempts = int(read_json(path).get("attempts", 0)) + 1
+                attempts = int(_read_state_json(path).get("attempts", 0)) + 1
             except (ValueError, KeyError, TypeError):
                 attempts = 1
         write_json(
@@ -422,7 +434,7 @@ class StateStore:
         return path
 
     def clear_deferred(self, record_id: str) -> None:
-        path = self.dir("deferred") / f"{safe_name(record_id)}.json"
+        path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
         if path.is_file():
             path.unlink()
 
@@ -430,8 +442,8 @@ class StateStore:
         out: list[str] = []
         for path in sorted(self.dir("deferred").glob("*.json")):
             try:
-                out.append(str(read_json(path)["record_id"]))
-            except (ValueError, KeyError):
+                out.append(str(_read_state_json(path)["record_id"]))
+            except (ValueError, KeyError, StateUnreadable):
                 continue
         return out
 
@@ -453,7 +465,7 @@ class StateStore:
                 "candidates": [],
                 "completed": False,
             }
-        data = read_json(path)
+        data = _read_state_json(path)
         data.setdefault("records", {})
         data.setdefault("candidates", [])
         data.setdefault("runs", 0)
@@ -487,6 +499,13 @@ class StateStore:
         write_json(path, payload)
         return path
 
+    def write_action_receipt(self, action: str, candidate_id: str, payload: dict[str, Any]) -> Path:
+        if action not in ("apply", "rollback"):
+            raise SafetyRefusal(f"unknown candidate receipt action {action!r}")
+        path = self.dir("receipts") / f"{action}--{validate_candidate_id(candidate_id)}.json"
+        write_json(path, payload)
+        return path
+
     def backup_dir_for(self, candidate_id: str, stamp: str) -> Path:
         """A per-apply backup directory, created only as a direct child.
 
@@ -497,17 +516,19 @@ class StateStore:
         child before either happens.
         """
         return _ensure_child_dir(
-            self.dir("backups"), f"{safe_name(candidate_id)}--{safe_name(stamp)}", self.root
+            self.dir("backups"),
+            f"{validate_candidate_id(candidate_id)}--{safe_name(stamp)}",
+            self.root,
         )
 
     def latest_backup_manifest(self, candidate_id: str) -> Path | None:
-        prefix = f"{safe_name(candidate_id)}--"
+        prefix = f"{validate_candidate_id(candidate_id)}--"
         dirs = sorted(
             p for p in self.dir("backups").glob(prefix + "*") if p.is_dir() and not p.is_symlink()
         )
         for path in reversed(dirs):
             manifest = path / "backup.json"
-            if manifest.is_file():
+            if manifest.is_file() and not manifest.is_symlink():
                 return manifest
         return None
 
@@ -518,10 +539,36 @@ class StateStore:
         }
 
 
+def _read_state_json(path: Path) -> Any:
+    """Read one state leaf without ever following a precreated symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    if not getattr(os, "O_NOFOLLOW", 0) and path.is_symlink():
+        raise StateUnreadable(f"refusing to read state artifact {path}: the leaf is a symlink")
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if path.is_symlink():
+            raise StateUnreadable(
+                f"refusing to read state artifact {path}: the leaf is a symlink"
+            ) from exc
+        raise
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            import json
+
+            return json.load(handle)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 def _candidate_from_file(path: Path) -> Candidate:
     """Parse a candidate record, turning every read failure into one refusal."""
     try:
-        raw = read_json(path)
+        raw = _read_state_json(path)
     except (OSError, ValueError) as exc:
         raise StateUnreadable(
             f"refusing to use the candidate record {path}: it could not be read ({exc}). "

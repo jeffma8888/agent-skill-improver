@@ -42,7 +42,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from ..adapters.transcript_export import normalize_export
 from ..domain.conversation import NormalizedConversation
@@ -157,7 +157,7 @@ class ConversationCliSource:
         query_argv: Sequence[str] = DEFAULT_QUERY_ARGV,
         workspace_argv: Sequence[str] = DEFAULT_WORKSPACE_ARGV,
         timeout_seconds: int = 120,
-        raw_dir: Path | None = None,
+        raw_store: Any | None = None,
         max_export_bytes: int = 32 * 1024 * 1024,
         output_excerpt_chars: int = 2000,
         max_messages: int | None = None,
@@ -167,7 +167,7 @@ class ConversationCliSource:
         self.query_argv = tuple(query_argv)
         self.workspace_argv = tuple(workspace_argv)
         self.timeout_seconds = timeout_seconds
-        self.raw_dir = raw_dir
+        self.raw_store = raw_store
         self.max_export_bytes = max_export_bytes
         self.output_excerpt_chars = output_excerpt_chars
         self.max_messages = max_messages
@@ -246,13 +246,10 @@ class ConversationCliSource:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise RecordDefect(f"export for {thread_id} is not JSON: {exc}", record_id=thread_id)
-        if self.raw_dir is not None:
-            # Raw exports are private content. They land under the gitignored
-            # state tree, 0600, and never anywhere else.
-            from ..jsonio import write_text_atomic
-
-            self.raw_dir.mkdir(parents=True, exist_ok=True)
-            write_text_atomic(self.raw_dir / f"{thread_id}.json", raw)
+        if self.raw_store is not None:
+            # The discovered id is untrusted. StateStore owns both confinement
+            # and collision-safe leaf naming for this private artifact.
+            self.raw_store.write_raw(thread_id, raw)
         return normalize_export(
             payload,
             output_excerpt_chars=self.output_excerpt_chars,

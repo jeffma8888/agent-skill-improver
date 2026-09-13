@@ -19,6 +19,7 @@ Safety properties enforced here rather than by convention:
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 from dataclasses import dataclass
@@ -238,7 +239,7 @@ class FilesystemSkillStore:
                 f"(expected {new_sha[:12]}, found {written_sha[:12]}); original restored"
             )
         manifest_path = backup_dir / "backup.json"
-        rollback = f"cp {backup_path} {target}"
+        rollback = shlex.join(["cp", str(backup_path), str(target)])
         write_json(
             manifest_path,
             {

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -503,7 +504,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
                     f"  previous sha256 {write['previous_sha256']}",
                     f"  new sha256      {write['new_sha256']}",
                     f"  backup          {write['backup_path']}",
-                    f"  rollback        asi rollback {result['candidate_id']}",
+                    "  rollback        " + shlex.join(["asi", "rollback", result["candidate_id"]]),
                     f"  (or manually)   {write['rollback_command']}",
                 ]
             )

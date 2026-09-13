@@ -684,6 +684,17 @@ def build_candidate(
     return replace(candidate, validation=build_validation(candidate))
 
 
+class CandidateIdTests(unittest.TestCase):
+    def test_candidate_ids_are_one_lossless_shell_safe_path_component(self):
+        for bad in ("CAND-a/b", "CAND-a?b", "CAND-a:b", "CAND-x;touch-pwned", "..", "---"):
+            with self.subTest(candidate_id=bad):
+                with self.assertRaises(ValueError):
+                    build_candidate(candidate_id=bad)
+
+    def test_a_normal_generated_candidate_id_remains_valid(self):
+        self.assertEqual(build_candidate().id, "CAND-2026-02-01-01-tdd")
+
+
 class DerivedPatchFieldTests(unittest.TestCase):
     """One derived patch field per test, each with the clean control beside it."""
 
@@ -892,6 +903,15 @@ class CallSiteTests(unittest.TestCase):
         with self.assertRaises(CandidateTampered):
             review_report(self.tampered, base_text=BASE_TEXT)
 
+    def test_review_command_contains_no_shell_control_syntax_from_candidate_id(self):
+        report = review_report(self.clean, base_text=BASE_TEXT)
+        self.assertEqual(
+            report["apply_command"],
+            f"asi apply {self.clean.id} --approve {self.clean.required_approval_token} --i-reviewed-this",
+        )
+        for control in (";", "$", "`", "&&", "|", " "):
+            self.assertNotIn(control, self.clean.id)
+
     def test_apply_refuses_a_tampered_candidate_before_the_store_is_written(self):
         store = RecordingStore()
         with self.assertRaises(CandidateTampered):
@@ -994,6 +1014,21 @@ class StateReadTests(unittest.TestCase):
             self.state.read_candidate(self.candidate.id)
         self.assertIn("declares id", str(ctx.exception))
 
+    def test_a_candidate_leaf_symlink_is_refused_without_reading_its_target(self):
+        outside = self.state.root.parent / "outside-candidate.json"
+        outside.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
+        self.path.unlink()
+        self.path.symlink_to(outside)
+
+        with self.assertRaises(StateUnreadable) as ctx:
+            self.state.read_candidate(self.candidate.id)
+
+        self.assertIn("symlink", str(ctx.exception))
+        self.assertEqual(
+            outside.read_text(encoding="utf-8"),
+            json.dumps(self.candidate.to_dict(), sort_keys=True, indent=2) + "\n",
+        )
+
     def test_a_truncated_record_is_a_named_refusal_not_a_json_error(self):
         self.path.write_text('{"schema": "asi.candi', encoding="utf-8")
         with self.assertRaises(StateUnreadable) as ctx:
@@ -1018,6 +1053,11 @@ class StateReadTests(unittest.TestCase):
         with self.assertRaises(StateUnreadable) as ctx:
             self.state.read_candidate(self.candidate.id)
         self.assertIn("shape of a candidate", str(ctx.exception))
+
+    def test_an_unsafe_lookup_id_is_a_named_refusal_before_path_resolution(self):
+        with self.assertRaises(StateUnreadable) as ctx:
+            self.state.read_candidate("CAND-a/b")
+        self.assertIn("invalid candidate id", str(ctx.exception))
 
     def test_an_absent_candidate_is_still_a_file_not_found_rather_than_a_refusal(self):
         with self.assertRaises(FileNotFoundError):
