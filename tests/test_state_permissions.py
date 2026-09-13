@@ -525,6 +525,26 @@ class LockFileTests(StateTreeHarness):
         self.assertEqual(outside.read_text(encoding="utf-8"), "keep me\n")
         self.assertEqual(oct(mode_of(outside)), oct(0o644))
 
+    def test_a_lock_mode_that_cannot_be_tightened_refuses_before_truncation(self):
+        from unittest.mock import patch
+
+        from agent_skill_improver.app.lock import RunLock
+
+        store = self.store()
+        store.ensure()
+        path = store.dir("locks") / "daily.lock"
+        path.write_text("keep me\n", encoding="utf-8")
+        os.chmod(path, 0o666)
+
+        with patch("agent_skill_improver.app.lock.os.fchmod", return_value=None):
+            with self.assertRaises(SafetyRefusal) as ctx:
+                with RunLock(path):
+                    pass
+
+        self.assertIn("0600", str(ctx.exception))
+        self.assertEqual(path.read_text(encoding="utf-8"), "keep me\n")
+        self.assertEqual(oct(mode_of(path)), oct(0o666))
+
     def test_the_run_lock_is_0600_even_when_it_already_existed_wider(self):
         from agent_skill_improver.app.lock import RunLock
 

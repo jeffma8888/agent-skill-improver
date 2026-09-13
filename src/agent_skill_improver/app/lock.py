@@ -46,8 +46,17 @@ class RunLock:
         # exception in it is a thing somebody has to remember.
         try:
             os.fchmod(fd, 0o600)
-        except OSError:
-            pass
+            actual_mode = os.fstat(fd).st_mode & 0o777
+        except OSError as exc:
+            os.close(fd)
+            raise SafetyRefusal(
+                f"refusing to use {self.path} as a run lock: cannot enforce mode 0600 ({exc})"
+            ) from exc
+        if actual_mode != 0o600:
+            os.close(fd)
+            raise SafetyRefusal(
+                f"refusing to use {self.path} as a run lock: mode is {oct(actual_mode)}, want 0600"
+            )
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
