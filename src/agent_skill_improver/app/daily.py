@@ -528,7 +528,6 @@ def _propose_and_validate(
                 holdout_pairs=holdouts,
                 max_extra_holdout_conversations=config.caps.max_extra_holdout_conversations,
                 known_skill_ids=known_skill_ids,
-                judge_independent=config.judge_is_independent(),
             )
         except AsiError as exc:
             state.defer(skill_id, stage=STAGE_VALIDATE, reason=str(exc))

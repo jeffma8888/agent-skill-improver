@@ -23,10 +23,11 @@ decide is not a fix.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from .. import SCHEMA_JUDGEMENT
+from .. import SCHEMA_JUDGEMENT, SCHEMA_VALIDATION
 from .rubric import Verdict
 
 ARM_BASELINE = "baseline"
@@ -60,6 +61,12 @@ class ReplayOutcome:
     case: ReplayCase
     baseline: Verdict
     candidate: Verdict
+    #: The rubric that scored this exact case. Empty only for outcomes built
+    #: in-memory before persistence (e.g. legacy call sites/tests); a parsed
+    #: persisted record always carries a non-empty value, because a bare
+    #: top-level list of rubrics cannot say which one produced which outcome
+    #: when two rubrics grade overlapping criterion ids.
+    rubric_id: str = ""
 
     @property
     def fixed(self) -> bool:
@@ -81,6 +88,7 @@ class ReplayOutcome:
     def to_dict(self) -> dict[str, Any]:
         return {
             "case": self.case.to_dict(),
+            "rubric_id": self.rubric_id,
             "baseline": self.baseline.value,
             "candidate": self.candidate.value,
             "fixed": self.fixed,
@@ -261,3 +269,500 @@ def evaluate_gate(
         "degraded_case_keys": [o.case.key for o in degradations],
     }
     return GateDecision(passed=not reasons, reasons=tuple(reasons), metrics=metrics, policy=policy)
+
+
+# -- strict persisted-validation parsing and recomputation ----------------
+#
+# ``ValidationResult.to_dict()`` (in ``app/validate.py``) is the only writer of
+# this shape, but the record is a plain JSON file like a candidate, so every
+# field in it is *asserted* rather than proven once it is on disk. The schema
+# below (``asi.validation.v2``) binds the primitives a verifier needs in order
+# to recompute the gate from scratch rather than trust the stored decision:
+# the candidate identity and hashes it was run against, the seed that decided
+# blind arm assignment, the command that ran each role, and the rubric
+# versions and source hashes that defined "pass". Parsing is strict -- an
+# unknown key, a missing key, a wrong type, a duplicate case or a value that
+# contradicts another field is a refusal, not a best-effort read, because a
+# validation record a human never re-runs is exactly the kind of derived
+# artifact that drifted silently before (see ``domain.integrity``).
+
+
+def _expect_mapping(raw: Any, *, label: str) -> Mapping[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{label} must be a JSON object, got {type(raw).__name__}")
+    return raw
+
+
+def _expect_exact_keys(raw: Mapping[str, Any], expected: frozenset, *, label: str) -> None:
+    present = set(raw.keys())
+    missing = expected - present
+    unknown = present - expected
+    if missing:
+        raise ValueError(f"{label} is missing key(s): {', '.join(sorted(missing))}")
+    if unknown:
+        raise ValueError(f"{label} carries unknown key(s): {', '.join(sorted(unknown))}")
+
+
+def _expect_str(raw: Mapping[str, Any], key: str, *, label: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"{label}.{key} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _expect_bool(raw: Mapping[str, Any], key: str, *, label: str) -> bool:
+    value = raw.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{label}.{key} must be a boolean, got {type(value).__name__}")
+    return value
+
+
+def _expect_int(raw: Mapping[str, Any], key: str, *, label: str) -> int:
+    value = raw.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{label}.{key} must be an integer, got {type(value).__name__}")
+    return value
+
+
+def _expect_number(raw: Mapping[str, Any], key: str, *, label: str) -> float:
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label}.{key} must be a number, got {type(value).__name__}")
+    number = float(value)
+    if not math.isfinite(number):
+        # Python's own JSON decoder accepts the non-standard tokens NaN,
+        # Infinity and -Infinity by default. Neither the config loader nor this
+        # writer ever emits one, so one here is either a hand-edit or a decoder
+        # default nobody disabled -- either way, a non-finite policy value can
+        # make every downstream comparison (ratio thresholds, equality checks)
+        # behave unpredictably, so it is refused rather than propagated.
+        raise ValueError(f"{label}.{key} must be a finite number, got {value!r}")
+    return number
+
+
+def _expect_str_list(raw: Any, *, label: str) -> tuple[str, ...]:
+    if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+        raise ValueError(f"{label} must be a list of strings")
+    return tuple(raw)
+
+
+def _expect_nonempty_str(raw: Mapping[str, Any], key: str, *, label: str) -> str:
+    value = _expect_str(raw, key, label=label)
+    if not value.strip():
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    return value
+
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(c in _HEX_DIGITS for c in value)
+
+
+def _expect_sha256(raw: Mapping[str, Any], key: str, *, label: str) -> str:
+    value = _expect_str(raw, key, label=label)
+    if not _is_sha256_hex(value):
+        raise ValueError(
+            f"{label}.{key} must be a 64-character lowercase sha256 hex digest, got {value!r}"
+        )
+    return value
+
+
+_CASE_KEYS = frozenset({"conversation_id", "criterion_id", "kind", "key"})
+
+
+def _parse_case(raw: Any, *, label: str) -> ReplayCase:
+    raw = _expect_mapping(raw, label=label)
+    _expect_exact_keys(raw, _CASE_KEYS, label=label)
+    conversation_id = _expect_str(raw, "conversation_id", label=label)
+    criterion_id = _expect_str(raw, "criterion_id", label=label)
+    kind = _expect_str(raw, "kind", label=label)
+    if kind not in (CASE_TARGET, CASE_HOLDOUT):
+        raise ValueError(f"{label}.kind must be {CASE_TARGET!r} or {CASE_HOLDOUT!r}, got {kind!r}")
+    case = ReplayCase(conversation_id=conversation_id, criterion_id=criterion_id, kind=kind)
+    key = _expect_str(raw, "key", label=label)
+    if key != case.key:
+        raise ValueError(f"{label}.key is {key!r} but recomputes to {case.key!r}")
+    return case
+
+
+_OUTCOME_KEYS = frozenset(
+    {
+        "case",
+        "rubric_id",
+        "baseline",
+        "candidate",
+        "fixed",
+        "regressed",
+        "degraded",
+        "unresolved",
+    }
+)
+
+
+def _parse_outcome(raw: Any, *, index: int) -> ReplayOutcome:
+    label = f"outcomes[{index}]"
+    raw = _expect_mapping(raw, label=label)
+    _expect_exact_keys(raw, _OUTCOME_KEYS, label=label)
+    case = _parse_case(raw["case"], label=f"{label}.case")
+    rubric_id = _expect_nonempty_str(raw, "rubric_id", label=label)
+    try:
+        baseline = Verdict.parse(raw.get("baseline"))
+        candidate = Verdict.parse(raw.get("candidate"))
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
+    outcome = ReplayOutcome(case=case, baseline=baseline, candidate=candidate, rubric_id=rubric_id)
+    for flag in ("fixed", "regressed", "degraded", "unresolved"):
+        persisted = _expect_bool(raw, flag, label=label)
+        recomputed = getattr(outcome, flag)
+        if persisted != recomputed:
+            raise ValueError(
+                f"{label}.{flag} is {persisted!r} but baseline={baseline.value} "
+                f"candidate={candidate.value} recomputes {flag}={recomputed!r}"
+            )
+    return outcome
+
+
+_JUDGEMENT_KEYS = frozenset({"schema", "case", "preferred_label", "preferred_arm", "rationale"})
+
+
+def _parse_judgement(raw: Any, *, index: int, seed: str) -> Judgement:
+    label = f"judgements[{index}]"
+    raw = _expect_mapping(raw, label=label)
+    _expect_exact_keys(raw, _JUDGEMENT_KEYS, label=label)
+    schema = _expect_str(raw, "schema", label=label)
+    if schema != SCHEMA_JUDGEMENT:
+        raise ValueError(f"{label}.schema must be {SCHEMA_JUDGEMENT!r}, got {schema!r}")
+    case = _parse_case(raw["case"], label=f"{label}.case")
+    if case.kind != CASE_TARGET:
+        raise ValueError(
+            f"{label}.case.kind is {case.kind!r}: only target cases are ever judged, so a "
+            "judgement over a holdout case is a kind conflict, not a legitimate blind comparison"
+        )
+    preferred_label = _expect_str(raw, "preferred_label", label=label)
+    if preferred_label not in ("A", "B", "tie"):
+        raise ValueError(
+            f"{label}.preferred_label must be 'A', 'B' or 'tie', got {preferred_label!r}"
+        )
+    preferred_arm = _expect_str(raw, "preferred_arm", label=label)
+    rationale = _expect_str(raw, "rationale", label=label)
+    if preferred_label == "tie":
+        expected_arm = "tie"
+    else:
+        arms = blind_arms(case.key, seed)
+        expected_arm = arms[preferred_label]
+    if preferred_arm != expected_arm:
+        raise ValueError(
+            f"{label}.preferred_arm is {preferred_arm!r} but the blind mapping for seed "
+            f"{seed!r} and case {case.key!r} says label {preferred_label!r} is arm "
+            f"{expected_arm!r}: the arm was unblinded to a different answer than it was assigned"
+        )
+    return Judgement(
+        case=case, preferred_label=preferred_label, preferred_arm=preferred_arm, rationale=rationale
+    )
+
+
+_POLICY_KEYS = frozenset(
+    {
+        "min_fixes",
+        "max_regressions",
+        "max_holdout_degradations",
+        "min_holdout_cases",
+        "min_judge_preference_ratio",
+        "require_judge",
+        "require_independent_judge",
+    }
+)
+
+
+def _expect_nonneg_int(raw: Mapping[str, Any], key: str, *, label: str) -> int:
+    value = _expect_int(raw, key, label=label)
+    if value < 0:
+        raise ValueError(f"{label}.{key} must be >= 0, got {value}")
+    return value
+
+
+def parse_gate_policy(raw: Any, *, label: str = "gate.policy") -> GatePolicy:
+    """Parse a persisted policy with the same domain the config loader enforces.
+
+    ``config._load_gate`` refuses a negative count or a ratio outside ``[0, 1]``
+    at load time; a persisted policy that skipped those checks could recompute
+    a "passing" gate from nonsensical thresholds (a negative ``min_fixes`` is
+    satisfied by doing nothing), so the same bounds are enforced here.
+    """
+    raw = _expect_mapping(raw, label=label)
+    _expect_exact_keys(raw, _POLICY_KEYS, label=label)
+    ratio = _expect_number(raw, "min_judge_preference_ratio", label=label)
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(f"{label}.min_judge_preference_ratio must be in [0, 1], got {ratio}")
+    return GatePolicy(
+        min_fixes=_expect_nonneg_int(raw, "min_fixes", label=label),
+        max_regressions=_expect_nonneg_int(raw, "max_regressions", label=label),
+        max_holdout_degradations=_expect_nonneg_int(raw, "max_holdout_degradations", label=label),
+        min_holdout_cases=_expect_nonneg_int(raw, "min_holdout_cases", label=label),
+        min_judge_preference_ratio=ratio,
+        require_judge=_expect_bool(raw, "require_judge", label=label),
+        require_independent_judge=_expect_bool(raw, "require_independent_judge", label=label),
+    )
+
+
+_GATE_KEYS = frozenset({"passed", "reasons", "metrics", "policy"})
+
+
+def _strict_equal(a: Any, b: Any, *, path: str) -> list[str]:
+    """Deep equality that also refuses a type mismatch a loose ``==`` would miss.
+
+    ``True == 1`` and ``1 == 1.0`` are both true in Python; neither is a value a
+    JSON writer of this schema ever produces, and either would be a schema/type
+    tamper this function exists to catch.
+    """
+    if type(a) is not type(b):
+        return [f"{path}: type {type(a).__name__} != {type(b).__name__} ({a!r} vs {b!r})"]
+    if isinstance(a, dict):
+        problems = []
+        keys = set(a) | set(b)
+        for key in sorted(keys):
+            if key not in a or key not in b:
+                problems.append(f"{path}.{key}: present in one side only")
+                continue
+            problems.extend(_strict_equal(a[key], b[key], path=f"{path}.{key}"))
+        return problems
+    if isinstance(a, list):
+        if len(a) != len(b):
+            return [f"{path}: length {len(a)} != {len(b)}"]
+        problems = []
+        for i, (x, y) in enumerate(zip(a, b)):
+            problems.extend(_strict_equal(x, y, path=f"{path}[{i}]"))
+        return problems
+    if a != b:
+        return [f"{path}: {a!r} != {b!r}"]
+    return []
+
+
+_RUBRIC_BINDING_KEYS = frozenset({"rubric_id", "version", "source_sha256"})
+
+
+@dataclass(frozen=True)
+class RubricBinding:
+    rubric_id: str
+    version: int
+    source_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rubric_id": self.rubric_id,
+            "version": self.version,
+            "source_sha256": self.source_sha256,
+        }
+
+    @staticmethod
+    def from_mapping(raw: Any, *, index: int) -> "RubricBinding":
+        label = f"rubrics[{index}]"
+        raw = _expect_mapping(raw, label=label)
+        _expect_exact_keys(raw, _RUBRIC_BINDING_KEYS, label=label)
+        version = _expect_int(raw, "version", label=label)
+        if version < 1:
+            raise ValueError(f"{label}.version must be >= 1, got {version}")
+        return RubricBinding(
+            rubric_id=_expect_nonempty_str(raw, "rubric_id", label=label),
+            version=version,
+            source_sha256=_expect_sha256(raw, "source_sha256", label=label),
+        )
+
+
+_RECORD_KEYS = frozenset(
+    {
+        "schema",
+        "candidate_id",
+        "base_sha256",
+        "patch_sha256",
+        "seed",
+        "improver_command_id",
+        "scorer_command_id",
+        "judge_command_id",
+        "rubrics",
+        "outcomes",
+        "judgements",
+        "gate",
+        "model_calls",
+        "notes",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ValidationRecord:
+    """A persisted validation, parsed strictly and ready to recompute.
+
+    ``judge_independent`` is deliberately not a stored field here: it is
+    recomputed by the caller from ``judge_command_id`` and ``improver_command_id``
+    (see :func:`agent_skill_improver.domain.integrity.validation_mismatches`),
+    never read off a boolean the JSON file could assert on its own.
+    """
+
+    candidate_id: str
+    base_sha256: str
+    patch_sha256: str
+    seed: str
+    improver_command_id: str
+    scorer_command_id: str
+    judge_command_id: str
+    rubrics: tuple[RubricBinding, ...]
+    outcomes: tuple[ReplayOutcome, ...]
+    judgements: tuple[Judgement, ...]
+    policy: GatePolicy
+    gate_raw: Mapping[str, Any]
+    model_calls: int
+    notes: tuple[str, ...]
+
+    @staticmethod
+    def parse(raw: Any) -> "ValidationRecord":
+        raw = _expect_mapping(raw, label="validation")
+        _expect_exact_keys(raw, _RECORD_KEYS, label="validation")
+        schema = _expect_str(raw, "schema", label="validation")
+        if schema != SCHEMA_VALIDATION:
+            raise ValueError(f"validation.schema must be {SCHEMA_VALIDATION!r}, got {schema!r}")
+        gate_raw = _expect_mapping(raw["gate"], label="validation.gate")
+        _expect_exact_keys(gate_raw, _GATE_KEYS, label="validation.gate")
+        policy = parse_gate_policy(gate_raw["policy"], label="validation.gate.policy")
+        if not isinstance(gate_raw["reasons"], list) or any(
+            not isinstance(r, str) for r in gate_raw["reasons"]
+        ):
+            raise ValueError("validation.gate.reasons must be a list of strings")
+        if not isinstance(gate_raw["metrics"], Mapping):
+            raise ValueError("validation.gate.metrics must be a JSON object")
+        if not isinstance(gate_raw["passed"], bool):
+            raise ValueError("validation.gate.passed must be a boolean")
+
+        seed = _expect_nonempty_str(raw, "seed", label="validation")
+
+        rubrics_raw = raw["rubrics"]
+        if not isinstance(rubrics_raw, list):
+            raise ValueError("validation.rubrics must be a list")
+        rubrics = tuple(
+            RubricBinding.from_mapping(item, index=i) for i, item in enumerate(rubrics_raw)
+        )
+        seen_rubric_ids: set[str] = set()
+        for binding in rubrics:
+            if binding.rubric_id in seen_rubric_ids:
+                raise ValueError(
+                    f"validation.rubrics has a duplicate rubric_id {binding.rubric_id!r}"
+                )
+            seen_rubric_ids.add(binding.rubric_id)
+
+        outcomes_raw = raw["outcomes"]
+        if not isinstance(outcomes_raw, list):
+            raise ValueError("validation.outcomes must be a list")
+        outcomes = tuple(_parse_outcome(item, index=i) for i, item in enumerate(outcomes_raw))
+        seen_outcome_keys: set[str] = set()
+        for outcome in outcomes:
+            if outcome.case.key in seen_outcome_keys:
+                raise ValueError(f"validation.outcomes has a duplicate case {outcome.case.key!r}")
+            seen_outcome_keys.add(outcome.case.key)
+
+        # Rubric completeness: the top-level list must name exactly the rubrics
+        # the outcomes actually claim to have been scored against -- no
+        # omission (an outcome whose rubric is not bound at all) and no extra
+        # (a rubric nobody's outcome used, which cannot be checked for staleness
+        # against anything).
+        required_rubric_ids = {o.rubric_id for o in outcomes}
+        if required_rubric_ids != seen_rubric_ids:
+            missing = sorted(required_rubric_ids - seen_rubric_ids)
+            extra = sorted(seen_rubric_ids - required_rubric_ids)
+            detail = []
+            if missing:
+                detail.append(f"missing binding(s) for {missing}")
+            if extra:
+                detail.append(f"unused binding(s) for {extra}")
+            raise ValueError(
+                "validation.rubrics does not exactly match the rubric ids the outcomes claim to "
+                "have been scored against: " + "; ".join(detail)
+            )
+
+        judgements_raw = raw["judgements"]
+        if not isinstance(judgements_raw, list):
+            raise ValueError("validation.judgements must be a list")
+        judgements = tuple(
+            _parse_judgement(item, index=i, seed=seed) for i, item in enumerate(judgements_raw)
+        )
+        seen_judgement_keys: set[str] = set()
+        target_outcome_keys = {o.case.key for o in outcomes if o.case.kind == CASE_TARGET}
+        for judgement in judgements:
+            if judgement.case.key in seen_judgement_keys:
+                raise ValueError(
+                    f"validation.judgements has a duplicate case {judgement.case.key!r}"
+                )
+            seen_judgement_keys.add(judgement.case.key)
+            if judgement.case.key not in target_outcome_keys:
+                raise ValueError(
+                    f"validation.judgements references case {judgement.case.key!r}, which is not "
+                    "among this record's own target outcomes: a judgement must be about a case "
+                    "that was actually replayed as a target, not an absent or invented one"
+                )
+
+        model_calls = _expect_int(raw, "model_calls", label="validation")
+        if model_calls < 0:
+            raise ValueError(f"validation.model_calls must be >= 0, got {model_calls}")
+        distinct_scored_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
+        min_model_calls = 2 * len(distinct_scored_pairs) + len(judgements)
+        if model_calls < min_model_calls:
+            raise ValueError(
+                f"validation.model_calls is {model_calls}, but the recorded outcomes and "
+                f"judgements imply at least {min_model_calls} model call(s): {len(outcomes)} "
+                f"outcome(s) across {len(distinct_scored_pairs)} distinct (conversation, rubric) "
+                f"pair(s) need a baseline and a candidate call each, plus {len(judgements)} "
+                "recorded judgement(s). A lower count contradicts the recorded work."
+            )
+        notes = _expect_str_list(raw["notes"], label="validation.notes")
+
+        candidate_id = _expect_nonempty_str(raw, "candidate_id", label="validation")
+        base_sha256 = _expect_sha256(raw, "base_sha256", label="validation")
+        patch_sha256 = _expect_sha256(raw, "patch_sha256", label="validation")
+        improver_command_id = _expect_nonempty_str(raw, "improver_command_id", label="validation")
+        scorer_command_id = _expect_nonempty_str(raw, "scorer_command_id", label="validation")
+        judge_command_id = _expect_str(raw, "judge_command_id", label="validation")
+        if policy.require_judge:
+            if not judge_command_id.strip():
+                raise ValueError(
+                    "validation.judge_command_id must be non-empty when "
+                    "validation.gate.policy.require_judge is true: a judge that ran must be "
+                    "identified by the command that ran it"
+                )
+        elif judge_command_id.strip():
+            raise ValueError(
+                "validation.judge_command_id is set but "
+                "validation.gate.policy.require_judge is false: no judge command should be "
+                "bound when the policy never required one"
+            )
+        return ValidationRecord(
+            candidate_id=candidate_id,
+            base_sha256=base_sha256,
+            patch_sha256=patch_sha256,
+            seed=seed,
+            improver_command_id=improver_command_id,
+            scorer_command_id=scorer_command_id,
+            judge_command_id=judge_command_id,
+            rubrics=rubrics,
+            outcomes=outcomes,
+            judgements=judgements,
+            policy=policy,
+            gate_raw=gate_raw,
+            model_calls=model_calls,
+            notes=notes,
+        )
+
+    def recompute_gate_mismatches(self) -> list[str]:
+        """Recompute the gate from this record's own inputs and diff it byte-exact.
+
+        ``judge_independent`` is derived from the command ids on this record --
+        never from a stored boolean -- so a record whose judge and improver
+        commands are identical can never claim independence by asserting it.
+        """
+        judge_independent = bool(self.judge_command_id) and (
+            self.judge_command_id != self.improver_command_id
+        )
+        decision = evaluate_gate(
+            self.outcomes, self.judgements, self.policy, judge_independent=judge_independent
+        )
+        return _strict_equal(decision.to_dict(), dict(self.gate_raw), path="validation.gate")

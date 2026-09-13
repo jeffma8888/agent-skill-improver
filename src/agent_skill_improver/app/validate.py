@@ -17,7 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from ..config import ROLE_JUDGE, PromptConfig
+from .. import SCHEMA_VALIDATION
+from ..config import ROLE_JUDGE, ROLE_SCORER, PromptConfig
 from ..domain.candidate import Candidate
 from ..domain.conversation import NormalizedConversation
 from ..domain.integrity import verify_candidate_integrity
@@ -32,6 +33,7 @@ from ..domain.validation import (
     Judgement,
     ReplayCase,
     ReplayOutcome,
+    RubricBinding,
     blind_arms,
     evaluate_gate,
     parse_judgement,
@@ -44,6 +46,14 @@ from .pipeline import score_conversation
 
 @dataclass(frozen=True)
 class ValidationResult:
+    candidate_id: str
+    base_sha256: str
+    patch_sha256: str
+    seed: str
+    improver_command_id: str
+    scorer_command_id: str
+    judge_command_id: str
+    rubrics: tuple[RubricBinding, ...]
     outcomes: tuple[ReplayOutcome, ...]
     judgements: tuple[Judgement, ...]
     decision: GateDecision
@@ -52,7 +62,15 @@ class ValidationResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema": "asi.validation.v1",
+            "schema": SCHEMA_VALIDATION,
+            "candidate_id": self.candidate_id,
+            "base_sha256": self.base_sha256,
+            "patch_sha256": self.patch_sha256,
+            "seed": self.seed,
+            "improver_command_id": self.improver_command_id,
+            "scorer_command_id": self.scorer_command_id,
+            "judge_command_id": self.judge_command_id,
+            "rubrics": [r.to_dict() for r in self.rubrics],
             "gate": self.decision.to_dict(),
             "outcomes": [o.to_dict() for o in self.outcomes],
             "judgements": [j.to_dict() for j in self.judgements],
@@ -86,7 +104,6 @@ def validate_candidate(
     holdout_pairs: Sequence[tuple[str, str]] = (),
     max_extra_holdout_conversations: int = 3,
     known_skill_ids: Sequence[str] = (),
-    judge_independent: bool = True,
 ) -> ValidationResult:
     """Replay both arms, judge blind, and decide the gate.
 
@@ -94,11 +111,20 @@ def validate_candidate(
     candidate arm is scored with ``patch.new_text``, so a record whose stored hash,
     diff or challenge describes different text would produce a gate decision about
     one change and a token about another.
+
+    Judge independence is derived from the actual commands that ran the judge
+    and improver roles (``runner.command_id``), never from a caller-supplied
+    label comparison: the persisted validation binds these two command ids, and
+    a later verifier re-derives independence from them the same way.
     """
     verify_candidate_integrity(candidate, base_text=base_text, action="validate")
     notes: list[str] = []
     skill_id = candidate.target.skill_id
     new_text = candidate.patch.new_text
+    scorer_command_id = runner.command_id(ROLE_SCORER)
+    improver_command_id = candidate.improver_command_id
+    judge_command_id = runner.command_id(ROLE_JUDGE) if policy.require_judge else ""
+    judge_independent = bool(judge_command_id) and judge_command_id != improver_command_id
 
     targets: list[tuple[ReplayCase, str]] = []
     seen_keys: set[str] = set()
@@ -181,6 +207,7 @@ def validate_candidate(
                 case=case,
                 baseline=baseline[case.criterion_id],
                 candidate=proposed[case.criterion_id],
+                rubric_id=rubric_id,
             )
         )
 
@@ -228,7 +255,24 @@ def validate_candidate(
             "with the proposal and is not independent evidence"
         )
     decision = evaluate_gate(outcomes, judgements, policy, judge_independent=judge_independent)
+    used_rubric_ids = sorted({rid for _, rid in targets} | {rid for _, rid in holdouts})
+    rubric_bindings = tuple(
+        RubricBinding(
+            rubric_id=rid,
+            version=rubrics[rid].version,
+            source_sha256=rubrics[rid].source_sha256,
+        )
+        for rid in used_rubric_ids
+    )
     return ValidationResult(
+        candidate_id=candidate.id,
+        base_sha256=candidate.target.base_sha256,
+        patch_sha256=candidate.recomputed_patch_sha256,
+        seed=seed,
+        improver_command_id=improver_command_id,
+        scorer_command_id=scorer_command_id,
+        judge_command_id=judge_command_id,
+        rubrics=rubric_bindings,
         outcomes=tuple(outcomes),
         judgements=tuple(judgements),
         decision=decision,

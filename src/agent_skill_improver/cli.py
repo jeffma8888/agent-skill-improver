@@ -394,12 +394,21 @@ def cmd_candidates(args: argparse.Namespace) -> int:
 
 
 def cmd_review(args: argparse.Namespace) -> int:
-    from .app.promote import review_report
+    from .app.promote import read_live_base_text, review_report
 
     config = _load(args)
     state = StateStore(config.state_dir)
     candidate = state.read_candidate(args.candidate_id)
-    report = review_report(candidate)
+    # A review-only command still resolves the candidate against a real store:
+    # read-only, never writable, but reading the LIVE configured canonical
+    # snapshot rather than trusting anything the candidate record asserts about
+    # its own base. Without this, review can only check the record against
+    # itself, and a diff or its line counts edited to agree with each other but
+    # not with the file they claim to describe would still print a token.
+    store = build_skill_store(config, writable=False)
+    base_text = read_live_base_text(store, candidate)
+    rubrics = {r.id: r for r in config.rubrics}
+    report = review_report(candidate, base_text=base_text, rubrics=rubrics)
     if args.json:
         sys.stdout.write(dumps(report))
         return 0
@@ -473,6 +482,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         note=args.note or "",
     )
     store = build_skill_store(config, writable=True)
+    rubrics = {r.id: r for r in config.rubrics}
     result = apply_candidate(
         candidate,
         approval=approval,
@@ -480,6 +490,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         state=state,
         clock=SystemClock(),
         operator=args.operator or os.environ.get("USER", ""),
+        rubrics=rubrics,
     )
     if args.json:
         sys.stdout.write(dumps(result))
@@ -642,14 +653,14 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         )
     )
     promote_src = (package_dir() / "app" / "promote.py").read_text(encoding="utf-8")
-    verify_call = "verify_candidate_integrity(candidate"
+    verify_call = "verify_full_integrity(candidate"
     checks.append(
         (
             "apply recomputes the candidate's derived fields before it writes",
             verify_call in promote_src
             and "write_canonical" in promote_src
             and promote_src.index(verify_call) < promote_src.index("skill_store.write_canonical"),
-            "app/promote.py must call verify_candidate_integrity before write_canonical; a "
+            "app/promote.py must call verify_full_integrity before write_canonical; a "
             "token derived from a stored hash cannot bind the text a human reviewed",
         )
     )
@@ -752,6 +763,35 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             (not pyproject.is_file())
             or blocking_classifier not in pyproject.read_text(encoding="utf-8"),
             "the repository is public-ready and must not be marked unpublishable",
+        )
+    )
+    validation_src = (package_dir() / "domain" / "validation.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "review requires exact status validated",
+            "STATUS_VALIDATED" in promote_src
+            and "candidate.status != STATUS_VALIDATED" in promote_src,
+            "review_report must refuse any status other than exactly 'validated'; applied, "
+            "rolled-back and gate-failed candidates must never expose a token again",
+        )
+    )
+    checks.append(
+        (
+            "review resolves the live base before issuing a token",
+            "read_live_base_text" in promote_src
+            and "base_text" in promote_src.split("def review_report")[1].split("\n\n")[0],
+            "review_report must take the live canonical text as a parameter and check the "
+            "candidate against it, not just against itself",
+        )
+    )
+    checks.append(
+        (
+            "persisted validation is parsed strictly and recomputed",
+            "class ValidationRecord" in validation_src
+            and "recompute_gate_mismatches" in validation_src
+            and "judge_independent = bool(self.judge_command_id) and (" in validation_src,
+            "ValidationRecord.parse must refuse unknown/missing/wrong-type/duplicate data and "
+            "judge independence must be derived from command ids, never a stored boolean",
         )
     )
     ok = all(passed for _, passed, _ in checks)

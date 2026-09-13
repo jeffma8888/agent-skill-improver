@@ -14,6 +14,7 @@ SCHEMA_CANDIDATE = "asi.candidate.v1"
 SCHEMA_JUDGEMENT = "asi.judgement.v1"
 SCHEMA_RECEIPT = "asi.receipt.v1"
 SCHEMA_MODEL_REQUEST = "asi.model_request.v1"
+SCHEMA_VALIDATION = "asi.validation.v2"
 
 __all__ = [
     "__version__",
@@ -24,4 +25,5 @@ __all__ = [
     "SCHEMA_JUDGEMENT",
     "SCHEMA_RECEIPT",
     "SCHEMA_MODEL_REQUEST",
+    "SCHEMA_VALIDATION",
 ]

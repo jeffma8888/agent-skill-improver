@@ -9,10 +9,12 @@ The interlocks, in the order they fire:
 
 1. the automation marker must be absent (the daily driver always sets it);
 2. the candidate must have passed validation, with the gate decision recorded;
-3. every derived field must recompute to the value the record stores --
-   :func:`~agent_skill_improver.domain.integrity.verify_candidate_integrity`,
-   run before any backup or write, because the record is a plain file and a field
-   derived from another field can be edited to disagree with it;
+3. every derived field, and the persisted validation itself, must recompute to
+   the value the record stores --
+   :func:`~agent_skill_improver.domain.integrity.verify_full_integrity`, run
+   before any backup or write, because the record is a plain file and a field
+   derived from another field (or a validation derived from its own outcomes)
+   can be edited to disagree with what it is derived from;
 4. the on-disk hash must equal the base hash the candidate was written against,
    and the diff and its counts must recompute against that same live base;
 5. the approval token must match, and it is derived from the candidate id, the
@@ -37,7 +39,7 @@ from pathlib import Path
 from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
-from ..domain.integrity import verify_candidate_integrity
+from ..domain.integrity import verify_full_integrity
 from ..errors import ApprovalRequired, AutomationRefused, BaseHashMismatch, GateFailed
 from ..hashing import sha256_text, short
 from ..jsonio import write_json
@@ -49,14 +51,37 @@ APPLY_ENV_HINT = (
 )
 
 
-def review_report(candidate: Candidate) -> dict[str, Any]:
+def review_report(
+    candidate: Candidate,
+    *,
+    base_text: str,
+    rubrics: Any = None,
+) -> dict[str, Any]:
     """Everything a human needs in order to decide, plus the exact apply command.
 
-    Refuses before it prints anything when a derived field does not recompute. A
-    review that printed a token for a record whose diff no longer describes its
-    text would be asking a human to approve one change and authorise another.
+    Refuses before it prints anything in three cases:
+
+    * a derived field on the candidate itself does not recompute (the diff or
+      its counts, checked against ``base_text`` -- the *live* canonical text,
+      never a value the record asserts about itself -- so changing only the
+      persisted diff or its line counts cannot make review show a token for a
+      diff that does not describe the patch);
+    * the persisted validation does not recompute byte-exact from its own
+      outcomes, judgements and policy (see
+      :func:`~agent_skill_improver.domain.integrity.validation_mismatches`);
+    * the status is anything other than exactly ``validated``. ``applied``,
+      ``rolled-back`` and ``gate-failed`` are all closed: none of them may ever
+      expose a token or an apply command again, no matter what the recorded
+      gate says.
     """
-    verify_candidate_integrity(candidate, action="review")
+    if candidate.status != STATUS_VALIDATED:
+        raise GateFailed(
+            f"refusing to review candidate {candidate.id}: status is {candidate.status!r}, not "
+            f"{STATUS_VALIDATED!r}. Only a validated candidate may expose a review token or an "
+            "apply command; a closed candidate (applied, rolled-back or gate-failed) never does, "
+            "regardless of what its recorded gate says."
+        )
+    verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="review")
     gate = (candidate.validation or {}).get("gate") or {}
     token = candidate.required_approval_token
     return {
@@ -91,6 +116,7 @@ def apply_candidate(
     state: StateStore,
     clock: Clock,
     operator: str = "",
+    rubrics: Any = None,
 ) -> dict[str, Any]:
     """Write the candidate's text to the canonical skill file. Human-gated."""
     if automation_active():
@@ -107,9 +133,12 @@ def apply_candidate(
     # Everything below happens before the backup and before the write. The order
     # is deliberate: the record is checked against itself first, then against the
     # live file, and only then is the operator's token compared -- so a tampered
-    # record is named as tampered rather than reported as a token mismatch.
-    verify_candidate_integrity(candidate, action="apply")
-    base_text = _live_base_text(skill_store, candidate)
+    # record is named as tampered rather than reported as a token mismatch. Both
+    # calls run the *combined* verifier: the candidate's own derived fields and
+    # its persisted validation, recomputed from the validation's own outcomes,
+    # judgements and policy rather than trusted off the stored gate.
+    verify_full_integrity(candidate, rubrics=rubrics, action="apply")
+    base_text = read_live_base_text(skill_store, candidate)
     live_sha = sha256_text(base_text)
     if live_sha != candidate.target.base_sha256:
         raise BaseHashMismatch(
@@ -118,7 +147,7 @@ def apply_candidate(
             f"{short(candidate.target.base_sha256)}. The skill changed since the proposal was "
             "made -- re-run `asi daily --commit` to validate against the new base."
         )
-    verify_candidate_integrity(candidate, base_text=base_text, action="apply")
+    verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="apply")
     approval.verify(expected_token=candidate.required_approval_token)
     if getattr(skill_store, "read_only", True):
         raise ApprovalRequired(
@@ -171,7 +200,7 @@ def apply_candidate(
     return out
 
 
-def _live_base_text(skill_store: Any, candidate: Candidate) -> str:
+def read_live_base_text(skill_store: Any, candidate: Candidate) -> str:
     """Read the canonical file the candidate claims to patch.
 
     A read failure here is a base mismatch, not an internal error: the candidate

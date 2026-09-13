@@ -23,6 +23,7 @@ too so every call site reports the same thing in the same words.
 from __future__ import annotations
 
 from pathlib import PurePath
+from typing import Any, Mapping
 
 from ..errors import CandidateTampered
 from ..hashing import sha256_text, short
@@ -38,6 +39,7 @@ from .candidate import (
     make_patch,
 )
 from .skills import SKILL_FILENAME
+from .validation import CASE_TARGET, ValidationRecord
 
 #: Statuses that may only exist once validation ran and recorded a gate.
 _STATUSES_REQUIRING_VALIDATION = (
@@ -174,6 +176,123 @@ def verify_candidate_integrity(
 ) -> None:
     """Refuse ``action`` unless every derived field recomputes to what is stored."""
     problems = derived_field_mismatches(candidate, base_text=base_text)
+    if not problems:
+        return
+    raise CandidateTampered(
+        f"refusing to {action} candidate {candidate.id}: {len(problems)} derived field(s) do not "
+        "match a fresh recomputation, so the record has changed since it was written.\n"
+        + "\n".join(f"  - {p}" for p in problems)
+        + "\n  An approval token is derived from the candidate's content, so a record edited "
+        "after review must never be authorised by the token printed before it. Delete this "
+        "candidate and re-run `asi daily --commit` to propose and validate the change again; "
+        "nothing has been written to any skill file."
+    )
+
+
+def validation_mismatches(
+    candidate: Candidate, *, rubrics: Mapping[str, Any] | None = None
+) -> list[str]:
+    """Every disagreement between the persisted validation and a fresh recomputation.
+
+    ``candidate.validation`` is a plain JSON blob like every other field here, so
+    it is parsed strictly (``ValidationRecord.parse``): an unknown key, a missing
+    key, a wrong type, a duplicate case or a value that contradicts another
+    field is a mismatch, not a best-effort read. Once it parses, the gate is
+    recomputed from the record's own outcomes, judgements and policy --
+    ``judge_independent`` derived from the recorded judge and improver command
+    ids, never from a stored boolean -- and compared byte-exact to the persisted
+    decision. When ``rubrics`` (the currently configured rubrics, keyed by id)
+    is supplied, every rubric binding the record claims to have scored against
+    is also checked for exact version and source-hash agreement.
+    """
+    validation = candidate.validation
+    if candidate.status not in _STATUSES_REQUIRING_VALIDATION:
+        return []
+    if not validation:
+        # No gate decision is recorded at all; gate_status_problems already
+        # reports that disagreement against the status.
+        return []
+    try:
+        record = ValidationRecord.parse(validation)
+    except (ValueError, TypeError) as exc:
+        return [f"validation record does not parse as {candidate.id}'s validation: {exc}"]
+
+    problems: list[str] = []
+    if record.candidate_id != candidate.id:
+        problems.append(
+            f"validation.candidate_id is {record.candidate_id!r} but this is candidate "
+            f"{candidate.id!r}: the validation record describes a different candidate"
+        )
+    if record.base_sha256 != candidate.target.base_sha256:
+        problems.append(
+            "validation.base_sha256 does not match target.base_sha256: the gate was decided "
+            "against a different base than this record now claims"
+        )
+    if record.patch_sha256 != candidate.recomputed_patch_sha256:
+        problems.append(
+            "validation.patch_sha256 does not match the hash of the current new_text: the gate "
+            "was decided about different patch text than this record now carries"
+        )
+    if record.improver_command_id != candidate.improver_command_id:
+        problems.append(
+            "validation.improver_command_id does not match the candidate's own "
+            "improver_command_id: judge independence cannot be derived from a command id "
+            "that disagrees with the candidate it is supposed to describe"
+        )
+    known_failure_keys = {
+        f"{ref.conversation_id}::{ref.criterion_id}" for ref in candidate.rubric_failures
+    }
+    for outcome in record.outcomes:
+        if outcome.case.kind != CASE_TARGET:
+            continue
+        if outcome.case.key not in known_failure_keys:
+            problems.append(
+                f"validation.outcomes has a target case {outcome.case.key!r} that is not among "
+                "this candidate's own rubric_failures: a target outcome must be about a failure "
+                "this candidate actually claims to fix, not an invented or unrelated case"
+            )
+
+    problems.extend(record.recompute_gate_mismatches())
+
+    if rubrics is not None:
+        for binding in record.rubrics:
+            live = rubrics.get(binding.rubric_id)
+            if live is None:
+                problems.append(
+                    f"validation.rubrics references {binding.rubric_id!r}, which is not among "
+                    "the currently configured rubrics"
+                )
+                continue
+            if live.version != binding.version:
+                problems.append(
+                    f"validation.rubrics[{binding.rubric_id!r}].version is {binding.version} but "
+                    f"the currently configured rubric is version {live.version}"
+                )
+            if live.source_sha256 != binding.source_sha256:
+                problems.append(
+                    f"validation.rubrics[{binding.rubric_id!r}].source_sha256 does not match the "
+                    "currently configured rubric's source: the criteria that decided this gate "
+                    "are not the criteria configured now"
+                )
+    return problems
+
+
+def verify_full_integrity(
+    candidate: Candidate,
+    *,
+    base_text: str | None = None,
+    rubrics: Mapping[str, Any] | None = None,
+    action: str,
+) -> None:
+    """The one fail-closed verifier review and apply must call before anything else.
+
+    Combines every derived-field check on the candidate itself with a strict
+    recomputation of its persisted validation, and refuses ``action`` before a
+    token, backup, receipt or write is produced if either disagrees with a
+    fresh recomputation.
+    """
+    problems = derived_field_mismatches(candidate, base_text=base_text)
+    problems += validation_mismatches(candidate, rubrics=rubrics)
     if not problems:
         return
     raise CandidateTampered(

@@ -31,13 +31,14 @@ from typing import Any
 
 from agent_skill_improver.app.promote import apply_candidate, review_report
 from agent_skill_improver.app.state import StateStore
-from agent_skill_improver.app.validate import validate_candidate
+from agent_skill_improver.app.validate import ValidationResult, validate_candidate
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.domain.approval import HumanApproval
 from agent_skill_improver.domain.candidate import (
     STATUS_APPLIED,
     STATUS_GATE_FAILED,
     STATUS_PROPOSED,
+    STATUS_ROLLED_BACK,
     STATUS_VALIDATED,
     Candidate,
     RubricFailureRef,
@@ -52,7 +53,15 @@ from agent_skill_improver.domain.integrity import (
     target_identity_problems,
     verify_candidate_integrity,
 )
-from agent_skill_improver.domain.validation import GatePolicy
+from agent_skill_improver.domain.rubric import Verdict
+from agent_skill_improver.domain.validation import (
+    CASE_TARGET,
+    GatePolicy,
+    ReplayCase,
+    ReplayOutcome,
+    RubricBinding,
+    evaluate_gate,
+)
 from agent_skill_improver.errors import (
     BaseHashMismatch,
     CandidateTampered,
@@ -213,9 +222,293 @@ class TamperedApplyIsRefusedEndToEnd(unittest.TestCase):
         self.assertFalse(tree["mutation_detected"])
 
 
+# -- the tamper matrix: one true CLI regression per named integrity gap --
+class TamperMatrixTests(unittest.TestCase):
+    """Every remaining forgery from the review/validation gap list, run through
+    the real CLI against one real validated candidate.
+
+    Each scenario mutates exactly one aspect of the persisted record, then
+    asserts both ``asi review`` and ``asi apply`` refuse before printing a
+    token or an apply command, and that nothing on disk moved: not the skill
+    file, not the candidate's status, not a backup, not a receipt. The record
+    is restored to its clean, reviewed form between scenarios so each is
+    independent. A healthy control at the end proves the untampered record
+    still reviews and applies -- a suite that always refuses proves nothing.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name)
+        cls.config = build_env(cls.base, dry_run=False, seed="tamper-matrix-seed")
+        cls.cfg = ["--config", str(cls.config)]
+        payload = cls._cli_json_cls("--json", "daily", "--commit", "--day", "2026-03-01")
+        validated = [
+            c["candidate_id"]
+            for c in payload.get("candidates", [])
+            if c.get("status") == STATUS_VALIDATED
+        ]
+        assert validated, payload.get("notes")
+        cls.candidate_id = validated[0]
+        review = cls._cli_json_cls("--json", "review", cls.candidate_id)
+        cls.token = review["approval_token"]
+        cls.clean_record = cls._record_path().read_text(encoding="utf-8")
+        cls.clean_raw = json.loads(cls.clean_record)
+        cls.skill_sha_before = sha256_file(cls._skill_path())
+        cls.backups_before = cls._backups()
+        cls.receipts_before = cls._receipts()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    @classmethod
+    def _cli_cls(cls, *args):
+        return run_cli([*cls.cfg, *args])
+
+    @classmethod
+    def _cli_json_cls(cls, *args):
+        proc = cls._cli_cls(*args)
+        assert proc.returncode == RC_OK, proc.stderr
+        return json.loads(proc.stdout)
+
+    @classmethod
+    def _skill_path(cls) -> Path:
+        return cls.base / "skills-canonical" / "tdd" / "SKILL.md"
+
+    @classmethod
+    def _record_path(cls) -> Path:
+        return cls.base / "state" / "candidates" / f"{cls.candidate_id}.json"
+
+    @classmethod
+    def _backups(cls) -> list[str]:
+        root = cls.base / "state" / "backups"
+        return sorted(str(p.relative_to(root)) for p in root.rglob("*")) if root.is_dir() else []
+
+    @classmethod
+    def _receipts(cls) -> list[str]:
+        root = cls.base / "state" / "receipts"
+        return sorted(p.name for p in root.glob("*.json")) if root.is_dir() else []
+
+    def cli(self, *args):
+        return self._cli_cls(*args)
+
+    def setUp(self) -> None:
+        # Every scenario starts from the same clean, reviewed record.
+        self._record_path().write_text(self.clean_record, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._record_path().write_text(self.clean_record, encoding="utf-8")
+
+    def assert_scenario_refuses(self, mutate, *, name: str) -> None:
+        raw = json.loads(json.dumps(self.clean_raw))  # deep copy
+        mutate(raw)
+        self._record_path().write_text(
+            json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        review_proc = self.cli("--json", "review", self.candidate_id)
+        self.assertNotEqual(review_proc.returncode, RC_OK, f"{name}: review must refuse")
+        self.assertNotIn(self.token, review_proc.stdout, f"{name}: review must print no token")
+        self.assertNotIn(
+            "apply_command", review_proc.stdout, f"{name}: review must print no apply command"
+        )
+
+        apply_proc = self.cli(
+            "apply",
+            self.candidate_id,
+            "--approve",
+            self.token,
+            "--i-reviewed-this",
+            "--operator",
+            "tester",
+        )
+        self.assertNotEqual(apply_proc.returncode, RC_OK, f"{name}: apply must refuse")
+        self.assertNotIn("Traceback", apply_proc.stderr, f"{name}: refusal must be a named error")
+
+        self.assertEqual(
+            sha256_file(self._skill_path()),
+            self.skill_sha_before,
+            f"{name}: the skill file must be untouched by a refused apply",
+        )
+        self.assertEqual(
+            self._backups(), self.backups_before, f"{name}: no backup may be written on refusal"
+        )
+        self.assertEqual(
+            self._receipts(), self.receipts_before, f"{name}: no receipt may be written on refusal"
+        )
+        on_disk = json.loads(self._record_path().read_text(encoding="utf-8"))
+        # The refusal happens before any write, so the record on disk after a
+        # refused apply must be exactly the tampered record this scenario
+        # wrote -- never advanced to 'applied', regardless of what status the
+        # scenario itself was probing.
+        self.assertEqual(
+            on_disk["status"],
+            raw["status"],
+            f"{name}: a refused apply must never itself change the persisted status",
+        )
+        self.assertNotIn(
+            "applied",
+            " ".join(on_disk.get("notes", [])),
+            f"{name}: the refusal must not have advanced the candidate",
+        )
+
+    # -- gap (1): diff / line-count tamper, checked against the live base --
+    def test_diff_only_change_is_refused(self):
+        def mutate(raw):
+            raw["patch"]["unified_diff"] += "\n+# tampered diff-only line, base and counts intact\n"
+
+        self.assert_scenario_refuses(mutate, name="diff-only change")
+
+    def test_line_count_only_change_is_refused(self):
+        def mutate(raw):
+            raw["patch"]["added_lines"] = raw["patch"]["added_lines"] + 1
+
+        self.assert_scenario_refuses(mutate, name="line-count-only change")
+
+    # -- gap (2): exact status, not "gate/status consistent" --
+    def test_applied_status_is_refused(self):
+        def mutate(raw):
+            raw["status"] = STATUS_APPLIED
+
+        self.assert_scenario_refuses(mutate, name="status=applied")
+
+    def test_rolled_back_status_is_refused(self):
+        def mutate(raw):
+            raw["status"] = STATUS_ROLLED_BACK
+
+        self.assert_scenario_refuses(mutate, name="status=rolled-back")
+
+    def test_gate_failed_status_is_refused(self):
+        def mutate(raw):
+            raw["status"] = STATUS_GATE_FAILED
+
+        self.assert_scenario_refuses(mutate, name="status=gate-failed")
+
+    # -- gap (3): the persisted gate must recompute, not just be trusted --
+    def test_gate_passed_flip_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["gate"]["passed"] = not raw["validation"]["gate"]["passed"]
+
+        self.assert_scenario_refuses(mutate, name="gate.passed flipped")
+
+    def test_gate_reasons_tamper_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["gate"]["reasons"] = ["fabricated: not really a gate reason"]
+
+        self.assert_scenario_refuses(mutate, name="gate.reasons tampered")
+
+    def test_gate_metrics_tamper_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["gate"]["metrics"]["fixes"] = (
+                raw["validation"]["gate"]["metrics"]["fixes"] + 5
+            )
+
+        self.assert_scenario_refuses(mutate, name="gate.metrics tampered")
+
+    def test_gate_policy_tamper_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["gate"]["policy"]["min_fixes"] = (
+                raw["validation"]["gate"]["policy"]["min_fixes"] + 5
+            )
+
+        self.assert_scenario_refuses(mutate, name="gate.policy tampered")
+
+    def test_outcome_verdict_change_is_refused(self):
+        def mutate(raw):
+            for outcome in raw["validation"]["outcomes"]:
+                if outcome["case"]["kind"] == "target":
+                    outcome["candidate"] = "FAIL"
+                    return
+            raise AssertionError("no target outcome to tamper")
+
+        self.assert_scenario_refuses(mutate, name="outcome verdict changed")
+
+    def test_outcome_derived_flag_change_is_refused(self):
+        def mutate(raw):
+            for outcome in raw["validation"]["outcomes"]:
+                if outcome["case"]["kind"] == "target":
+                    outcome["fixed"] = not outcome["fixed"]
+                    return
+            raise AssertionError("no target outcome to tamper")
+
+        self.assert_scenario_refuses(mutate, name="outcome derived flag changed")
+
+    def test_judgement_label_change_is_refused(self):
+        def mutate(raw):
+            judgements = raw["validation"]["judgements"]
+            if not judgements:
+                raise AssertionError("no judgement to tamper")
+            current = judgements[0]["preferred_label"]
+            judgements[0]["preferred_label"] = "B" if current != "B" else "A"
+
+        self.assert_scenario_refuses(mutate, name="judgement label changed")
+
+    def test_judgement_arm_change_is_refused(self):
+        def mutate(raw):
+            judgements = raw["validation"]["judgements"]
+            if not judgements:
+                raise AssertionError("no judgement to tamper")
+            current = judgements[0]["preferred_arm"]
+            judgements[0]["preferred_arm"] = "baseline" if current != "baseline" else "candidate"
+
+        self.assert_scenario_refuses(mutate, name="judgement arm changed")
+
+    def test_judge_independence_command_id_collapse_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["judge_command_id"] = raw["validation"]["improver_command_id"]
+
+        self.assert_scenario_refuses(mutate, name="judge/improver command id collapsed")
+
+    # -- schema / type tamper: strict parsing, not a best-effort read --
+    def test_wrong_type_field_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["model_calls"] = str(raw["validation"]["model_calls"])
+
+        self.assert_scenario_refuses(mutate, name="wrong-type model_calls")
+
+    def test_unknown_key_is_refused(self):
+        def mutate(raw):
+            raw["validation"]["unexpected_field"] = "should never be here"
+
+        self.assert_scenario_refuses(mutate, name="unknown validation key")
+
+    def test_missing_key_is_refused(self):
+        def mutate(raw):
+            del raw["validation"]["seed"]
+
+        self.assert_scenario_refuses(mutate, name="missing validation.seed")
+
+    def test_duplicate_outcome_case_is_refused(self):
+        def mutate(raw):
+            outcomes = raw["validation"]["outcomes"]
+            outcomes.append(json.loads(json.dumps(outcomes[0])))
+
+        self.assert_scenario_refuses(mutate, name="duplicate outcome case")
+
+    # -- the healthy control: the interlock must not have broken the path --
+    def test_zz_control_the_untampered_record_still_reviews_and_applies(self):
+        self._record_path().write_text(self.clean_record, encoding="utf-8")
+        review = self._cli_json_cls("--json", "review", self.candidate_id)
+        self.assertEqual(review["approval_token"], self.token)
+        proc = self.cli(
+            "apply",
+            self.candidate_id,
+            "--approve",
+            self.token,
+            "--i-reviewed-this",
+            "--operator",
+            "tester",
+        )
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        text = self._skill_path().read_text(encoding="utf-8")
+        self.assertIn(FIX_MARKER, text)
+
+
 def load_tests(loader, tests, pattern):  # noqa: D103 - unittest hook
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TamperedApplyIsRefusedEndToEnd))
+    suite.addTests(loader.loadTestsFromTestCase(TamperMatrixTests))
     for case in (
         DerivedPatchFieldTests,
         TargetIdentityTests,
@@ -243,6 +536,78 @@ NEW_TEXT = BASE_TEXT + "- Run the test and watch it fail for the right reason.\n
 
 CANONICAL = "skills-canonical/tdd/SKILL.md"
 
+IMPROVER_COMMAND_ID = "improver-cmd-1"
+SCORER_COMMAND_ID = "scorer-cmd-1"
+RUBRIC_SOURCE_SHA = sha256_text("instruction-compliance rubric source")
+
+
+def build_validation(
+    candidate: Candidate,
+    *,
+    seed: str = "integrity-test-seed",
+    improver_command_id: str = IMPROVER_COMMAND_ID,
+    scorer_command_id: str = SCORER_COMMAND_ID,
+    judge_command_id: str = "",
+    policy: GatePolicy | None = None,
+    outcomes: tuple[ReplayOutcome, ...] | None = None,
+    judgements: tuple[Any, ...] = (),
+    rubrics: tuple[RubricBinding, ...] | None = None,
+    model_calls: int | None = None,
+) -> dict[str, Any]:
+    """A real, self-consistent ``asi.validation.v2`` record for ``candidate``.
+
+    Built from the same domain functions the production writer uses
+    (:func:`evaluate_gate`, :class:`ValidationResult`), never hand-typed, so the
+    gate's ``metrics`` always agree byte-exact with a fresh recomputation --
+    exactly what :func:`ValidationRecord.recompute_gate_mismatches` checks.
+    """
+    policy = policy or GatePolicy(
+        min_fixes=1,
+        max_regressions=0,
+        max_holdout_degradations=0,
+        min_holdout_cases=0,
+        min_judge_preference_ratio=0.5,
+        require_judge=False,
+        require_independent_judge=True,
+    )
+    if outcomes is None:
+        outcomes = (
+            ReplayOutcome(
+                case=ReplayCase("t1", "c1", CASE_TARGET),
+                baseline=Verdict.FAIL,
+                candidate=Verdict.PASS,
+                rubric_id="instruction-compliance",
+            ),
+        )
+    if rubrics is None:
+        rubrics = (
+            RubricBinding(
+                rubric_id="instruction-compliance", version=1, source_sha256=RUBRIC_SOURCE_SHA
+            ),
+        )
+    judge_independent = bool(judge_command_id) and judge_command_id != improver_command_id
+    decision = evaluate_gate(outcomes, judgements, policy, judge_independent=judge_independent)
+    if model_calls is None:
+        distinct_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
+        model_calls = 2 * len(distinct_pairs) + len(judgements)
+    result = ValidationResult(
+        candidate_id=candidate.id,
+        base_sha256=candidate.target.base_sha256,
+        patch_sha256=candidate.recomputed_patch_sha256,
+        seed=seed,
+        improver_command_id=improver_command_id,
+        scorer_command_id=scorer_command_id,
+        judge_command_id=judge_command_id,
+        rubrics=rubrics,
+        outcomes=outcomes,
+        judgements=judgements,
+        decision=decision,
+        model_calls=model_calls,
+        notes=(),
+    )
+    return result.to_dict()
+
+
 GATE_PASSED = {"gate": {"passed": True, "reasons": [], "metrics": {}}}
 
 
@@ -260,7 +625,7 @@ def build_candidate(
     """A candidate whose every derived field really is derived."""
     patch = make_patch(base_text, new_text, path_label=canonical_path)
     base_sha = sha256_text(base_text)
-    return Candidate(
+    candidate = Candidate(
         id=candidate_id,
         created_at="2026-02-01T00:00:00Z",
         hypothesis="The skill never tells the agent to watch the test fail for the right reason.",
@@ -287,8 +652,12 @@ def build_candidate(
         patch=patch,
         approval_challenge=challenge_for(candidate_id, base_sha, patch.new_text_sha256),
         status=status,
-        validation=GATE_PASSED if validation is None else validation,
+        improver_command_id=IMPROVER_COMMAND_ID,
+        validation=GATE_PASSED,
     )
+    if validation is not None:
+        return replace(candidate, validation=validation)
+    return replace(candidate, validation=build_validation(candidate))
 
 
 class DerivedPatchFieldTests(unittest.TestCase):
@@ -492,11 +861,12 @@ class CallSiteTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_review_returns_a_report_for_a_clean_candidate(self):
-        self.assertEqual(review_report(self.clean)["candidate_id"], self.clean.id)
+        report = review_report(self.clean, base_text=BASE_TEXT)
+        self.assertEqual(report["candidate_id"], self.clean.id)
 
     def test_review_refuses_a_tampered_candidate(self):
         with self.assertRaises(CandidateTampered):
-            review_report(self.tampered)
+            review_report(self.tampered, base_text=BASE_TEXT)
 
     def test_apply_refuses_a_tampered_candidate_before_the_store_is_written(self):
         store = RecordingStore()
