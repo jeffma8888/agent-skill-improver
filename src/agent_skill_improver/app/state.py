@@ -58,7 +58,7 @@ from ..domain.candidate import (
     STATUS_VALIDATED,
     Candidate,
 )
-from ..errors import SafetyRefusal
+from ..errors import SafetyRefusal, StateUnreadable
 from ..jsonio import FILE_MODE, read_json, write_json, write_text_atomic
 
 #: Owner-only on the state root and every directory beneath it.
@@ -312,17 +312,47 @@ class StateStore:
         return path
 
     def read_candidate(self, candidate_id: str) -> Candidate:
+        """Load one candidate by id, failing closed on anything unexpected.
+
+        The id is the only thing the operator typed, and the record is a plain
+        file: the file the id resolves to must therefore also *claim* that id, or
+        a promotion would be reviewed under one name and applied to another. The
+        binding is checked in both directions -- the record's own id, and the
+        filename derived from it -- because ``safe_name`` is lossy, so two ids can
+        share one path.
+
+        A record that cannot be parsed is a refusal with a reason rather than a
+        ``KeyError`` or a ``JSONDecodeError`` from the middle of a promotion.
+        """
         path = self.candidate_path(candidate_id)
         if not path.is_file():
             raise FileNotFoundError(f"no candidate {candidate_id!r} at {path}")
-        return Candidate.from_dict(read_json(path))
+        candidate = _candidate_from_file(path)
+        if candidate.id != candidate_id:
+            raise StateUnreadable(
+                f"refusing to use {path} as candidate {candidate_id!r}: the record it holds "
+                f"declares id {candidate.id!r}. A candidate is reviewed and approved by id, so "
+                "a record that does not claim the id it was looked up by cannot be acted on."
+            )
+        if path.name != f"{safe_name(candidate.id)}.json":
+            raise StateUnreadable(
+                f"refusing to use {path} as candidate {candidate_id!r}: the record's id "
+                f"{candidate.id!r} does not derive this filename."
+            )
+        return candidate
 
     def list_candidates(self) -> list[Candidate]:
+        """Every readable candidate record. Unreadable ones are skipped, not fatal.
+
+        Skipping is safe here and only here: this is a listing, and nothing it
+        returns authorises a write. ``read_candidate`` is the path promotion uses,
+        and that one refuses instead of skipping.
+        """
         out: list[Candidate] = []
         for path in sorted(self.dir("candidates").glob("*.json")):
             try:
-                out.append(Candidate.from_dict(read_json(path)))
-            except (ValueError, KeyError):
+                out.append(_candidate_from_file(path))
+            except StateUnreadable:
                 continue
         return out
 
@@ -483,6 +513,28 @@ class StateStore:
             name: self.count(name)
             for name in ("candidates", "quarantine", "refusals", "deferred", "conversations")
         }
+
+
+def _candidate_from_file(path: Path) -> Candidate:
+    """Parse a candidate record, turning every read failure into one refusal."""
+    try:
+        raw = read_json(path)
+    except (OSError, ValueError) as exc:
+        raise StateUnreadable(
+            f"refusing to use the candidate record {path}: it could not be read ({exc}). "
+            "A truncated or hand-edited record is never guessed at."
+        ) from exc
+    if not isinstance(raw, dict):
+        raise StateUnreadable(
+            f"refusing to use the candidate record {path}: it is not a JSON object."
+        )
+    try:
+        return Candidate.from_dict(raw)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise StateUnreadable(
+            f"refusing to use the candidate record {path}: it does not have the shape of a "
+            f"candidate ({type(exc).__name__}: {exc})."
+        ) from exc
 
 
 def _label(path: Path, root: Path) -> str:

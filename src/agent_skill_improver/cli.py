@@ -625,6 +625,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "run_daily must raise when handed a writable store",
         )
     )
+    candidate_src = (package_dir() / "domain" / "candidate.py").read_text(encoding="utf-8")
     store_src = (package_dir() / "adapters" / "skill_fs.py").read_text(encoding="utf-8")
     checks.append(
         (
@@ -638,6 +639,29 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "only the skill document is writable",
             "_assert_document" in store_src and "NonDocumentWriteRefused" in store_src,
             "the write path must refuse any filename other than SKILL.md",
+        )
+    )
+    promote_src = (package_dir() / "app" / "promote.py").read_text(encoding="utf-8")
+    verify_call = "verify_candidate_integrity(candidate"
+    checks.append(
+        (
+            "apply recomputes the candidate's derived fields before it writes",
+            verify_call in promote_src
+            and "write_canonical" in promote_src
+            and promote_src.index(verify_call) < promote_src.index("skill_store.write_canonical"),
+            "app/promote.py must call verify_candidate_integrity before write_canonical; a "
+            "token derived from a stored hash cannot bind the text a human reviewed",
+        )
+    )
+    integrity_src = (package_dir() / "domain" / "integrity.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "the approval token is derived from the recomputed patch hash",
+            "recomputed_patch_sha256" in candidate_src
+            and "self.recomputed_patch_sha256" in candidate_src
+            and "sha256_text(patch.new_text)" in integrity_src,
+            "Candidate.required_approval_token must hash new_text rather than trust the "
+            "stored new_text_sha256 beside it",
         )
     )
     approval_src = (package_dir() / "domain" / "approval.py").read_text(encoding="utf-8")

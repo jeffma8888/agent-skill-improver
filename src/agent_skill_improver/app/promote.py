@@ -9,23 +9,37 @@ The interlocks, in the order they fire:
 
 1. the automation marker must be absent (the daily driver always sets it);
 2. the candidate must have passed validation, with the gate decision recorded;
-3. the approval token must match, and it is derived from the candidate id, the
-   base hash and the patch hash -- so it stops matching if any of them changed;
-4. the target must be the canonical editable copy, never a mirror, never inside
+3. every derived field must recompute to the value the record stores --
+   :func:`~agent_skill_improver.domain.integrity.verify_candidate_integrity`,
+   run before any backup or write, because the record is a plain file and a field
+   derived from another field can be edited to disagree with it;
+4. the on-disk hash must equal the base hash the candidate was written against,
+   and the diff and its counts must recompute against that same live base;
+5. the approval token must match, and it is derived from the candidate id, the
+   base hash and the hash of the patch text *as it stands* -- so it stops matching
+   if any of them changed;
+6. the target must be the canonical editable copy, never a mirror, never inside
    this tool's own tree;
-5. the on-disk hash must equal the base hash the candidate was written against;
-6. a verified backup must exist before the write, and the write is re-read and
+7. a verified backup must exist before the write, and the write is re-read and
    re-hashed afterwards, restoring the original if it did not land as intended.
+
+Interlock 3 is load-bearing rather than defensive. The token used to be derived
+from the *stored* patch hash, so editing ``patch.new_text`` and leaving that hash
+alone kept the token valid and put unreviewed bytes into a skill file.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from pathlib import Path
+
 from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
-from ..errors import ApprovalRequired, AutomationRefused, GateFailed
+from ..domain.integrity import verify_candidate_integrity
+from ..errors import ApprovalRequired, AutomationRefused, BaseHashMismatch, GateFailed
+from ..hashing import sha256_text, short
 from ..jsonio import write_json
 from .state import StateStore
 
@@ -36,7 +50,13 @@ APPLY_ENV_HINT = (
 
 
 def review_report(candidate: Candidate) -> dict[str, Any]:
-    """Everything a human needs in order to decide, plus the exact apply command."""
+    """Everything a human needs in order to decide, plus the exact apply command.
+
+    Refuses before it prints anything when a derived field does not recompute. A
+    review that printed a token for a record whose diff no longer describes its
+    text would be asking a human to approve one change and authorise another.
+    """
+    verify_candidate_integrity(candidate, action="review")
     gate = (candidate.validation or {}).get("gate") or {}
     token = candidate.required_approval_token
     return {
@@ -84,6 +104,21 @@ def apply_candidate(
     if not gate.get("passed"):
         reasons = "; ".join(gate.get("reasons", [])) or "no gate decision recorded"
         raise GateFailed(f"candidate {candidate.id} did not pass the gate: {reasons}")
+    # Everything below happens before the backup and before the write. The order
+    # is deliberate: the record is checked against itself first, then against the
+    # live file, and only then is the operator's token compared -- so a tampered
+    # record is named as tampered rather than reported as a token mismatch.
+    verify_candidate_integrity(candidate, action="apply")
+    base_text = _live_base_text(skill_store, candidate)
+    live_sha = sha256_text(base_text)
+    if live_sha != candidate.target.base_sha256:
+        raise BaseHashMismatch(
+            f"refusing to apply {candidate.id}: {candidate.target.canonical_path} now hashes "
+            f"{short(live_sha)} but the candidate was written against "
+            f"{short(candidate.target.base_sha256)}. The skill changed since the proposal was "
+            "made -- re-run `asi daily --commit` to validate against the new base."
+        )
+    verify_candidate_integrity(candidate, base_text=base_text, action="apply")
     approval.verify(expected_token=candidate.required_approval_token)
     if getattr(skill_store, "read_only", True):
         raise ApprovalRequired(
@@ -134,6 +169,23 @@ def apply_candidate(
     }
     write_json(state.dir("receipts") / f"apply--{candidate.id}.json", out)
     return out
+
+
+def _live_base_text(skill_store: Any, candidate: Candidate) -> str:
+    """Read the canonical file the candidate claims to patch.
+
+    A read failure here is a base mismatch, not an internal error: the candidate
+    describes a file this store cannot read, so nothing about the recorded diff
+    can be checked and the write must not proceed.
+    """
+    path = Path(candidate.target.canonical_path)
+    try:
+        return str(skill_store.read_text(path))
+    except OSError as exc:
+        raise BaseHashMismatch(
+            f"refusing to apply {candidate.id}: its canonical target {path} could not be read "
+            f"({exc}), so the recorded base hash and diff cannot be verified."
+        ) from exc
 
 
 def rollback_candidate(

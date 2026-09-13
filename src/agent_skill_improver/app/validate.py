@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 from ..config import ROLE_JUDGE, PromptConfig
 from ..domain.candidate import Candidate
 from ..domain.conversation import NormalizedConversation
+from ..domain.integrity import verify_candidate_integrity
 from ..domain.rubric import Rubric, Verdict
 from ..domain.validation import (
     ARM_BASELINE,
@@ -87,7 +88,14 @@ def validate_candidate(
     known_skill_ids: Sequence[str] = (),
     judge_independent: bool = True,
 ) -> ValidationResult:
-    """Replay both arms, judge blind, and decide the gate."""
+    """Replay both arms, judge blind, and decide the gate.
+
+    The candidate's derived fields are recomputed against ``base_text`` first. The
+    candidate arm is scored with ``patch.new_text``, so a record whose stored hash,
+    diff or challenge describes different text would produce a gate decision about
+    one change and a token about another.
+    """
+    verify_candidate_integrity(candidate, base_text=base_text, action="validate")
     notes: list[str] = []
     skill_id = candidate.target.skill_id
     new_text = candidate.patch.new_text

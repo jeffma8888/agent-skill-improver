@@ -105,6 +105,26 @@ class ApprovalRequired(SafetyRefusal):
     """Promotion attempted without a valid human approval token."""
 
 
+class CandidateTampered(SafetyRefusal):
+    """A candidate's derived fields do not recompute to the values it stores.
+
+    Raised before any backup or skill write. A candidate record is a plain file,
+    so a derived field -- the patch hash, the approval challenge, the diff and its
+    counts, the status against the recorded gate -- can be edited to disagree with
+    the input it was derived from, and an approval token derived from the stored
+    value would then authorise bytes no human reviewed.
+    """
+
+
+class StateUnreadable(SafetyRefusal):
+    """A state artifact could not be read or does not have the expected shape.
+
+    A truncated, hand-edited or wrongly-keyed record must fail closed with a
+    reason an operator can act on, rather than surfacing as a traceback from the
+    middle of a promotion.
+    """
+
+
 class AutomationRefused(SafetyRefusal):
     """Promotion attempted from an automated (daily) context."""
 

@@ -120,6 +120,46 @@ or the patch — and `docs/ACCEPTANCE.md`, `docs/ARCHITECTURE.md` and
 automated apply are structural: `daily` does not import `promote`, `daily` refuses
 a writable skill store, and the automation marker makes `from_cli` refuse.
 
+## The approval token was not bound to the text it approved
+
+A later review found and reproduced a bypass of the human gate, and it is recorded
+here because a receipt that lists only successes is marketing.
+
+**The reproduction.** A validated candidate was produced by a real `daily --commit`
+pass, `asi review` printed its approval token, and then exactly one field of the
+persisted candidate record was edited: `patch.new_text`. `patch.new_text_sha256`,
+`approval_challenge`, `status` and the recorded gate were left byte-identical.
+`asi apply` with the original token returned **0** and wrote the edited text into
+the live skill file. The token was derived from the *stored* patch hash, so it was
+never a function of the bytes a human had read; the one property the whole gate
+exists to provide was absent.
+
+**The fix.** `domain/integrity.py` recomputes every candidate field that claims
+integrity and returns the disagreements: `new_text_sha256` from the normalized
+`new_text`, the approval challenge from the candidate id and both hashes, the
+unified diff and its added/removed counts against the **live** base text, the
+canonical target identity (skill id against the path it sits in, `SKILL.md`, a
+well-formed base digest, no canonical/mirror collision), and the recorded status
+against the recorded gate. `review`, `apply` and `validate_candidate` all call it
+before they act, and `Candidate.required_approval_token` now derives from the
+recomputed hash, so even a caller that skipped the check cannot authorise changed
+bytes. In `apply` the recomputation and the live-base comparison both run **before**
+the backup directory is created and before any write, so a refusal leaves the skill
+file, the candidate status, the backups and the receipts untouched. Candidate reads
+in `app/state.py` fail closed: a truncated, wrongly-shaped or wrongly-keyed record,
+or one that does not claim the id it was looked up by, is a named `SafetyRefusal`
+rather than a traceback from the middle of a promotion.
+
+**Two properties of the regression test, because a test that cannot fail is not
+evidence.** `tests/test_candidate_integrity.py` drives the real CLI as a process
+through the exact reproduction above and asserts the refusal, the untouched skill
+hash, the unchanged candidate status, and the empty backup and receipt sets. Run
+against the unwired call sites it fails 6 of its 10 end-to-end assertions --
+including `'applied' != 'validated'` and a backup directory that should not
+exist -- and its healthy controls then apply the same candidate successfully and
+confirm the daily path is still proposal-only. Each derived field additionally has
+its own unit test in both directions.
+
 ## Verification commands and their real exit codes
 
 Run from the repository root. `<venv>` is a local virtual environment with the two
@@ -128,16 +168,16 @@ standard library.
 
 | Command | Exit | What it reported |
 | --- | --- | --- |
-| `python3 -m unittest discover -s tests -t .` | **0** | `Ran 389 tests` / `OK`, 0 skipped |
+| `python3 -m unittest discover -s tests -t .` | **0** | `Ran 461 tests` / `OK`, 0 skipped |
 | `python3 -m compileall -q src tests examples tools` | **0** | silent, so every tracked tree byte-compiles |
-| `<venv>/bin/black --check .` | **0** | `62 files would be left unchanged` |
-| `<venv>/bin/mypy` | **0** | `Success: no issues found in 40 source files` |
+| `<venv>/bin/black --check .` | **0** | `64 files would be left unchanged` |
+| `<venv>/bin/mypy` | **0** | `Success: no issues found in 41 source files` |
 | `python3 tools/leakscan.py --selftest` | **0** | 27 rules, each fires on its positive sample and stays silent on its negative one |
-| `python3 tools/leakscan.py .` | **0** | `clean`: 109 tracked files, 1 commit scanned, 0 allowlist entries; configured fetch/push remote URLs checked |
+| `python3 tools/leakscan.py .` | **0** | `clean`: 111 tracked files, 4 commits scanned, 0 allowlist entries; configured fetch/push remote URLs checked |
 | `python3 examples/build_fixtures.py --check` | **0** | `8 fixture(s) match the builder exactly` |
 | `python3 tests/fixtures/build_fixtures.py` | **0** | `wrote 10 fixture file(s)`, and `git status` stayed clean, so they reproduce |
 | `<venv>/bin/asi --config config/example.config.toml doctor` | **0** | `verdict: ready`, with the isolation and permission lines below |
-| `<venv>/bin/asi --config config/example.config.toml selftest` | **0** | 14 architectural checks, all `ok`, `selftest: passed` |
+| `<venv>/bin/asi --config config/example.config.toml selftest` | **0** | 16 architectural checks, all `ok`, `selftest: passed` |
 | `<venv>/bin/asi ... daily --commit --day 2026-01-02 --seed t1` | **0** | first pass, see below |
 | the same command again | **0** | second pass, idempotence, see below |
 | `git diff --exit-code -- examples/skills examples/skills-mirror rubrics config` | **0** | no tracked skill, rubric or config file changed during either daily run |
@@ -243,16 +283,16 @@ on purpose.
 
 | Thing | Count |
 | --- | --- |
-| Tracked files | 109 |
-| Source modules (`src/`) | 40, 9,222 lines |
-| Test files | 19, 6,164 lines, of which 15 are test modules |
-| Test methods | 389 |
+| Tracked files | 111 |
+| Source modules (`src/`) | 41, 9,806 lines |
+| Test files | 20, 7,088 lines, of which 16 are test modules |
+| Test methods | 461 |
 | Documentation files under `docs/` | 6, 1,336 lines |
 | Leak scanner | 784 lines, 27 rules, 0 allowances, configured remote URLs checked |
 | Rubrics | 5 (2 enabled in the example configuration) |
 | Synthetic conversation fixtures | 8 |
 | Example skills | 4 across 2 roots, 1 carrying an executable payload |
-| `asi selftest` structural checks | 14 |
+| `asi selftest` structural checks | 16 |
 
 ## Honest limits of this verification
 
@@ -326,10 +366,10 @@ GitHub Actions run, not predicted in this receipt.
 
 | Property | Value |
 | --- | --- |
-| Commits | 2 (one clean public snapshot plus this post-publication CI fix) |
-| Tracked files | 109 |
+| Commits | 5 (a clean public snapshot plus four fixes, the last of which bound the approval token to the reviewed text) |
+| Tracked files | 111 |
 | `git status --porcelain` | empty |
 | `git remote -v` | credential-free HTTPS `origin`, fetch and push URLs checked |
 | Reflog / refs | normal local and `origin/main` refs after publication; no backup refs or tags |
-| Test methods | 389, all passing locally, none skipped |
-| `python3 tools/leakscan.py` | `clean`, 109 tracked files, reachable history and configured fetch/push remote URLs scanned |
+| Test methods | 461, all passing locally, none skipped |
+| `python3 tools/leakscan.py` | `clean`, 111 tracked files, reachable history and configured fetch/push remote URLs scanned |

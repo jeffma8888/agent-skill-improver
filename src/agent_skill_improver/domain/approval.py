@@ -9,8 +9,10 @@ attacker; it does not try to.
 It **is** a set of interlocks that make an automated promotion impossible by
 accident and make every promotion auditable:
 
-1. ``apply`` requires a token derived from the candidate's *content* -- so a
-   token stops matching the moment the patch or the base file changes;
+1. ``apply`` requires a token derived from the candidate's *content*, with the
+   patch hash recomputed from the patch text rather than read from the field
+   stored beside it -- so a token stops matching the moment the patch or the base
+   file changes, including an edit to the patch text alone;
 2. ``apply`` requires an explicit acknowledgement flag, so the intent is in the
    command line and therefore in the shell history and the receipt;
 3. ``apply`` refuses outright when the automation marker is set in the
@@ -107,8 +109,8 @@ class HumanApproval:
         if self.token != expected_token:
             raise ApprovalRequired(
                 "approval token does not match this candidate. A token is derived from "
-                "the candidate id, its base hash and its patch hash, so it stops "
-                "matching if any of them changed since review."
+                "the candidate id, its base hash and the hash recomputed from its patch "
+                "text, so it stops matching if any of them changed since review."
             )
 
     def to_dict(self) -> dict[str, Any]:

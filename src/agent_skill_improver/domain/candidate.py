@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_CANDIDATE, SCHEMA_PROPOSAL
+from ..hashing import sha256_text
 from .conversation import EvidenceRef
 from .failure import FailureCase
 
@@ -134,10 +135,9 @@ def make_patch(base_text: str, new_text: str, *, path_label: str) -> Patch:
     )
     added = sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
-    normalized = new_text.replace("\r\n", "\n").replace("\r", "\n")
     return Patch(
         new_text=new_text,
-        new_text_sha256=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+        new_text_sha256=sha256_text(new_text),
         unified_diff="".join(diff),
         added_lines=added,
         removed_lines=removed,
@@ -173,9 +173,25 @@ class Candidate:
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
+    def recomputed_patch_sha256(self) -> str:
+        """The hash of the patch text as it stands, never the stored field.
+
+        Derived on every read so a record whose ``new_text`` was edited after
+        review cannot present the hash of the text that *was* reviewed.
+        """
+        return sha256_text(self.patch.new_text)
+
+    @property
     def required_approval_token(self) -> str:
+        """The token that authorises this candidate, bound to its actual bytes.
+
+        Derived from the recomputed patch hash rather than the stored one. That is
+        the difference between a token bound to the text a human reviewed and a
+        token bound to a field sitting beside it: with the stored hash, editing
+        ``new_text`` alone left this token unchanged and the edit authorised.
+        """
         return approval_token_for(
-            self.approval_challenge, self.target.base_sha256, self.patch.new_text_sha256
+            self.approval_challenge, self.target.base_sha256, self.recomputed_patch_sha256
         )
 
     def to_dict(self, *, include_text: bool = True) -> dict[str, Any]:
@@ -289,8 +305,10 @@ def candidate_defects(candidate: Candidate, *, base_text: str) -> list[str]:
         problems.append("patch is identical to the base text (no-op change)")
     if not candidate.patch.unified_diff.strip():
         problems.append("patch has no unified diff")
+    if candidate.patch.new_text_sha256 != candidate.recomputed_patch_sha256:
+        problems.append("patch new_text_sha256 does not match the hash of new_text")
     expected = challenge_for(
-        candidate.id, candidate.target.base_sha256, candidate.patch.new_text_sha256
+        candidate.id, candidate.target.base_sha256, candidate.recomputed_patch_sha256
     )
     if candidate.approval_challenge != expected:
         problems.append("approval_challenge does not match candidate identity")

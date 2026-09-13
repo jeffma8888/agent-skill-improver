@@ -277,13 +277,23 @@ The interlock is structural, not a flag:
 
 ## Apply and rollback
 
-`apply` verifies, in order: candidate status is `validated`; the approval token
-matches the derivation over candidate id, base hash and patch hash; the current
-file hash equals the recorded base hash; the root is canonical and editable; the
-skill is not protected; the target filename is `SKILL.md`; the acknowledgement
-flag is present; the automation marker is absent. Then it writes a backup, writes
-the file atomically, verifies the resulting hash, and marks the candidate
-`applied`. Re-applying is refused because the status already moved.
+`apply` verifies, in order: the automation marker is absent; candidate status is
+`validated` and the recorded gate passed; every derived field recomputes to the
+value the record stores; the current file hash equals the recorded base hash; the
+diff and its counts recompute against that live base; the approval token matches
+the derivation over candidate id, base hash and the recomputed hash of the patch
+text; the acknowledgement flag is present; the root is canonical and editable; the
+skill is not protected; the target filename is `SKILL.md`. Then it writes a
+backup, writes the file atomically, verifies the resulting hash, and marks the
+candidate `applied`. Re-applying is refused because the status already moved.
+
+Every check above happens **before** the backup directory exists and before any
+byte is written, so a refused apply leaves the skill file, the candidate status,
+the backups and the receipts exactly as they were. The recomputation lives in
+`domain/integrity.py` and is shared by `review`, `apply` and validation, because a
+derived field stored beside its input is a way for the two to disagree: the token
+used to be derived from the *stored* patch hash, so editing `patch.new_text` alone
+left the token matching and put unreviewed text into a skill file.
 
 `rollback` restores the backup through the same `_assert_document` gate and
 verifies the restored hash against the recorded base. Everything it can check
@@ -295,7 +305,8 @@ overwrite followed by the discovery that the restored content was never the
 original. Recovery must not be the step that loses the file.
 
 **What the approval token is and is not.** It is a deterministic function of the
-candidate id, the base hash and the patch hash, derived with the same code on
+candidate id, the base hash and the hash recomputed from the candidate's patch
+text (never the stored hash field), derived with the same code on
 both sides. That makes it a *review interlock*: it cannot be produced for a
 candidate whose base file has changed since it was proposed, so a stale approval
 fails and a silent edit underneath a pending review is caught. It is **not** a

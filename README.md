@@ -134,7 +134,12 @@ asi apply CAND-... \
 
 1. **A typed acknowledgement.** `--i-reviewed-this` has no short form.
 2. **An approval token** bound to the candidate id, the base file hash and the
-   patch hash. Change any of the three and the token no longer verifies.
+   hash of the patch text *as it stands on disk*, recomputed on every read.
+   Change any of the three and the token no longer verifies. Every other derived
+   field -- the diff and its counts against the live base, the approval
+   challenge, the target identity, the status against the recorded gate -- is
+   recomputed and compared before the write, so a record edited after review is
+   refused rather than authorised by the token printed before the edit.
 3. **A matching base hash.** If the skill file changed since the candidate was
    built, apply refuses; the candidate must be revalidated against the new base.
 4. **No automation marker.** The daily driver always sets `ASI_AUTOMATED_RUN`, so
