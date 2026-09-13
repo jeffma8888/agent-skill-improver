@@ -42,7 +42,7 @@ def frozen_clock() -> FrozenClock:
 class DailyHarness(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
-        self.base = Path(self._tmp.name)
+        self.base = Path(self._tmp.name).resolve()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()

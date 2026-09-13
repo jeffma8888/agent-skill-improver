@@ -14,7 +14,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from ..errors import LockHeld
+from ..errors import LockHeld, SafetyRefusal
 
 
 class RunLock:
@@ -25,7 +25,20 @@ class RunLock:
 
     def __enter__(self) -> "RunLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o600)
+        flags = os.O_RDWR | os.O_CREAT
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if not nofollow and self.path.is_symlink():
+            raise SafetyRefusal(
+                f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
+            )
+        try:
+            fd = os.open(str(self.path), flags | nofollow, 0o600)
+        except OSError as exc:
+            if self.path.is_symlink():
+                raise SafetyRefusal(
+                    f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
+                ) from exc
+            raise
         # The 0o600 above applies only when the file is CREATED, and it is
         # further masked by the umask. An existing lock file from a run under a
         # permissive umask keeps its old mode, so set it explicitly. It carries

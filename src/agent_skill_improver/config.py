@@ -357,7 +357,9 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
     over = dict(overrides or {})
     run_table = _require_table(raw, "run")
     base_dir = _base_dir_for(config_path, run_table)
-    state_dir = _expand(_str_field(run_table, "state_dir", "state", where="run"), base=base_dir)
+    state_dir = _expand(
+        _str_field(run_table, "state_dir", "state", where="run"), base=base_dir
+    ).resolve()
     dry_run = _bool_field(run_table, "dry_run", True, where="run")
     if "dry_run" in over and over["dry_run"] is not None:
         dry_run = bool(over["dry_run"])

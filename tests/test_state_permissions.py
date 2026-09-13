@@ -68,7 +68,9 @@ class PermissiveUmask:
 class StateTreeHarness(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
-        self.root = Path(self._tmp.name) / "state"
+        # Healthy callers pass a canonical path. StateStore deliberately rejects
+        # every existing symlink component, including macOS's /var alias.
+        self.root = Path(self._tmp.name).resolve() / "state"
         self._umask = PermissiveUmask().__enter__()
         self.addCleanup(lambda: self._umask.__exit__())
         self.addCleanup(self._tmp.cleanup)
@@ -269,6 +271,19 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
         self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
 
+    def test_an_existing_symlink_in_a_state_root_ancestor_is_refused_before_creation(self):
+        outside = self._outside_dir()
+        alias = self.root.parent / "alias"
+        alias.symlink_to(outside)
+        redirected_root = alias / "state"
+
+        with self.assertRaises(SafetyRefusal) as ctx:
+            StateStore(redirected_root).ensure()
+
+        self.assertIn("ancestor", str(ctx.exception))
+        self.assertFalse((outside / "state").exists())
+        self._assert_outside_untouched(outside)
+
     def test_a_state_root_that_is_a_symlink_is_refused_before_anything_is_created(self):
         outside = self._outside_dir()
         self.root.symlink_to(outside)
@@ -434,6 +449,39 @@ class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
 
 
 class LockFileTests(StateTreeHarness):
+    def test_a_regular_lock_still_contends_and_releases_normally(self):
+        from agent_skill_improver.app.lock import RunLock
+        from agent_skill_improver.errors import LockHeld
+
+        store = self.store()
+        store.ensure()
+        path = store.dir("locks") / "daily.lock"
+        with RunLock(path, owner="first"):
+            with self.assertRaises(LockHeld):
+                with RunLock(path, owner="second"):
+                    pass
+        with RunLock(path, owner="second"):
+            self.assertEqual(path.read_text(encoding="utf-8"), "second\n")
+
+    def test_a_symlinked_lock_leaf_is_refused_without_touching_its_target(self):
+        from agent_skill_improver.app.lock import RunLock
+
+        store = self.store()
+        store.ensure()
+        outside = self.root.parent / "outside.lock"
+        outside.write_text("keep me\n", encoding="utf-8")
+        os.chmod(outside, 0o644)
+        path = store.dir("locks") / "daily.lock"
+        path.symlink_to(outside)
+
+        with self.assertRaises(SafetyRefusal) as ctx:
+            with RunLock(path):
+                pass
+
+        self.assertIn("symlink", str(ctx.exception))
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep me\n")
+        self.assertEqual(oct(mode_of(outside)), oct(0o644))
+
     def test_the_run_lock_is_0600_even_when_it_already_existed_wider(self):
         from agent_skill_improver.app.lock import RunLock
 

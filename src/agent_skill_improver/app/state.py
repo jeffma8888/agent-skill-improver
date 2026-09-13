@@ -171,6 +171,9 @@ class StateStore:
         that is a link is reported alone, because every path below it would be
         resolved through the link.
         """
+        reason = _ancestor_layout_reason(self.root)
+        if reason:
+            return [reason]
         reason = _layout_reason(self.root, self.root)
         if reason:
             return [reason]
@@ -543,6 +546,30 @@ def _label(path: Path, root: Path) -> str:
         return str(path.relative_to(root)) if path != root else "."
     except ValueError:  # pragma: no cover - callers only pass paths under root
         return str(path)
+
+
+def _ancestor_layout_reason(root: Path) -> str | None:
+    """Why an existing ancestor would redirect ``root``, without following it."""
+    absolute = Path(os.path.abspath(root))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:-1]:
+        current /= component
+        try:
+            entry = os.lstat(current)
+        except FileNotFoundError:
+            # Once an ancestor is absent, every descendant is absent too.
+            return None
+        except OSError as exc:
+            return f"ancestor {current} cannot be inspected ({exc.strerror})"
+        if stat.S_ISLNK(entry.st_mode):
+            try:
+                target = os.readlink(current)
+            except OSError:  # pragma: no cover - readlink of a link we just saw
+                target = "<unreadable>"
+            return f"ancestor {current} is a symlink to {target!r}"
+        if not stat.S_ISDIR(entry.st_mode):
+            return f"ancestor {current} exists and is not a directory"
+    return None
 
 
 def _layout_reason(path: Path, root: Path) -> str | None:

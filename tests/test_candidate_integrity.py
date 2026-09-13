@@ -91,7 +91,7 @@ class TamperedApplyIsRefusedEndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._tmp = TemporaryDirectory()
-        cls.base = Path(cls._tmp.name)
+        cls.base = Path(cls._tmp.name).resolve()
         cls.config = build_env(cls.base, dry_run=False, seed="integrity-seed")
         cls.cfg = ["--config", str(cls.config)]
 
@@ -241,7 +241,7 @@ class TamperMatrixTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._tmp = TemporaryDirectory()
-        cls.base = Path(cls._tmp.name)
+        cls.base = Path(cls._tmp.name).resolve()
         cls.config = build_env(cls.base, dry_run=False, seed="tamper-matrix-seed")
         cls.cfg = ["--config", str(cls.config)]
         payload = cls._cli_json_cls("--json", "daily", "--commit", "--day", "2026-03-01")
@@ -870,7 +870,7 @@ class CallSiteTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
-        self.root = Path(self._tmp.name) / "state"
+        self.root = Path(self._tmp.name).resolve() / "state"
         self.state = StateStore(self.root, clock=frozen_clock())
         self.state.ensure()
         self.clean = build_candidate()
@@ -975,7 +975,7 @@ class StateReadTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
-        self.state = StateStore(Path(self._tmp.name) / "state")
+        self.state = StateStore(Path(self._tmp.name).resolve() / "state")
         self.state.ensure()
         self.candidate = build_candidate()
         self.path = self.state.write_candidate(self.candidate)

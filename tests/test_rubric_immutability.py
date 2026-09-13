@@ -157,6 +157,24 @@ class ProtectedPathTests(unittest.TestCase):
         self.assertIn(config.config_path.resolve(), config.protected_paths)
         self.assertIn(config.config_path.parent.resolve(), config.protected_paths)
 
+    def test_configuration_canonicalizes_the_state_directory_before_use(self):
+        from tests.support import build_env
+
+        real_parent = self.base / "real-parent"
+        real_parent.mkdir()
+        alias = self.base / "state-alias"
+        alias.symlink_to(real_parent)
+        config_path = build_env(self.base, rubric_ids=("instruction-compliance",))
+        text = config_path.read_text(encoding="utf-8").replace(
+            'state_dir = "state"', f'state_dir = "{alias / "state"}"'
+        )
+        config_path.write_text(text, encoding="utf-8")
+
+        config = load_config(config_path)
+
+        self.assertEqual(config.state_dir, (real_parent / "state").resolve())
+        self.assertNotIn(alias, config.state_dir.parents)
+
     def test_the_state_directory_is_protected(self):
         config = self._config()
         self.assertIn(config.state_dir.resolve(), config.protected_paths)
