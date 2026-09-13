@@ -135,6 +135,19 @@ a fresh-run check would miss. Symlinks inside the tree are skipped rather than
 followed, because chasing one is how a permission repair becomes a way to chmod
 something outside the tree.
 
+Skipping a leaf link is not enough on its own, because the *directories* are the
+load-bearing part of the claim that everything written stays under the configured
+state directory. A state root, or a mandatory subdirectory such as `raw/`,
+precreated as a symlink is followed by `mkdir`, `chmod` and every later write, so
+verbatim transcripts would land outside the configured tree and the repair walk
+would chmod a directory this tool does not own. `StateStore` therefore refuses
+before it follows: the root and every declared subdirectory must be a real
+directory, measured with `lstat`, and a directory whose name is computed at
+runtime must be a real direct child of a mandatory directory that has already been
+verified. `asi doctor` reports such a layout as a problem and repairs nothing, so
+the mode and the contents of whatever the link pointed at are left exactly as they
+were.
+
 ## Prompt injection
 
 A conversation is **untrusted input**. It routinely contains text that looks like

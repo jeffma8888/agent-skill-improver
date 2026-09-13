@@ -140,16 +140,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # under a permissive umask. Repair it here rather than only checking, because
     # a doctor that reports a problem it could have fixed is asking a human to
     # run chmod for it.
+    #
+    # The layout is checked before the modes, and a bad layout stops the repair
+    # rather than being repaired: a state directory that is a symlink redirects
+    # the tree, so repairing "its" modes would chmod a directory outside the
+    # configured state directory, and reporting the measured modes would describe
+    # someone else's tree as private.
     permissions_repaired: list[str] = []
     permission_problems: list[str] = []
-    if config.state_dir.exists():
-        permissions_repaired = state.repair_permissions()
-        permission_problems = state.permission_problems()
-        if permission_problems:
+    layout_problems: list[str] = []
+    if config.state_dir.exists() or config.state_dir.is_symlink():
+        layout_problems = state.layout_problems()
+        if layout_problems:
             problems.append(
-                f"{len(permission_problems)} path(s) under {config.state_dir} are not "
-                f"owner-only even after an attempted repair: {permission_problems[0]}"
+                f"the state layout under {config.state_dir} is not confined to it: "
+                f"{layout_problems[0]}"
             )
+        else:
+            permissions_repaired = state.repair_permissions()
+            permission_problems = state.permission_problems()
+            if permission_problems:
+                problems.append(
+                    f"{len(permission_problems)} path(s) under {config.state_dir} are not "
+                    f"owner-only even after an attempted repair: {permission_problems[0]}"
+                )
 
     source = build_source(config, state)
     source_status = "ok"
@@ -175,6 +189,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "file_mode": oct(STATE_FILE_MODE),
             "repaired": permissions_repaired,
             "still_wrong": permission_problems,
+            "unsafe_layout": layout_problems,
         },
         "roles_configured": sorted(config.model_roles),
         "skill_roots": [{**r.to_dict(), "exists": r.path.is_dir()} for r in config.skill_roots],
@@ -205,7 +220,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"isolation    mode={isolation.mode} verified={isolation.verified} "
         f"required={isolation.required} satisfied={isolation.satisfied}",
         f"state perms  dirs {oct(DIR_MODE)} / files {oct(STATE_FILE_MODE)}, "
-        f"{len(permissions_repaired)} repaired, {len(permission_problems)} still wrong",
+        f"{len(permissions_repaired)} repaired, {len(permission_problems)} still wrong, "
+        f"{len(layout_problems)} not a real directory",
         f"roles        {', '.join(sorted(config.model_roles)) or '<none configured>'}",
         f"skill roots  {len(config.skill_roots)} configured, {len(store.existing_roots())} present",
         f"skills       {len(store.known_skill_ids())} discovered, {len(broken)} do not load, "

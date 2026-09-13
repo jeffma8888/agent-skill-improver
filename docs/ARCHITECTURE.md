@@ -333,6 +333,22 @@ if a mode cannot be corrected. Refusing to run is the right outcome: an
 already-existing world-readable state directory is exactly the case a fresh-run
 check would miss.
 
+Making that tree private is only meaningful if it is the tree that was
+configured, and `mkdir(exist_ok=True)`, `chmod` and every later write follow a
+symlink. So the layout is **verified before it is followed**: the state root and
+every declared subdirectory must be a real directory, measured with `lstat`, or
+`StateStore` refuses — before the first `mkdir` or `chmod`, because either one
+would already have carried private content outside the configured directory.
+`layout_problems()` reports the same verdict without following anything, so
+`asi doctor` surfaces an unsafe layout as a `PROBLEM` and deliberately does *not*
+repair it: repairing a redirected tree means chmodding a directory this tool does
+not own. Directories whose names are computed at runtime — a `backups/<candidate
+id>--<stamp>` directory, for instance — are proven to be real direct children of
+an already-verified mandatory directory before they are created or chmodded,
+because a guessable name is one an attacker with write access to `backups/` can
+precreate as a link. An arbitrary *leaf* symlink someone else left in the tree is
+still skipped rather than followed, which leaves its target untouched.
+
 `quarantine`, `deferred` and `refusals` are three different states on purpose.
 *Malformed* is not *temporarily unavailable* is not *deliberately declined*, and
 collapsing them loses the distinction between a bug, a retry and a policy

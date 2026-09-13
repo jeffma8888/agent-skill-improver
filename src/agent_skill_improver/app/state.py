@@ -19,6 +19,19 @@ because the repair can fail silently -- on a filesystem that does not carry POSI
 modes, ``chmod`` is accepted and does nothing, and a tool that only called chmod
 would report a private state tree while writing world-readable transcripts.
 
+Repairing modes is only meaningful if the tree being repaired is the tree that
+was configured. ``chmod``, ``mkdir(exist_ok=True)`` and every later write follow
+a symlink, so a state root -- or a mandatory subdirectory such as ``raw`` --
+precreated as a link to somewhere else silently redirects the whole private tree:
+the transcripts land outside the configured directory and the repair walk chmods a
+directory this tool does not own. The layout is therefore **verified before it is
+followed**: the root and every declared subdirectory must be a real directory,
+measured with ``lstat``, or the store refuses. Dynamically named directories such
+as a backup stamp are proven to be direct children of an already-verified
+mandatory directory before they are created or chmodded. An arbitrary *leaf*
+symlink inside the tree is still skipped rather than followed, which leaves its
+target untouched.
+
 The per-record split is the other important part. A defective record is
 *quarantined* on its own and a record we simply could not reach is *deferred* on
 its own. Neither is allowed to veto the batch. A verification pass that returns
@@ -127,12 +140,18 @@ class StateStore:
 
         Repair-then-verify rather than repair-and-hope. ``chmod`` succeeding is
         not evidence that the mode changed.
+
+        The layout is checked *before* the first ``mkdir`` or ``chmod``, because
+        both of those follow a symlink and would carry the whole private tree
+        outside the configured directory.
         """
+        self.verify_layout()
         self.root.mkdir(parents=True, exist_ok=True)
         _chmod_to(self.root, DIR_MODE)
         for name in SUBDIRS:
             path = self.root / name
-            path.mkdir(parents=True, exist_ok=True)
+            _refuse_unless_real_dir(path, self.root)
+            path.mkdir(exist_ok=True)
             _chmod_to(path, DIR_MODE)
         readme = self.root / "README.txt"
         if not readme.exists():
@@ -140,12 +159,51 @@ class StateStore:
         self.repair_permissions()
         self.verify_permissions()
 
+    def layout_problems(self) -> list[str]:
+        """Every mandatory state directory that is not a real directory.
+
+        Measured with ``lstat`` so the check never follows the entry it judges.
+        A symlink here is not a permission problem and must not be reported as
+        one: it redirects the tree, so a mode read through it describes some
+        other directory, and repairing that mode would mutate it.
+
+        An absent directory is not a problem -- ``ensure`` creates those. A root
+        that is a link is reported alone, because every path below it would be
+        resolved through the link.
+        """
+        reason = _layout_reason(self.root, self.root)
+        if reason:
+            return [reason]
+        problems: list[str] = []
+        for name in SUBDIRS:
+            reason = _layout_reason(self.root / name, self.root)
+            if reason:
+                problems.append(reason)
+        return problems
+
+    def verify_layout(self) -> None:
+        """Fail closed when the layout is not confined to the configured root."""
+        problems = self.layout_problems()
+        if not problems:
+            return
+        raise SafetyRefusal(
+            "refusing to use the state directory: it holds private conversation content and "
+            f"{len(problems)} mandatory path(s) are not a real directory under {self.root}.\n"
+            + "\n".join(f"  - {p}" for p in problems)
+            + "\n  A symlink is followed by mkdir, chmod and every later write, so a state "
+            "directory that is a link would put verbatim transcripts outside the configured "
+            "directory and would chmod a directory this tool does not own. Replace the entry "
+            "with a real directory, or point [run].state_dir at the location you actually want."
+        )
+
     def repair_permissions(self) -> list[str]:
         """Tighten anything in the existing tree that is wider than policy.
 
         Returns the paths it changed, relative to the root, so ``doctor`` can say
         what it did instead of claiming the tree was always fine.
         """
+        if self.layout_problems():
+            return []
         changed: list[str] = []
         if self.root.exists() and _chmod_to(self.root, DIR_MODE):
             changed.append(".")
@@ -160,7 +218,7 @@ class StateStore:
     def permission_problems(self) -> list[str]:
         """Every path whose actual mode is still wrong. Measured, not assumed."""
         problems: list[str] = []
-        if not self.root.exists():
+        if not self.root.exists() or self.layout_problems():
             return problems
         if not _mode_ok(self.root, DIR_MODE):
             problems.append(f". is {_mode_of(self.root)}, want {oct(DIR_MODE)}")
@@ -175,6 +233,7 @@ class StateStore:
 
     def verify_permissions(self) -> None:
         """Fail closed when the tree is not private after repair."""
+        self.verify_layout()
         problems = self.permission_problems()
         if not problems:
             return
@@ -194,11 +253,13 @@ class StateStore:
     def dir(self, name: str) -> Path:
         if name not in SUBDIRS:
             raise KeyError(f"unknown state subdirectory {name!r}")
+        _refuse_unless_real_dir(self.root, self.root)
         path = self.root / name
+        _refuse_unless_real_dir(path, self.root)
         if not path.is_dir():
             self.root.mkdir(parents=True, exist_ok=True)
             _chmod_to(self.root, DIR_MODE)
-            path.mkdir(parents=True, exist_ok=True)
+            path.mkdir(exist_ok=True)
         _chmod_to(path, DIR_MODE)
         return path
 
@@ -394,14 +455,23 @@ class StateStore:
         return path
 
     def backup_dir_for(self, candidate_id: str, stamp: str) -> Path:
-        path = self.dir("backups") / f"{safe_name(candidate_id)}--{safe_name(stamp)}"
-        path.mkdir(parents=True, exist_ok=True)
-        _chmod_to(path, DIR_MODE)
-        return path
+        """A per-apply backup directory, created only as a direct child.
+
+        The name is dynamic, so an attacker who can write into ``backups/`` can
+        guess it and precreate it as a symlink. ``mkdir(exist_ok=True)`` accepts
+        such a link without complaint, and the chmod and the backup copy then
+        land outside the state tree, so the entry is proven to be a real direct
+        child before either happens.
+        """
+        return _ensure_child_dir(
+            self.dir("backups"), f"{safe_name(candidate_id)}--{safe_name(stamp)}", self.root
+        )
 
     def latest_backup_manifest(self, candidate_id: str) -> Path | None:
         prefix = f"{safe_name(candidate_id)}--"
-        dirs = sorted(p for p in self.dir("backups").glob(prefix + "*") if p.is_dir())
+        dirs = sorted(
+            p for p in self.dir("backups").glob(prefix + "*") if p.is_dir() and not p.is_symlink()
+        )
         for path in reversed(dirs):
             manifest = path / "backup.json"
             if manifest.is_file():
@@ -413,6 +483,75 @@ class StateStore:
             name: self.count(name)
             for name in ("candidates", "quarantine", "refusals", "deferred", "conversations")
         }
+
+
+def _label(path: Path, root: Path) -> str:
+    """A path named relative to the state root, so a message stays readable."""
+    try:
+        return str(path.relative_to(root)) if path != root else "."
+    except ValueError:  # pragma: no cover - callers only pass paths under root
+        return str(path)
+
+
+def _layout_reason(path: Path, root: Path) -> str | None:
+    """Why ``path`` may not be used as a state directory, or None if it may.
+
+    Absent is fine: the caller creates it. A symlink or a non-directory is not,
+    and neither verdict follows the entry.
+    """
+    label = _label(path, root)
+    if path.is_symlink():
+        try:
+            target = os.readlink(path)
+        except OSError:  # pragma: no cover - readlink of a link we just saw
+            target = "<unreadable>"
+        return f"{label} is a symlink to {target!r}, not a real directory"
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"{label} cannot be inspected ({exc.strerror})"
+    if not stat.S_ISDIR(entry.st_mode):
+        return f"{label} exists and is not a directory"
+    return None
+
+
+def _refuse_unless_real_dir(path: Path, root: Path) -> None:
+    """Refuse before following: mkdir and chmod both chase a symlink."""
+    reason = _layout_reason(path, root)
+    if reason is None:
+        return
+    raise SafetyRefusal(
+        f"refusing to use {path} as a state directory: {reason}. Every state directory must be "
+        f"a real directory under {root}, because mkdir, chmod and every later write follow a "
+        "symlink and would carry private conversation content outside the configured state "
+        "directory."
+    )
+
+
+def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
+    """Create ``parent/name``, having proven it is a real direct child.
+
+    ``parent`` is a mandatory state directory the caller has already verified.
+    ``name`` must be one path component, the entry must not be a symlink, and
+    the created directory's parent must still be ``parent`` afterwards.
+    """
+    if name in ("", ".", "..") or name != Path(name).name:
+        raise SafetyRefusal(
+            f"refusing to create the state directory {name!r} under {parent}: a dynamically "
+            "named state directory must be a single path component, not a path"
+        )
+    path = parent / name
+    _refuse_unless_real_dir(path, root)
+    path.mkdir(exist_ok=True)
+    _chmod_to(path, DIR_MODE)
+    if path.is_symlink() or not path.is_dir() or path.parent.resolve() != parent.resolve():
+        raise SafetyRefusal(
+            f"refusing to use {path} as a state directory: it is not a real directory directly "
+            f"beneath {parent} after creation"
+        )
+    return path
 
 
 def _mode_of(path: Path) -> str:

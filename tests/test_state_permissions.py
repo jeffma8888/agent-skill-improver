@@ -16,11 +16,21 @@ mode at all, which is the version of this test that proves nothing.
 **They measure the mode.** ``chmod`` succeeding is not evidence the mode changed:
 on a filesystem that carries no POSIX modes it is accepted and does nothing. So
 every assertion reads ``stat().st_mode`` back off disk.
+
+The last class here measures a different property: that the tree being made
+private is the tree that was configured. ``mkdir(exist_ok=True)``, ``chmod`` and
+every later write follow a symlink, so a state root or a mandatory subdirectory
+precreated as a link redirects the private tree somewhere else entirely -- and a
+mode measured through the link then describes a directory this tool does not own.
+Those tests therefore assert the refusal *and* that the outside target's mode and
+contents are exactly what they were, because a refusal that has already chmodded
+the target is not a refusal.
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import stat
 import unittest
@@ -36,6 +46,8 @@ from agent_skill_improver.app.state import (
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.errors import SafetyRefusal
 from agent_skill_improver.jsonio import FILE_MODE, write_json, write_text_atomic
+
+from tests.support import build_env, run_cli
 
 
 def mode_of(path: Path) -> int:
@@ -234,6 +246,191 @@ class ExistingStateIsRepairedTests(StateTreeHarness):
         (self.root / "raw" / "link.json").symlink_to(outside)
         store.repair_permissions()
         self.assertEqual(oct(mode_of(outside)), oct(0o644))
+
+
+class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
+    """A state directory must be a real directory, checked before it is followed.
+
+    Gitignoring and chmodding the tree are both worthless if the tree is not the
+    one that was configured. These are the cases where an entry the store treats
+    as its own directory is really a link to somewhere else.
+    """
+
+    def _outside_dir(self) -> Path:
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        os.chmod(outside, 0o755)
+        (outside / "keep.txt").write_text("keep me", encoding="utf-8")
+        os.chmod(outside / "keep.txt", 0o644)
+        return outside
+
+    def _assert_outside_untouched(self, outside: Path) -> None:
+        self.assertEqual(oct(mode_of(outside)), oct(0o755))
+        self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
+
+    def test_a_state_root_that_is_a_symlink_is_refused_before_anything_is_created(self):
+        outside = self._outside_dir()
+        self.root.symlink_to(outside)
+        store = self.store()
+        with self.assertRaises(SafetyRefusal) as ctx:
+            store.ensure()
+        self.assertIn("real directory", str(ctx.exception))
+        self._assert_outside_untouched(outside)
+        self.assertEqual(
+            store.layout_problems(),
+            [f". is a symlink to {str(outside)!r}, not a real directory"],
+        )
+
+    def test_a_symlinked_state_root_receives_no_layout_and_no_artifact(self):
+        outside = self._outside_dir()
+        self.root.symlink_to(outside)
+        store = self.store()
+        with self.assertRaises(SafetyRefusal):
+            store.ensure()
+        with self.assertRaises(SafetyRefusal):
+            store.write_raw("thread-1", '{"thread": {"id": "thread-1"}}')
+        self._assert_outside_untouched(outside)
+
+    def test_a_mandatory_subdirectory_that_is_a_symlink_is_refused(self):
+        outside = self._outside_dir()
+        self.root.mkdir(parents=True)
+        os.chmod(self.root, DIR_MODE)
+        (self.root / "raw").symlink_to(outside)
+        store = self.store()
+        with self.assertRaises(SafetyRefusal) as ctx:
+            store.ensure()
+        message = str(ctx.exception)
+        self.assertIn("raw", message)
+        self.assertIn("real directory", message)
+        self._assert_outside_untouched(outside)
+
+    def test_a_write_through_a_symlinked_mandatory_subdirectory_is_refused(self):
+        """The write path, not only ``ensure``. ``dir()`` is what every write goes
+        through, so a store that was never ``ensure``d must refuse there too."""
+        outside = self._outside_dir()
+        self.root.mkdir(parents=True)
+        os.chmod(self.root, DIR_MODE)
+        (self.root / "raw").symlink_to(outside)
+        store = self.store()
+        with self.assertRaises(SafetyRefusal):
+            store.write_raw("thread-1", '{"thread": {"id": "thread-1"}}')
+        self.assertFalse((outside / "thread-1.json").exists())
+        self._assert_outside_untouched(outside)
+
+    def test_a_repair_walk_does_not_chmod_through_a_redirected_layout(self):
+        """The repair is the dangerous half: it exists to chmod, and it must not
+        chmod a directory reached through a link the tool does not own."""
+        outside = self._outside_dir()
+        self.root.mkdir(parents=True)
+        os.chmod(self.root, 0o755)
+        (self.root / "raw").symlink_to(outside)
+        store = self.store()
+        self.assertEqual(store.repair_permissions(), [])
+        self.assertEqual(store.permission_problems(), [])
+        self.assertEqual(len(store.layout_problems()), 1)
+        self._assert_outside_untouched(outside)
+        self.assertEqual(oct(mode_of(self.root)), oct(0o755), "the root was not chmodded either")
+
+    def test_a_mandatory_state_directory_that_is_a_regular_file_is_refused(self):
+        self.root.mkdir(parents=True)
+        os.chmod(self.root, DIR_MODE)
+        (self.root / "raw").write_text("not a directory", encoding="utf-8")
+        store = self.store()
+        self.assertEqual(store.layout_problems(), ["raw exists and is not a directory"])
+        with self.assertRaises(SafetyRefusal):
+            store.ensure()
+
+    def test_a_precreated_backup_directory_symlink_is_refused(self):
+        """The dynamically named case. The stamp is guessable, so an entry that
+        already exists under ``backups/`` must be proven rather than accepted."""
+        store = self.store()
+        store.ensure()
+        outside = self._outside_dir()
+        (self.root / "backups" / "cand-1--20260102-000000").symlink_to(outside)
+        with self.assertRaises(SafetyRefusal) as ctx:
+            store.backup_dir_for("cand-1", "20260102-000000")
+        self.assertIn("real directory", str(ctx.exception))
+        self._assert_outside_untouched(outside)
+
+    def test_a_backup_directory_is_created_as_a_direct_child_of_backups(self):
+        """The control for the case above: the healthy path still creates a real
+        0700 directory, directly beneath the mandatory ``backups`` directory."""
+        store = self.store()
+        store.ensure()
+        path = store.backup_dir_for("cand-1", "20260102-000000")
+        self.assertFalse(path.is_symlink())
+        self.assertTrue(path.is_dir())
+        self.assertEqual(path.parent, self.root / "backups")
+        self.assertEqual(path.parent.resolve(), (self.root / "backups").resolve())
+        self.assertEqual(oct(mode_of(path)), oct(DIR_MODE))
+
+    def test_a_backup_manifest_is_not_read_through_a_symlinked_backup_directory(self):
+        store = self.store()
+        store.ensure()
+        outside = self._outside_dir()
+        write_json(outside / "backup.json", {"schema": "asi.backup.v1"})
+        (self.root / "backups" / "cand-1--20260102-000000").symlink_to(outside)
+        self.assertIsNone(store.latest_backup_manifest("cand-1"))
+
+    def test_the_control_shows_a_healthy_layout_reports_no_problems(self):
+        store = self.store()
+        store.ensure()
+        self.assertEqual(store.layout_problems(), [])
+        store.verify_layout()
+        for name in SUBDIRS:
+            path = self.root / name
+            self.assertTrue(path.is_dir() and not path.is_symlink(), name)
+
+    def test_an_arbitrary_leaf_symlink_is_still_skipped_rather_than_refused(self):
+        """The confinement check covers the root and the mandatory directories.
+        A link some other tool left in the tree must still be walked past without
+        touching its target, which is the behaviour that already existed."""
+        store = self.store()
+        store.ensure()
+        outside = self.root.parent / "outside.txt"
+        outside.write_text("x", encoding="utf-8")
+        os.chmod(outside, 0o644)
+        (self.root / "raw" / "link.json").symlink_to(outside)
+        self.assertEqual(store.layout_problems(), [])
+        store.repair_permissions()
+        store.verify_permissions()
+        self.assertEqual(oct(mode_of(outside)), oct(0o644))
+
+
+class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
+    """``doctor`` runs on a tree nobody has ensured yet, so it is the command most
+    likely to meet this layout first. It must report it and repair nothing."""
+
+    def test_doctor_reports_a_symlinked_state_subdirectory_without_chmodding_it(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = build_env(base, dry_run=True)
+            outside = base / "outside"
+            outside.mkdir()
+            os.chmod(outside, 0o755)
+            (outside / "keep.txt").write_text("keep me", encoding="utf-8")
+            os.chmod(outside / "keep.txt", 0o644)
+            state = base / "state"
+            state.mkdir()
+            os.chmod(state, DIR_MODE)
+            (state / "raw").symlink_to(outside)
+
+            proc = run_cli(["--config", str(config), "--json", "doctor"])
+
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            payload = json.loads(proc.stdout)
+            unsafe = payload["state_permissions"]["unsafe_layout"]
+            self.assertEqual(len(unsafe), 1, unsafe)
+            self.assertIn("raw", unsafe[0])
+            self.assertTrue(
+                any("not confined" in problem for problem in payload["problems"]),
+                payload["problems"],
+            )
+            self.assertEqual(payload["state_permissions"]["repaired"], [])
+            self.assertEqual(oct(mode_of(outside)), oct(0o755))
+            self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
 
 
 class LockFileTests(StateTreeHarness):
