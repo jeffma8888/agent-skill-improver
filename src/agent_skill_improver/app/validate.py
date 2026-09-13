@@ -10,6 +10,14 @@ user's replies are all fixed history.
 Two arms are scored per (conversation, rubric) pair and cached, so a conversation
 contributes its target case and all of its holdout criteria for the price of two
 model calls.
+
+Every record this module writes must parse under its own strict parser
+(``ValidationRecord.parse``), on the error paths as much as on the happy one. So
+the rubric bindings and the judgements are derived from the outcomes that were
+actually *persisted*, never from the cases that were merely attempted, and a
+target the candidate claims but that could not be replayed fails the gate here
+rather than becoming a nominally validated record that review later has to call
+tampered.
 """
 
 from __future__ import annotations
@@ -34,8 +42,10 @@ from ..domain.validation import (
     ReplayCase,
     ReplayOutcome,
     RubricBinding,
+    TargetCaseRef,
     blind_arms,
     evaluate_gate,
+    evidence_call_count,
     parse_judgement,
 )
 from ..errors import AsiError
@@ -54,10 +64,11 @@ class ValidationResult:
     scorer_command_id: str
     judge_command_id: str
     rubrics: tuple[RubricBinding, ...]
+    target_refs: tuple[TargetCaseRef, ...]
     outcomes: tuple[ReplayOutcome, ...]
     judgements: tuple[Judgement, ...]
     decision: GateDecision
-    model_calls: int
+    evidence_model_calls: int
     notes: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,23 +82,30 @@ class ValidationResult:
             "scorer_command_id": self.scorer_command_id,
             "judge_command_id": self.judge_command_id,
             "rubrics": [r.to_dict() for r in self.rubrics],
+            "target_refs": [r.to_dict() for r in self.target_refs],
             "gate": self.decision.to_dict(),
             "outcomes": [o.to_dict() for o in self.outcomes],
             "judgements": [j.to_dict() for j in self.judgements],
-            "model_calls": self.model_calls,
+            "evidence_model_calls": self.evidence_model_calls,
             "notes": list(self.notes),
         }
 
 
-def _rubric_for_pair(
-    rubrics: Mapping[str, Rubric], rubric_id: str, criterion_id: str
-) -> Rubric | None:
-    rubric = rubrics.get(rubric_id)
-    if rubric is not None and rubric.criterion(criterion_id) is not None:
-        return rubric
-    for candidate_rubric in rubrics.values():
-        if candidate_rubric.criterion(criterion_id) is not None:
-            return candidate_rubric
+def _rubric_grading(rubrics: Mapping[str, Rubric], criterion_id: str) -> Rubric | None:
+    """The first loaded rubric that grades ``criterion_id``, or ``None``.
+
+    Used for holdout pairs only. A holdout is named by ``(conversation,
+    criterion)`` with no rubric attached, so the rubric has to be looked up.
+
+    A *target* is deliberately not resolved this way. A target names its rubric
+    in the candidate's own failure ref, and the outcome is bound to that exact
+    triple, so falling back to "whichever other rubric happens to grade a
+    criterion with this id" would produce evidence attributed to an examiner the
+    candidate never claimed -- the substitution the binding exists to prevent.
+    """
+    for rubric in rubrics.values():
+        if rubric.criterion(criterion_id) is not None:
+            return rubric
     return None
 
 
@@ -116,6 +134,14 @@ def validate_candidate(
     and improver roles (``runner.command_id``), never from a caller-supplied
     label comparison: the persisted validation binds these two command ids, and
     a later verifier re-derives independence from them the same way.
+
+    Every target is bound to the candidate's own failure ref by the exact
+    ``(rubric_id, conversation_id, criterion_id)`` triple: the rubric named by
+    the ref must be loaded and must grade the criterion, with no fallback to
+    another rubric that happens to use the same criterion id. A claimed target
+    that cannot be replayed is still recorded in the claim set, so the gate
+    fails here with a named coverage reason instead of producing a record that
+    passes now and refuses itself at review time.
     """
     verify_candidate_integrity(candidate, base_text=base_text, action="validate")
     notes: list[str] = []
@@ -126,36 +152,53 @@ def validate_candidate(
     judge_command_id = runner.command_id(ROLE_JUDGE) if policy.require_judge else ""
     judge_independent = bool(judge_command_id) and judge_command_id != improver_command_id
 
+    # The claim set is recorded whether or not a case turns out to be
+    # replayable, because it is what the gate is asked to prove. A claimed
+    # target with no outcome is a coverage failure with a named reason, not a
+    # case that quietly disappears from the evidence.
+    claimed_refs: list[TargetCaseRef] = []
     targets: list[tuple[ReplayCase, str]] = []
-    seen_keys: set[str] = set()
+    seen_refs: set[str] = set()
     for ref in candidate.rubric_failures:
-        rubric = _rubric_for_pair(rubrics, ref.rubric_id, ref.criterion_id)
-        if rubric is None:
+        claim = TargetCaseRef(
+            rubric_id=ref.rubric_id,
+            conversation_id=ref.conversation_id,
+            criterion_id=ref.criterion_id,
+        )
+        if claim.key in seen_refs:
+            continue
+        seen_refs.add(claim.key)
+        claimed_refs.append(claim)
+        rubric = rubrics.get(ref.rubric_id)
+        if rubric is None or rubric.criterion(ref.criterion_id) is None:
             notes.append(
-                f"criterion {ref.criterion_id!r} is not in any loaded rubric; case skipped"
+                f"target {claim.key} names rubric {ref.rubric_id!r}, which is not loaded or does "
+                f"not grade criterion {ref.criterion_id!r}; the case was NOT replayed, and the "
+                "gate refuses for want of coverage rather than substituting another rubric"
             )
             continue
         if ref.conversation_id not in conversations:
             notes.append(
-                f"conversation {ref.conversation_id} is not available for replay; case skipped"
+                f"conversation {ref.conversation_id} is not available for replay, so target "
+                f"{claim.key} was NOT replayed and the gate refuses for want of coverage"
             )
             continue
-        case = ReplayCase(ref.conversation_id, ref.criterion_id, CASE_TARGET)
-        if case.key in seen_keys:
-            continue
-        seen_keys.add(case.key)
-        targets.append((case, rubric.id))
+        targets.append((ReplayCase(ref.conversation_id, ref.criterion_id, CASE_TARGET), rubric.id))
 
     target_conversations = {c.conversation_id for c, _ in targets}
+    target_case_keys = {c.key for c, _ in targets}
     holdouts: list[tuple[ReplayCase, str]] = []
+    seen_holdout_keys: set[str] = set()
     extra_conversations: set[str] = set()
     for conversation_id, criterion_id in holdout_pairs:
         key = f"{conversation_id}::{criterion_id}"
-        if key in seen_keys:
+        # A case is either the failure under repair or untouched control
+        # evidence, never both: the record refuses a case recorded as two kinds.
+        if key in target_case_keys or key in seen_holdout_keys:
             continue
         if conversation_id not in conversations:
             continue
-        rubric = _rubric_for_pair(rubrics, "", criterion_id)
+        rubric = _rubric_grading(rubrics, criterion_id)
         if rubric is None:
             continue
         if conversation_id not in target_conversations:
@@ -163,19 +206,20 @@ def validate_candidate(
                 if len(extra_conversations) >= max_extra_holdout_conversations:
                     continue
                 extra_conversations.add(conversation_id)
-        seen_keys.add(key)
+        seen_holdout_keys.add(key)
         holdouts.append((ReplayCase(conversation_id, criterion_id, CASE_HOLDOUT), rubric.id))
 
     cache: dict[tuple[str, str, str], dict[str, Verdict]] = {}
-    calls = 0
+    attempted_calls = 0
 
     def verdicts(conversation_id: str, rubric_id: str, arm: str) -> dict[str, Verdict]:
-        nonlocal calls
+        nonlocal attempted_calls
         key = (conversation_id, rubric_id, arm)
         if key in cache:
             return cache[key]
         rubric = rubrics[rubric_id]
         conversation = conversations[conversation_id]
+        attempted_calls += 1
         card, _ = score_conversation(
             conversation,
             rubric,
@@ -186,7 +230,6 @@ def validate_candidate(
             skill_under_evaluation=skill_id,
             skill_text=base_text if arm == ARM_BASELINE else new_text,
         )
-        calls += 1
         result = {s.criterion_id: s.verdict for s in card.scores}
         cache[key] = result
         return result
@@ -213,8 +256,19 @@ def validate_candidate(
 
     judgements: list[Judgement] = []
     if policy.require_judge:
-        for case, rubric_id in targets:
-            rubric = rubrics[rubric_id]
+        # Only cases with a persisted target outcome are judged. A judgement
+        # about a case that produced no outcome is evidence about nothing: the
+        # record's own parser refuses it, so producing one would write a record
+        # that cannot be read back.
+        judged_keys: set[str] = set()
+        for outcome in outcomes:
+            if outcome.case.kind != CASE_TARGET:
+                continue
+            case = outcome.case
+            if case.key in judged_keys:
+                continue
+            judged_keys.add(case.key)
+            rubric = rubrics[outcome.rubric_id]
             criterion = rubric.criterion(case.criterion_id)
             arms = blind_arms(case.key, seed)
             texts = {
@@ -224,7 +278,8 @@ def validate_candidate(
             rationale = ""
             for ref in candidate.rubric_failures:
                 if (
-                    ref.criterion_id == case.criterion_id
+                    ref.rubric_id == outcome.rubric_id
+                    and ref.criterion_id == case.criterion_id
                     and ref.conversation_id == case.conversation_id
                 ):
                     rationale = candidate.hypothesis
@@ -238,13 +293,13 @@ def validate_candidate(
                 seed=seed,
             )
             try:
+                attempted_calls += 1
                 payload = runner.run(
                     role=ROLE_JUDGE,
                     system=prompts.judge_system_prompt(),
                     user=user,
                     response_schema="asi.judgement.v1",
                 )
-                calls += 1
                 judgements.append(parse_judgement(payload, case=case, arms=arms))
             except (AsiError, ValueError) as exc:
                 notes.append(f"judge for {case.key} produced no usable verdict: {exc}")
@@ -254,8 +309,18 @@ def validate_candidate(
             "judge and improver run the same command: the blind preference below is correlated "
             "with the proposal and is not independent evidence"
         )
-    decision = evaluate_gate(outcomes, judgements, policy, judge_independent=judge_independent)
-    used_rubric_ids = sorted({rid for _, rid in targets} | {rid for _, rid in holdouts})
+    decision = evaluate_gate(
+        outcomes,
+        judgements,
+        policy,
+        judge_independent=judge_independent,
+        target_refs=tuple(claimed_refs),
+    )
+    # Bindings come from the outcomes that were persisted, not from the cases
+    # that were attempted. A rubric whose replay produced nothing would
+    # otherwise be bound with nothing to check it against, and the record's own
+    # parser rejects such an unused binding.
+    used_rubric_ids = sorted({o.rubric_id for o in outcomes})
     rubric_bindings = tuple(
         RubricBinding(
             rubric_id=rid,
@@ -264,6 +329,14 @@ def validate_candidate(
         )
         for rid in used_rubric_ids
     )
+    evidence_calls = evidence_call_count(outcomes, judgements)
+    if attempted_calls != evidence_calls:
+        notes.append(
+            f"{attempted_calls} model call(s) were attempted and {evidence_calls} produced the "
+            "evidence recorded here; evidence_model_calls counts only the calls behind the "
+            "persisted outcomes and judgements, because that is the number a verifier can "
+            "recompute from this record"
+        )
     return ValidationResult(
         candidate_id=candidate.id,
         base_sha256=candidate.target.base_sha256,
@@ -273,9 +346,10 @@ def validate_candidate(
         scorer_command_id=scorer_command_id,
         judge_command_id=judge_command_id,
         rubrics=rubric_bindings,
+        target_refs=tuple(claimed_refs),
         outcomes=tuple(outcomes),
         judgements=tuple(judgements),
         decision=decision,
-        model_calls=calls,
+        evidence_model_calls=evidence_calls,
         notes=tuple(notes),
     )

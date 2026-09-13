@@ -14,7 +14,7 @@ SCHEMA_CANDIDATE = "asi.candidate.v1"
 SCHEMA_JUDGEMENT = "asi.judgement.v1"
 SCHEMA_RECEIPT = "asi.receipt.v1"
 SCHEMA_MODEL_REQUEST = "asi.model_request.v1"
-SCHEMA_VALIDATION = "asi.validation.v2"
+SCHEMA_VALIDATION = "asi.validation.v3"
 
 __all__ = [
     "__version__",

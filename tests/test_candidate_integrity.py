@@ -60,7 +60,9 @@ from agent_skill_improver.domain.validation import (
     ReplayCase,
     ReplayOutcome,
     RubricBinding,
+    TargetCaseRef,
     evaluate_gate,
+    evidence_call_count,
 )
 from agent_skill_improver.errors import (
     BaseHashMismatch,
@@ -463,9 +465,11 @@ class TamperMatrixTests(unittest.TestCase):
     # -- schema / type tamper: strict parsing, not a best-effort read --
     def test_wrong_type_field_is_refused(self):
         def mutate(raw):
-            raw["validation"]["model_calls"] = str(raw["validation"]["model_calls"])
+            raw["validation"]["evidence_model_calls"] = str(
+                raw["validation"]["evidence_model_calls"]
+            )
 
-        self.assert_scenario_refuses(mutate, name="wrong-type model_calls")
+        self.assert_scenario_refuses(mutate, name="wrong-type evidence_model_calls")
 
     def test_unknown_key_is_refused(self):
         def mutate(raw):
@@ -552,14 +556,19 @@ def build_validation(
     outcomes: tuple[ReplayOutcome, ...] | None = None,
     judgements: tuple[Any, ...] = (),
     rubrics: tuple[RubricBinding, ...] | None = None,
-    model_calls: int | None = None,
+    target_refs: tuple[TargetCaseRef, ...] | None = None,
+    evidence_model_calls: int | None = None,
 ) -> dict[str, Any]:
-    """A real, self-consistent ``asi.validation.v2`` record for ``candidate``.
+    """A real, self-consistent ``asi.validation.v3`` record for ``candidate``.
 
     Built from the same domain functions the production writer uses
     (:func:`evaluate_gate`, :class:`ValidationResult`), never hand-typed, so the
     gate's ``metrics`` always agree byte-exact with a fresh recomputation --
     exactly what :func:`ValidationRecord.recompute_gate_mismatches` checks.
+
+    ``target_refs`` defaults to the candidate's own ``rubric_failures``, which is
+    what the production writer records, so the helper cannot accidentally build
+    the very mismatch the binding checks exist to catch.
     """
     policy = policy or GatePolicy(
         min_fixes=1,
@@ -585,11 +594,25 @@ def build_validation(
                 rubric_id="instruction-compliance", version=1, source_sha256=RUBRIC_SOURCE_SHA
             ),
         )
+    if target_refs is None:
+        target_refs = tuple(
+            TargetCaseRef(
+                rubric_id=ref.rubric_id,
+                conversation_id=ref.conversation_id,
+                criterion_id=ref.criterion_id,
+            )
+            for ref in candidate.rubric_failures
+        )
     judge_independent = bool(judge_command_id) and judge_command_id != improver_command_id
-    decision = evaluate_gate(outcomes, judgements, policy, judge_independent=judge_independent)
-    if model_calls is None:
-        distinct_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
-        model_calls = 2 * len(distinct_pairs) + len(judgements)
+    decision = evaluate_gate(
+        outcomes,
+        judgements,
+        policy,
+        judge_independent=judge_independent,
+        target_refs=target_refs,
+    )
+    if evidence_model_calls is None:
+        evidence_model_calls = evidence_call_count(outcomes, judgements)
     result = ValidationResult(
         candidate_id=candidate.id,
         base_sha256=candidate.target.base_sha256,
@@ -599,10 +622,11 @@ def build_validation(
         scorer_command_id=scorer_command_id,
         judge_command_id=judge_command_id,
         rubrics=rubrics,
+        target_refs=target_refs,
         outcomes=outcomes,
         judgements=judgements,
         decision=decision,
-        model_calls=model_calls,
+        evidence_model_calls=evidence_model_calls,
         notes=(),
     )
     return result.to_dict()

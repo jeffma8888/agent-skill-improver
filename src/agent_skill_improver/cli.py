@@ -794,6 +794,21 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "judge independence must be derived from command ids, never a stored boolean",
         )
     )
+    validate_src = (package_dir() / "app" / "validate.py").read_text(encoding="utf-8")
+    checks.append(
+        (
+            "every target outcome is bound to an exact candidate failure ref",
+            "class TargetCaseRef" in validation_src
+            and "target_refs" in validation_src
+            and "def evidence_call_count" in validation_src
+            and "validation.target_refs is not exactly this candidate" in integrity_src
+            and "target_refs=tuple(claimed_refs)" in validate_src,
+            "a target outcome must be bound to a candidate failure ref by the whole "
+            "(rubric_id, conversation_id, criterion_id) triple, the claim set must equal the "
+            "candidate's own rubric_failures, and the model-call count must be exactly derivable "
+            "from the persisted evidence rather than asserted beside it",
+        )
+    )
     ok = all(passed for _, passed, _ in checks)
     payload = {
         "checks": [

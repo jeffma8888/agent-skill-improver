@@ -23,7 +23,7 @@ too so every call site reports the same thing in the same words.
 from __future__ import annotations
 
 from pathlib import PurePath
-from typing import Any, Mapping
+from typing import Mapping
 
 from ..errors import CandidateTampered
 from ..hashing import sha256_text, short
@@ -38,8 +38,9 @@ from .candidate import (
     challenge_for,
     make_patch,
 )
+from .rubric import Rubric
 from .skills import SKILL_FILENAME
-from .validation import CASE_TARGET, ValidationRecord
+from .validation import CASE_TARGET, TargetCaseRef, ValidationRecord
 
 #: Statuses that may only exist once validation ran and recorded a gate.
 _STATUSES_REQUIRING_VALIDATION = (
@@ -190,7 +191,7 @@ def verify_candidate_integrity(
 
 
 def validation_mismatches(
-    candidate: Candidate, *, rubrics: Mapping[str, Any] | None = None
+    candidate: Candidate, *, rubrics: Mapping[str, Rubric] | None = None
 ) -> list[str]:
     """Every disagreement between the persisted validation and a fresh recomputation.
 
@@ -203,7 +204,21 @@ def validation_mismatches(
     ids, never from a stored boolean -- and compared byte-exact to the persisted
     decision. When ``rubrics`` (the currently configured rubrics, keyed by id)
     is supplied, every rubric binding the record claims to have scored against
-    is also checked for exact version and source-hash agreement.
+    is also checked for exact version and source-hash agreement, and every
+    outcome is checked against the live rubric it names actually grading the
+    criterion it reports.
+
+    The binding between record and candidate is the exact
+    ``(rubric_id, conversation_id, criterion_id)`` triple, in both directions:
+
+    * the record's claim set must equal the candidate's own ``rubric_failures``,
+      so a failure ref cannot be added to or removed from either side alone;
+    * no target outcome may name a triple the candidate does not claim, so a
+      rubric id cannot be swapped for another rubric that happens to be live
+      with a matching version and source hash;
+    * for a promotion-eligible status (one that asserts the gate passed) every
+      claimed triple must have a persisted target outcome, so a candidate can
+      never be offered for apply on partial evidence.
     """
     validation = candidate.validation
     if candidate.status not in _STATUSES_REQUIRING_VALIDATION:
@@ -239,17 +254,57 @@ def validation_mismatches(
             "improver_command_id: judge independence cannot be derived from a command id "
             "that disagrees with the candidate it is supposed to describe"
         )
-    known_failure_keys = {
-        f"{ref.conversation_id}::{ref.criterion_id}" for ref in candidate.rubric_failures
+    claimed_refs = {
+        TargetCaseRef(
+            rubric_id=ref.rubric_id,
+            conversation_id=ref.conversation_id,
+            criterion_id=ref.criterion_id,
+        )
+        for ref in candidate.rubric_failures
     }
-    for outcome in record.outcomes:
-        if outcome.case.kind != CASE_TARGET:
-            continue
-        if outcome.case.key not in known_failure_keys:
+    bound_refs = set(record.target_refs)
+    if claimed_refs != bound_refs:
+        detail = []
+        omitted = sorted(r.key for r in claimed_refs - bound_refs)
+        added = sorted(r.key for r in bound_refs - claimed_refs)
+        if omitted:
+            detail.append(f"claimed by the candidate but not bound by the validation: {omitted}")
+        if added:
+            detail.append(f"bound by the validation but not claimed by the candidate: {added}")
+        problems.append(
+            "validation.target_refs is not exactly this candidate's own rubric_failures as "
+            "(rubric_id, conversation_id, criterion_id) triples: "
+            + "; ".join(detail)
+            + ". Adding or dropping a claimed failure on either side changes what the gate was "
+            "asked to prove, so neither may move without the other"
+        )
+    replayed_refs = {o.ref for o in record.outcomes if o.case.kind == CASE_TARGET}
+    invented = sorted(r.key for r in replayed_refs - claimed_refs)
+    if invented:
+        problems.append(
+            f"validation.outcomes has target case(s) {invented} that are not among this "
+            "candidate's own rubric_failures: a target outcome must be about a failure this "
+            "candidate actually claims to fix, named by rubric as well as by conversation and "
+            "criterion, not an invented, unrelated or re-attributed case"
+        )
+    if candidate.status in _STATUSES_ASSERTING_A_PASS:
+        unreplayed = sorted(r.key for r in claimed_refs - replayed_refs)
+        if unreplayed:
             problems.append(
-                f"validation.outcomes has a target case {outcome.case.key!r} that is not among "
-                "this candidate's own rubric_failures: a target outcome must be about a failure "
-                "this candidate actually claims to fix, not an invented or unrelated case"
+                f"status is {candidate.status!r}, which asserts the gate passed, but claimed "
+                f"target case(s) {unreplayed} have no persisted replay outcome: a "
+                "promotion-eligible candidate must carry a measured target replay for every "
+                "failure it claims to fix, and a partial replay is not the evidence the status "
+                "advertises"
+            )
+    bound_versions = {binding.rubric_id: binding.version for binding in record.rubrics}
+    for ref in candidate.rubric_failures:
+        bound_version = bound_versions.get(ref.rubric_id)
+        if bound_version is not None and bound_version != ref.rubric_version:
+            problems.append(
+                f"rubric_failures names {ref.rubric_id!r} at version {ref.rubric_version} but "
+                f"validation.rubrics binds that rubric at version {bound_version}: the failure "
+                "was measured by a different version of the examiner than the gate was"
             )
 
     problems.extend(record.recompute_gate_mismatches())
@@ -274,6 +329,19 @@ def validation_mismatches(
                     "currently configured rubric's source: the criteria that decided this gate "
                     "are not the criteria configured now"
                 )
+        for outcome in record.outcomes:
+            live_rubric = rubrics.get(outcome.rubric_id)
+            if live_rubric is None:
+                # Already reported once by the binding check above; saying it
+                # again per outcome would bury the specific problem in noise.
+                continue
+            if live_rubric.criterion(outcome.case.criterion_id) is None:
+                problems.append(
+                    f"validation.outcomes case {outcome.case.key!r} says it was scored by "
+                    f"{outcome.rubric_id!r}, but that rubric has no criterion "
+                    f"{outcome.case.criterion_id!r}: the outcome names an examiner that cannot "
+                    "have produced it"
+                )
     return problems
 
 
@@ -281,7 +349,7 @@ def verify_full_integrity(
     candidate: Candidate,
     *,
     base_text: str | None = None,
-    rubrics: Mapping[str, Any] | None = None,
+    rubrics: Mapping[str, Rubric] | None = None,
     action: str,
 ) -> None:
     """The one fail-closed verifier review and apply must call before anything else.

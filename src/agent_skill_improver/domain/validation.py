@@ -10,6 +10,9 @@ mechanism can.
 
 What the gate does enforce:
 
+* every failure the candidate claims to fix was actually replayed, bound by the
+  exact ``(rubric_id, conversation_id, criterion_id)`` triple rather than by a
+  conversation/criterion pair two different rubrics could both answer to;
 * a minimum number of real fixes (FAIL -> PASS on the targeted cases);
 * zero regressions (PASS -> FAIL anywhere, targeted or holdout);
 * zero holdout degradations (PASS -> INSUFFICIENT is a loss of evidence, not a
@@ -56,6 +59,48 @@ class ReplayCase:
         }
 
 
+_TARGET_REF_KEYS = frozenset({"rubric_id", "conversation_id", "criterion_id"})
+
+
+@dataclass(frozen=True)
+class TargetCaseRef:
+    """One failure a candidate claims to fix: rubric, conversation, criterion.
+
+    The identity is the whole triple, and that is the point. A
+    ``conversation_id::criterion_id`` pair does not identify an examiner: two
+    rubrics can grade criteria with the same id, and a rubric id sitting beside
+    an outcome can be rewritten to name a *different* rubric that is live with a
+    matching version and source hash. A binding that omits the rubric is
+    therefore satisfiable by evidence some other examiner produced, which is
+    exactly the substitution this type exists to make impossible.
+    """
+
+    rubric_id: str
+    conversation_id: str
+    criterion_id: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.rubric_id}::{self.conversation_id}::{self.criterion_id}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rubric_id": self.rubric_id,
+            "conversation_id": self.conversation_id,
+            "criterion_id": self.criterion_id,
+        }
+
+    @staticmethod
+    def from_mapping(raw: Any, *, label: str) -> "TargetCaseRef":
+        raw = _expect_mapping(raw, label=label)
+        _expect_exact_keys(raw, _TARGET_REF_KEYS, label=label)
+        return TargetCaseRef(
+            rubric_id=_expect_nonempty_str(raw, "rubric_id", label=label),
+            conversation_id=_expect_nonempty_str(raw, "conversation_id", label=label),
+            criterion_id=_expect_nonempty_str(raw, "criterion_id", label=label),
+        )
+
+
 @dataclass(frozen=True)
 class ReplayOutcome:
     case: ReplayCase
@@ -67,6 +112,20 @@ class ReplayOutcome:
     #: top-level list of rubrics cannot say which one produced which outcome
     #: when two rubrics grade overlapping criterion ids.
     rubric_id: str = ""
+
+    @property
+    def ref(self) -> TargetCaseRef:
+        """The exact triple this outcome is evidence about.
+
+        Built from the rubric that actually scored the case, so a target outcome
+        can be compared against a candidate failure ref without either side
+        being able to stand in for the other on a partial match.
+        """
+        return TargetCaseRef(
+            rubric_id=self.rubric_id,
+            conversation_id=self.case.conversation_id,
+            criterion_id=self.case.criterion_id,
+        )
 
     @property
     def fixed(self) -> bool:
@@ -96,6 +155,24 @@ class ReplayOutcome:
             "degraded": self.degraded,
             "unresolved": self.unresolved,
         }
+
+
+def evidence_call_count(outcomes: Sequence[ReplayOutcome], judgements: Sequence[Judgement]) -> int:
+    """The number of model calls that produced this record's persisted evidence.
+
+    Exactly derivable, and therefore checkable by a verifier that has only the
+    record: each distinct ``(conversation, rubric)`` pair behind an outcome was
+    scored once per arm, and each persisted judgement is one judge call.
+
+    Calls that were attempted and produced nothing usable are deliberately *not*
+    in this number; they are reported in ``notes`` instead. A field that mixed
+    "work attempted" with "evidence kept" could not be recomputed from the
+    record, and a number a verifier cannot recompute is not evidence -- it is an
+    assertion that happens to sit next to evidence, which is precisely how a
+    tampered count survives verification.
+    """
+    pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
+    return 2 * len(pairs) + len(judgements)
 
 
 def blind_arms(case_key: str, seed: str) -> dict[str, str]:
@@ -195,6 +272,7 @@ def evaluate_gate(
     policy: GatePolicy,
     *,
     judge_independent: bool = True,
+    target_refs: Sequence[TargetCaseRef] = (),
 ) -> GateDecision:
     """Decide whether a candidate may be *offered* for human approval.
 
@@ -204,6 +282,15 @@ def evaluate_gate(
     ``judge_independent`` is passed in rather than inferred, because independence
     is a property of the *configuration* (which command runs which role) and the
     domain layer deliberately cannot read configuration.
+
+    ``target_refs`` is the set of failures the candidate claims to fix. Every one
+    of them must have a target outcome, matched on the whole
+    ``(rubric_id, conversation_id, criterion_id)`` triple, or the gate fails for
+    want of coverage. That is what makes an unavailable replay an honest gate
+    failure at production time instead of a nominally passing record that a later
+    verifier has to call tampered. It is a sequence rather than a boolean so the
+    same decision can be recomputed byte-exact from a persisted record, which
+    carries the same claim set.
     """
     targets = [o for o in outcomes if o.case.kind == CASE_TARGET]
     holdouts = [o for o in outcomes if o.case.kind == CASE_HOLDOUT]
@@ -217,9 +304,19 @@ def evaluate_gate(
     candidate_preferred = [j for j in decided_judgements if j.preferred_arm == ARM_CANDIDATE]
     ratio = len(candidate_preferred) / len(decided_judgements) if decided_judgements else 0.0
 
+    claimed = list(dict.fromkeys(target_refs))
+    replayed_refs = {o.ref for o in targets}
+    missing_refs = sorted((r for r in claimed if r not in replayed_refs), key=lambda r: r.key)
+
     reasons: list[str] = []
     if not targets:
         reasons.append("no target cases were replayed; nothing was measured")
+    if missing_refs:
+        keys = ", ".join(r.key for r in missing_refs[:5])
+        reasons.append(
+            f"{len(missing_refs)} claimed target case(s) have no replay outcome, so the change "
+            f"was not measured against every failure this candidate says it fixes: {keys}"
+        )
     if len(fixes) < policy.min_fixes:
         reasons.append(
             f"fixes {len(fixes)} < required {policy.min_fixes} "
@@ -254,6 +351,9 @@ def evaluate_gate(
             )
 
     metrics = {
+        "target_refs_claimed": len(claimed),
+        "target_refs_replayed": len(claimed) - len(missing_refs),
+        "unreplayed_target_ref_keys": [r.key for r in missing_refs],
         "target_cases": len(targets),
         "holdout_cases": len(holdouts),
         "fixes": len(fixes),
@@ -276,7 +376,7 @@ def evaluate_gate(
 # ``ValidationResult.to_dict()`` (in ``app/validate.py``) is the only writer of
 # this shape, but the record is a plain JSON file like a candidate, so every
 # field in it is *asserted* rather than proven once it is on disk. The schema
-# below (``asi.validation.v2``) binds the primitives a verifier needs in order
+# below (``asi.validation.v3``) binds the primitives a verifier needs in order
 # to recompute the gate from scratch rather than trust the stored decision:
 # the candidate identity and hashes it was run against, the seed that decided
 # blind arm assignment, the command that ran each role, and the rubric
@@ -582,10 +682,11 @@ _RECORD_KEYS = frozenset(
         "scorer_command_id",
         "judge_command_id",
         "rubrics",
+        "target_refs",
         "outcomes",
         "judgements",
         "gate",
-        "model_calls",
+        "evidence_model_calls",
         "notes",
     }
 )
@@ -599,6 +700,16 @@ class ValidationRecord:
     recomputed by the caller from ``judge_command_id`` and ``improver_command_id``
     (see :func:`agent_skill_improver.domain.integrity.validation_mismatches`),
     never read off a boolean the JSON file could assert on its own.
+
+    ``target_refs`` is the claim set: the exact
+    ``(rubric_id, conversation_id, criterion_id)`` triples this validation says it
+    measured. Every target outcome must name one of them, and
+    :func:`agent_skill_improver.domain.integrity.validation_mismatches` requires
+    it to equal the candidate's own ``rubric_failures``, so a failure ref cannot
+    be added to or removed from either side without the other disagreeing.
+
+    ``evidence_model_calls`` is derived, not reported: it must equal
+    :func:`evidence_call_count` over this record's own outcomes and judgements.
     """
 
     candidate_id: str
@@ -609,11 +720,12 @@ class ValidationRecord:
     scorer_command_id: str
     judge_command_id: str
     rubrics: tuple[RubricBinding, ...]
+    target_refs: tuple[TargetCaseRef, ...]
     outcomes: tuple[ReplayOutcome, ...]
     judgements: tuple[Judgement, ...]
     policy: GatePolicy
     gate_raw: Mapping[str, Any]
-    model_calls: int
+    evidence_model_calls: int
     notes: tuple[str, ...]
 
     @staticmethod
@@ -651,15 +763,46 @@ class ValidationRecord:
                 )
             seen_rubric_ids.add(binding.rubric_id)
 
+        target_refs_raw = raw["target_refs"]
+        if not isinstance(target_refs_raw, list):
+            raise ValueError("validation.target_refs must be a list")
+        target_refs = tuple(
+            TargetCaseRef.from_mapping(item, label=f"target_refs[{i}]")
+            for i, item in enumerate(target_refs_raw)
+        )
+        claimed_ref_keys: set[str] = set()
+        for ref in target_refs:
+            if ref.key in claimed_ref_keys:
+                raise ValueError(f"validation.target_refs has a duplicate ref {ref.key!r}")
+            claimed_ref_keys.add(ref.key)
+
         outcomes_raw = raw["outcomes"]
         if not isinstance(outcomes_raw, list):
             raise ValueError("validation.outcomes must be a list")
         outcomes = tuple(_parse_outcome(item, index=i) for i, item in enumerate(outcomes_raw))
-        seen_outcome_keys: set[str] = set()
+        seen_outcome_refs: set[str] = set()
+        kind_of_case: dict[str, str] = {}
         for outcome in outcomes:
-            if outcome.case.key in seen_outcome_keys:
-                raise ValueError(f"validation.outcomes has a duplicate case {outcome.case.key!r}")
-            seen_outcome_keys.add(outcome.case.key)
+            # Identity is the triple, not the case key: two rubrics may grade the
+            # same criterion id, and collapsing them would let one rubric's
+            # outcome silently stand in for another's.
+            if outcome.ref.key in seen_outcome_refs:
+                raise ValueError(f"validation.outcomes has a duplicate case {outcome.ref.key!r}")
+            seen_outcome_refs.add(outcome.ref.key)
+            first_kind = kind_of_case.setdefault(outcome.case.key, outcome.case.kind)
+            if first_kind != outcome.case.kind:
+                raise ValueError(
+                    f"validation.outcomes records case {outcome.case.key!r} as both "
+                    f"{first_kind!r} and {outcome.case.kind!r}: one case cannot be both the "
+                    "failure under repair and untouched control evidence"
+                )
+            if outcome.case.kind == CASE_TARGET and outcome.ref.key not in claimed_ref_keys:
+                raise ValueError(
+                    f"validation.outcomes has a target case {outcome.ref.key!r} that is not among "
+                    "validation.target_refs: a target outcome must be evidence about a failure "
+                    "this record claims to fix, named by rubric as well as by conversation and "
+                    "criterion"
+                )
 
         # Rubric completeness: the top-level list must name exactly the rubrics
         # the outcomes actually claim to have been scored against -- no
@@ -701,18 +844,17 @@ class ValidationRecord:
                     "that was actually replayed as a target, not an absent or invented one"
                 )
 
-        model_calls = _expect_int(raw, "model_calls", label="validation")
-        if model_calls < 0:
-            raise ValueError(f"validation.model_calls must be >= 0, got {model_calls}")
-        distinct_scored_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
-        min_model_calls = 2 * len(distinct_scored_pairs) + len(judgements)
-        if model_calls < min_model_calls:
+        evidence_model_calls = _expect_int(raw, "evidence_model_calls", label="validation")
+        expected_calls = evidence_call_count(outcomes, judgements)
+        if evidence_model_calls != expected_calls:
+            distinct_scored_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
             raise ValueError(
-                f"validation.model_calls is {model_calls}, but the recorded outcomes and "
-                f"judgements imply at least {min_model_calls} model call(s): {len(outcomes)} "
-                f"outcome(s) across {len(distinct_scored_pairs)} distinct (conversation, rubric) "
-                f"pair(s) need a baseline and a candidate call each, plus {len(judgements)} "
-                "recorded judgement(s). A lower count contradicts the recorded work."
+                f"validation.evidence_model_calls is {evidence_model_calls} but this record's own "
+                f"evidence derives exactly {expected_calls}: {len(outcomes)} outcome(s) across "
+                f"{len(distinct_scored_pairs)} distinct (conversation, rubric) pair(s) at a "
+                f"baseline and a candidate call each, plus {len(judgements)} judgement(s). This "
+                "count is derived rather than reported, so any other value is a rewritten field "
+                "and not a different amount of work"
             )
         notes = _expect_str_list(raw["notes"], label="validation.notes")
 
@@ -744,11 +886,12 @@ class ValidationRecord:
             scorer_command_id=scorer_command_id,
             judge_command_id=judge_command_id,
             rubrics=rubrics,
+            target_refs=target_refs,
             outcomes=outcomes,
             judgements=judgements,
             policy=policy,
             gate_raw=gate_raw,
-            model_calls=model_calls,
+            evidence_model_calls=evidence_model_calls,
             notes=notes,
         )
 
@@ -758,11 +901,19 @@ class ValidationRecord:
         ``judge_independent`` is derived from the command ids on this record --
         never from a stored boolean -- so a record whose judge and improver
         commands are identical can never claim independence by asserting it.
+
+        The claim set is fed back in the same way, so a target ref added to the
+        record without a matching replay outcome recomputes a *failing* gate and
+        the persisted decision stops matching.
         """
         judge_independent = bool(self.judge_command_id) and (
             self.judge_command_id != self.improver_command_id
         )
         decision = evaluate_gate(
-            self.outcomes, self.judgements, self.policy, judge_independent=judge_independent
+            self.outcomes,
+            self.judgements,
+            self.policy,
+            judge_independent=judge_independent,
+            target_refs=self.target_refs,
         )
         return _strict_equal(decision.to_dict(), dict(self.gate_raw), path="validation.gate")
