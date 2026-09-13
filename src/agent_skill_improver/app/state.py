@@ -376,7 +376,7 @@ class StateStore:
 
     # -- quarantine / defer ---------------------------------------------
     def quarantine(self, record_id: str, *, stage: str, reason: str, detail: Any = None) -> Path:
-        path = self.dir("quarantine") / f"{safe_name(record_id)}--{safe_name(stage)}.json"
+        path = self.dir("quarantine") / f"{keyed_name(record_id)}--{keyed_name(stage)}.json"
         write_json(
             path,
             {
@@ -398,7 +398,7 @@ class StateStore:
         first, do nothing about the second -- so a single counter covering both is
         uninformative in exactly the situation you would want to consult it.
         """
-        path = self.dir("refusals") / f"{safe_name(record_id)}--{safe_name(stage)}.json"
+        path = self.dir("refusals") / f"{keyed_name(record_id)}--{keyed_name(stage)}.json"
         write_json(
             path,
             {
@@ -452,7 +452,7 @@ class StateStore:
 
     # -- checkpoints -----------------------------------------------------
     def checkpoint_path(self, day: str) -> Path:
-        return self.dir("checkpoints") / f"{safe_name(day)}.json"
+        return self.dir("checkpoints") / f"{keyed_name(day)}.json"
 
     def read_checkpoint(self, day: str) -> dict[str, Any]:
         path = self.checkpoint_path(day)
@@ -491,7 +491,7 @@ class StateStore:
 
     # -- receipts --------------------------------------------------------
     def receipt_path(self, day: str, *, dry_run: bool) -> Path:
-        stem = f"{safe_name(day)}{'-dry-run' if dry_run else ''}.json"
+        stem = f"{keyed_name(day)}{'-dry-run' if dry_run else ''}.json"
         return self.dir("receipts") / stem
 
     def write_receipt(self, day: str, payload: dict[str, Any], *, dry_run: bool) -> Path:

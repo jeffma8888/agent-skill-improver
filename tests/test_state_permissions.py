@@ -129,6 +129,24 @@ class EveryArtifactIsOwnerOnlyTests(StateTreeHarness):
         self.assertEqual(third.read_text(encoding="utf-8"), "third")
         self.assertEqual(fourth.read_text(encoding="utf-8"), "fourth")
 
+    def test_distinct_keys_never_collide_in_any_keyed_state_namespace(self):
+        store = self.store()
+        store.ensure()
+        pairs = [
+            (
+                store.quarantine("a/b", stage="x", reason="first"),
+                store.quarantine("a_b", stage="x", reason="second"),
+            ),
+            (
+                store.refuse("a?b", stage="x", reason="first"),
+                store.refuse("a:b", stage="x", reason="second"),
+            ),
+            (store.checkpoint_path("a/b"), store.checkpoint_path("a_b")),
+            (store.receipt_path("a?b", dry_run=False), store.receipt_path("a:b", dry_run=False)),
+        ]
+        for first, second in pairs:
+            self.assertNotEqual(first, second)
+
     def test_a_raw_export_is_0600(self):
         """The most sensitive artifact this tool writes."""
         store = self.store()
