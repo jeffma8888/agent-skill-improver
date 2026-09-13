@@ -286,7 +286,13 @@ the file atomically, verifies the resulting hash, and marks the candidate
 `applied`. Re-applying is refused because the status already moved.
 
 `rollback` restores the backup through the same `_assert_document` gate and
-verifies the restored hash against the recorded base.
+verifies the restored hash against the recorded base. Everything it can check
+without touching the live file it checks first: the manifest must carry a target,
+a backup path and a previous hash, and the backup on disk must hash to that
+previous hash. A backup that was truncated, edited or lost is therefore a
+`BackupUnusable` refusal with the skill still in its applied state, rather than an
+overwrite followed by the discovery that the restored content was never the
+original. Recovery must not be the step that loses the file.
 
 **What the approval token is and is not.** It is a deterministic function of the
 candidate id, the base hash and the patch hash, derived with the same code on

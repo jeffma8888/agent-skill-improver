@@ -92,6 +92,15 @@ class BaseHashMismatch(SafetyRefusal):
     """The live skill changed since the candidate was proposed."""
 
 
+class BackupUnusable(SafetyRefusal):
+    """A rollback was asked to restore a backup that cannot be trusted.
+
+    Raised *before* the live file is touched. A recovery command that overwrites
+    the file and only then discovers the backup was truncated, edited or
+    unreadable has destroyed the one copy it existed to protect.
+    """
+
+
 class ApprovalRequired(SafetyRefusal):
     """Promotion attempted without a valid human approval token."""
 

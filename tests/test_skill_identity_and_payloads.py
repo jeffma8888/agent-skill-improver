@@ -9,6 +9,7 @@ wearing a documentation-change costume.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import unittest
@@ -25,6 +26,7 @@ from agent_skill_improver.domain.skills import (
     parse_frontmatter,
 )
 from agent_skill_improver.errors import (
+    BackupUnusable,
     MirrorEditRefused,
     NonDocumentWriteRefused,
     ReadOnlyViolation,
@@ -292,6 +294,91 @@ class WritePathRefusalTests(Harness):
             self.store(read_only=False).write_canonical(
                 outside, "y", expected_sha256=sha256_file(outside), backup_dir=self.base / "bak"
             )
+
+
+class RollbackSafetyTests(Harness):
+    """Rollback is the recovery command, so it must not be able to lose the file.
+
+    The failure it has to survive is a backup that is no longer the text the
+    apply replaced: truncated by a crash mid-copy, edited by hand, or described
+    by a manifest that itself got cut short. Copying first and hashing afterwards
+    detects that only after the live skill has already been overwritten, which
+    leaves the operator with a corrupt file and nothing left to restore from.
+    """
+
+    def apply_a_change(self) -> tuple[Path, Path, str]:
+        """Perform a real write and return the target, its manifest and the old text."""
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        previous = target.read_text(encoding="utf-8")
+        receipt = self.store(read_only=False).write_canonical(
+            target,
+            GOOD + "\n- an approved addition\n",
+            expected_sha256=sha256_file(target),
+            backup_dir=self.base / "bak",
+            skill_id="shared",
+        )
+        return target, Path(receipt.backup_manifest_path), previous
+
+    def test_the_control_rollback_restores_the_previous_text(self):
+        target, manifest, previous = self.apply_a_change()
+        result = self.store(read_only=False).rollback(manifest)
+        self.assertEqual(target.read_text(encoding="utf-8"), previous)
+        self.assertEqual(result["restored_sha256"], sha256_file(target))
+
+    def test_a_backup_that_no_longer_matches_the_manifest_is_refused(self):
+        target, manifest, _previous = self.apply_a_change()
+        backup = Path(json.loads(manifest.read_text(encoding="utf-8"))["backup_path"])
+        backup.write_text("truncated\n", encoding="utf-8")
+        with self.assertRaises(BackupUnusable) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("is unchanged", str(ctx.exception))
+
+    def test_the_live_file_is_untouched_after_a_refused_rollback(self):
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        backup = Path(json.loads(manifest.read_text(encoding="utf-8"))["backup_path"])
+        backup.write_text("truncated\n", encoding="utf-8")
+        with self.assertRaises(BackupUnusable):
+            self.store(read_only=False).rollback(manifest)
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            applied,
+            "the check must run before the copy: a refusal that has already "
+            "overwritten the file has destroyed the only copy of the original",
+        )
+
+    def test_a_missing_backup_is_refused_and_says_the_file_is_unchanged(self):
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        Path(json.loads(manifest.read_text(encoding="utf-8"))["backup_path"]).unlink()
+        with self.assertRaises(BackupUnusable):
+            self.store(read_only=False).rollback(manifest)
+        self.assertEqual(target.read_text(encoding="utf-8"), applied)
+
+    def test_a_manifest_missing_a_required_field_is_refused_by_name(self):
+        _target, manifest, _previous = self.apply_a_change()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        del payload["previous_sha256"]
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(BackupUnusable) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("previous_sha256", str(ctx.exception))
+
+    def test_an_unreadable_manifest_is_a_refusal_not_a_crash(self):
+        _target, manifest, _previous = self.apply_a_change()
+        manifest.write_text('{"target_path":', encoding="utf-8")
+        with self.assertRaises(BackupUnusable):
+            self.store(read_only=False).rollback(manifest)
+
+    def test_a_manifest_pointing_at_a_payload_file_is_refused_on_its_filename(self):
+        _target, manifest, _previous = self.apply_a_change()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        script = write(self.canonical_dir / "shared" / "scripts" / "hook.sh", "#!/bin/sh\n")
+        payload["target_path"] = str(script)
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(NonDocumentWriteRefused):
+            self.store(read_only=False).rollback(manifest)
+        self.assertEqual(script.read_text(encoding="utf-8"), "#!/bin/sh\n")
 
 
 class CanonicalResolutionTests(Harness):

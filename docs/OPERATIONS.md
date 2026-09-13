@@ -137,6 +137,7 @@ Refusals you should expect, and what each means:
 | `BaseHashMismatch` | the skill file changed since the candidate was built. The evidence no longer describes this file; revalidate |
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
+| `BackupUnusable` | rollback's backup or manifest does not verify. The live file was not touched; find an older backup under `state/backups/` |
 | `SafetyRefusal` | the candidate did not pass the gate, the skill is protected, or a `state/` permission could not be repaired |
 | `IsolationRequired` | the source is private and the model roles are not confined by a verified OS sandbox. Install the mechanism or use the fixture corpus |
 | status already `applied` | re-applying is refused. Use `rollback` first if you want to redo it |
@@ -150,6 +151,10 @@ asi rollback <candidate-id>
 Restores the pre-apply backup and verifies the restored hash against the recorded
 base. Run it the moment an applied change looks wrong; there is no reason to
 diagnose first.
+
+The backup and its manifest are verified before anything is written, so a
+`BackupUnusable` refusal means the applied file is still exactly as it was and
+you can try a different backup directory under `state/backups/`.
 
 ## Recovery
 

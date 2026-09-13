@@ -36,6 +36,7 @@ from ..domain.skills import (
     resolve_groups,
 )
 from ..errors import (
+    BackupUnusable,
     BaseHashMismatch,
     MirrorEditRefused,
     NonDocumentWriteRefused,
@@ -264,18 +265,40 @@ class FilesystemSkillStore:
         )
 
     def rollback(self, manifest_path: Path) -> dict[str, Any]:
-        """Restore a file from a backup manifest and verify the restored hash."""
-        from ..jsonio import read_json
+        """Restore a file from a backup manifest, verified before anything is written.
 
-        manifest = read_json(Path(manifest_path))
-        target = Path(manifest["target_path"])
-        backup = Path(manifest["backup_path"])
+        Every check that can be made without touching the live file is made
+        first, because this is the recovery command: if it overwrites the skill
+        and *then* discovers the backup was truncated, unreadable or edited, the
+        operator is left with a corrupt file, a raised exception, and no second
+        copy to try again from. So the manifest shape and the backup's own hash
+        are verified while the live file is still intact, and a refusal here
+        leaves the tree exactly as it was.
+
+        The post-copy hash check stays. It is now a check on the copy itself
+        rather than the only check there is.
+        """
+        manifest = self._read_backup_manifest(manifest_path)
+        target = Path(str(manifest["target_path"]))
+        backup = Path(str(manifest["backup_path"]))
+        expected = str(manifest["previous_sha256"])
         if self.read_only:
             raise ReadOnlyViolation(f"refusing to roll back {target}: store is read-only")
         self._assert_document(target)
         self._assert_not_protected(target)
-        if not backup.exists():
-            raise BaseHashMismatch(f"backup {backup} is missing; cannot roll back")
+        if not backup.is_file():
+            raise BackupUnusable(
+                f"refusing to roll back {target}: backup {backup} is missing. "
+                f"{target} is unchanged."
+            )
+        stored = sha256_file(backup)
+        if stored != expected:
+            raise BackupUnusable(
+                f"refusing to roll back {target}: backup {backup} hashes {stored[:12]} but the "
+                f"manifest records {expected[:12]}. The backup is not the text this apply "
+                f"replaced, so restoring it would overwrite the live skill with unverified "
+                f"content. {target} is unchanged."
+            )
         shutil.copy2(backup, target)
         # The backup was tightened to 0600 when it was taken, so copying it back
         # would leave the skill owner-only unless the recorded mode is restored.
@@ -289,7 +312,6 @@ class FilesystemSkillStore:
             except (OSError, ValueError):
                 pass
         restored = sha256_file(target)
-        expected = str(manifest["previous_sha256"])
         if restored != expected:
             raise BaseHashMismatch(
                 f"rollback verification failed: restored sha {restored[:12]} != {expected[:12]}"
@@ -302,6 +324,41 @@ class FilesystemSkillStore:
         }
 
     # -- internals -------------------------------------------------------
+    def _read_backup_manifest(self, manifest_path: Path) -> dict[str, Any]:
+        """Load a backup manifest, refusing anything it cannot be read from.
+
+        A manifest is a plain JSON file under the state tree, so it can be
+        truncated by a crash mid-write or edited by hand. Every field the restore
+        depends on is required here, and a missing one is a named refusal rather
+        than a ``KeyError`` from the middle of the restore.
+        """
+        from ..jsonio import read_json
+
+        path = Path(manifest_path)
+        try:
+            manifest = read_json(path)
+        except (OSError, ValueError) as exc:
+            raise BackupUnusable(
+                f"refusing to roll back: backup manifest {path} could not be read ({exc}). "
+                "No file was touched."
+            ) from exc
+        if not isinstance(manifest, dict):
+            raise BackupUnusable(
+                f"refusing to roll back: backup manifest {path} is not a JSON object. "
+                "No file was touched."
+            )
+        missing = [
+            field
+            for field in ("target_path", "backup_path", "previous_sha256")
+            if not str(manifest.get(field, "")).strip()
+        ]
+        if missing:
+            raise BackupUnusable(
+                f"refusing to roll back: backup manifest {path} is missing "
+                f"{', '.join(missing)}. No file was touched."
+            )
+        return manifest
+
     def _assert_document(self, target: Path) -> None:
         """Only the skill document is ever writable.
 

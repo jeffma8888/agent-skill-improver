@@ -43,7 +43,7 @@ version:
 | Private artifacts are world-readable on a shared machine | The state root and every subdirectory are 0700 and every artifact is 0600, set explicitly rather than left to the umask. Existing state is repaired and then re-measured; a repair that did not take effect is a refusal. |
 | The judge agrees with the improver because it *is* the improver | The gate refuses when the judge's command matches the improver's, and every receipt records the independence check. |
 | A candidate is applied against a changed file | Apply recomputes the base hash and refuses on mismatch. |
-| An apply goes wrong | Every apply writes a backup first; `asi rollback` restores it and verifies the restored hash. |
+| An apply goes wrong | Every apply writes a backup first; `asi rollback` restores it and verifies the restored hash. The backup and its manifest are verified *before* the restore overwrites anything, so an unusable backup is a refusal with the live file intact rather than a lost original. |
 
 ## Install and run, offline, in one minute
 
