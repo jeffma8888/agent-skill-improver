@@ -472,11 +472,13 @@ class StateStore:
                 "day": day,
                 "runs": 0,
                 "records": {},
+                "skills": {},
                 "candidates": [],
                 "completed": False,
             }
         data = _read_state_json(path)
         data.setdefault("records", {})
+        data.setdefault("skills", {})
         data.setdefault("candidates", [])
         data.setdefault("runs", 0)
         return data

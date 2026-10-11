@@ -457,8 +457,50 @@ class PerRecordFailureTests(DailyHarness):
         self.assertGreater(healthy["counts"]["candidates_proposed"], 0)
         self.assertEqual(state.deferred_ids(), [], "propose plus validate completed")
         third = run("2026-01-05", fail_roles=("improver",))
-        self.assertEqual(third["counts"]["records_quarantined"], 0)
+        self.assertEqual(third["counts"]["skills_quarantined"], 0)
         self.assertEqual({state.deferred_attempts(i) for i in state.deferred_ids()}, {1})
+
+    def test_skill_level_outcomes_are_not_counted_as_records(self):
+        """A skill whose proposal defers is not a conversation that could not be
+        scored. Folding the two into ``records_*`` makes the operator chase a
+        data problem that is a model problem, and keying both by bare id lets a
+        skill named like a thread overwrite that thread's outcome. Skill-level
+        outcomes get their own table, their own counts, and stay out of the
+        per-day checkpoint that decides what was processed.
+        """
+        config = self.env()
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        source = FixtureConversationSource(config.source.fixtures_dir)
+        receipt = run_daily(
+            config,
+            source=source,
+            runner=InProcessRunner(fail_roles=("improver",)),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day=DAY,
+            commit=True,
+        )
+        payload = receipt.to_dict()
+        counts = payload["counts"]
+        self.assertGreater(counts["records_scored"], 0)
+        self.assertEqual(counts["records_deferred"], 0, "no conversation was deferred")
+        self.assertEqual(counts["records_quarantined"], 0)
+        self.assertGreater(counts["skills_deferred"], 0, "the improver timing out defers a skill")
+        self.assertEqual(counts["skills_quarantined"], 0)
+        self.assertEqual(receipt.status, "partial", "a skill that could not be proposed is not ok")
+        self.assertTrue(payload["skills"])
+        for skill_id, info in payload["skills"].items():
+            self.assertNotIn(skill_id, payload["records"])
+            self.assertEqual(info["status"], "deferred")
+            self.assertEqual(info["stage"], "propose")
+        thread_ids = {t.thread_id for t in source.discover(since=config.source.since, limit=100)}
+        checkpoint = state.read_checkpoint(DAY)
+        self.assertTrue(set(checkpoint["records"]) <= thread_ids, checkpoint["records"].keys())
+        self.assertEqual(checkpoint["skills"].keys(), payload["skills"].keys())
 
     def test_max_defer_attempts_defaults_to_three_and_rejects_zero(self):
         from agent_skill_improver.config import CapsConfig, ConfigError
@@ -583,7 +625,11 @@ class CredentialBearingSkillTests(DailyHarness):
         self._plant()
         receipt, _, _ = self.run_pass(config)
         payload = receipt.to_dict()
-        refused = [r for r in payload["records"].values() if r["status"] == "refused"]
+        refused = [r for r in payload["skills"].values() if r["status"] == "refused"]
+        self.assertFalse(
+            [r for r in payload["records"].values() if r["status"] == "refused"],
+            "a refused proposal target is a skill outcome, not a conversation outcome",
+        )
         self.assertTrue(refused)
         self.assertIn("credential", refused[0]["reason"].lower())
 

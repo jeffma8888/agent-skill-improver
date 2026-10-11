@@ -64,7 +64,7 @@ from ..errors import AsiError, RecordDefect, SafetyRefusal, TransientFailure
 from ..ports import ModelRunner
 from .lock import RunLock
 from .pipeline import propose_candidate, score_and_isolate
-from .receipt import STATUS_STOOD_DOWN, RunReceipt
+from .receipt import KIND_CONVERSATION, KIND_SKILL, STATUS_STOOD_DOWN, RunReceipt
 from .state import StateStore, safe_name
 from .validate import validate_candidate
 
@@ -101,6 +101,7 @@ def _defer(
     *,
     stage: str,
     reason: str,
+    kind: str = KIND_CONVERSATION,
 ) -> None:
     """Defer a record, or quarantine it once deferral has stopped being a retry.
 
@@ -122,7 +123,7 @@ def _defer(
     attempts = state.deferred_attempts(record_id)
     cap = config.caps.max_defer_attempts
     if attempts < cap:
-        receipt.record(record_id, status="deferred", stage=stage, reason=reason)
+        receipt.record(record_id, status="deferred", stage=stage, reason=reason, kind=kind)
         return
     escalated = f"{stage}:{DEFER_EXHAUSTED}"
     why = (
@@ -138,7 +139,7 @@ def _defer(
         detail={"attempts": attempts, "last_reason": reason, "last_stage": stage},
     )
     state.clear_deferred(record_id)
-    receipt.record(record_id, status="quarantined", stage=escalated, reason=why)
+    receipt.record(record_id, status="quarantined", stage=escalated, reason=why, kind=kind)
     receipt.note(f"{record_id!r} quarantined after {attempts} consecutive deferrals at {stage!r}")
 
 
@@ -525,7 +526,11 @@ def _propose_and_validate(
                 reason=f"skill {skill_id!r} was implicated but is not present in any configured root",
             )
             receipt.record(
-                skill_id, status="quarantined", stage=STAGE_PROPOSE, reason="skill not found"
+                skill_id,
+                status="quarantined",
+                stage=STAGE_PROPOSE,
+                reason="skill not found",
+                kind=KIND_SKILL,
             )
             continue
         seq += 1
@@ -553,14 +558,30 @@ def _propose_and_validate(
             # case, so it cannot inform any decision.
             receipt.note(f"proposal for {skill_id!r} refused on purpose: {exc}")
             state.refuse(skill_id, stage=STAGE_PROPOSE, reason=str(exc))
-            receipt.record(skill_id, status="refused", stage=STAGE_PROPOSE, reason=str(exc))
+            receipt.record(
+                skill_id, status="refused", stage=STAGE_PROPOSE, reason=str(exc), kind=KIND_SKILL
+            )
             continue
         except RecordDefect as exc:
             state.quarantine(skill_id, stage=STAGE_PROPOSE, reason=str(exc))
-            receipt.record(skill_id, status="quarantined", stage=STAGE_PROPOSE, reason=str(exc))
+            receipt.record(
+                skill_id,
+                status="quarantined",
+                stage=STAGE_PROPOSE,
+                reason=str(exc),
+                kind=KIND_SKILL,
+            )
             continue
         except TransientFailure as exc:
-            _defer(state, receipt, config, skill_id, stage=STAGE_PROPOSE, reason=str(exc))
+            _defer(
+                state,
+                receipt,
+                config,
+                skill_id,
+                stage=STAGE_PROPOSE,
+                reason=str(exc),
+                kind=KIND_SKILL,
+            )
             continue
 
         base_text = skill_store.read_text(candidate.target.canonical_path)
@@ -581,7 +602,15 @@ def _propose_and_validate(
                 known_skill_ids=known_skill_ids,
             )
         except AsiError as exc:
-            _defer(state, receipt, config, skill_id, stage=STAGE_VALIDATE, reason=str(exc))
+            _defer(
+                state,
+                receipt,
+                config,
+                skill_id,
+                stage=STAGE_VALIDATE,
+                reason=str(exc),
+                kind=KIND_SKILL,
+            )
             continue
         # Propose and validate both completed: the skill's deferral streak is over.
         state.clear_deferred(skill_id)
@@ -653,6 +682,9 @@ def _finish(
         records = dict(checkpoint.get("records", {}))
         records.update(receipt.records)
         checkpoint["records"] = records
+        skills = dict(checkpoint.get("skills", {}))
+        skills.update(receipt.skills)
+        checkpoint["skills"] = skills
         checkpoint["candidates"] = sorted(
             set(checkpoint.get("candidates", [])) | {c["candidate_id"] for c in candidates}
         )

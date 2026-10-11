@@ -63,8 +63,9 @@ written; it does not unlock any write to a skill file, and no flag does.
 One receipt per run, under `state/receipts/`. `--json` prints it. The fields worth
 reading first, in order:
 
-**`status`** — `ok`, `partial`, or `stood_down`. `partial` is normal: it means at
-least one record was quarantined or deferred while the rest completed.
+**`status`** — `ok`, `partial`, `stood-down`, or `blocked`. `partial` is normal: it
+means at least one record or skill was quarantined or deferred while the rest
+completed. `blocked` means the skill tree changed during the run; see below.
 
 **`skill_tree.digest_before` / `digest_after`** — must be equal after any daily
 run. If they differ, something changed a skill file during the run, from *any*
@@ -78,6 +79,9 @@ conversations_ingested        what came back from the source
 records_scored                what actually got a verdict
 records_quarantined           malformed or unverifiable, one file each with a reason
 records_deferred              retryable, e.g. the source was unreachable
+skills_quarantined            a proposal target that is defective (implicated but absent), or
+                              a skill that kept deferring past caps.max_defer_attempts
+skills_deferred               a proposal that could not be made, e.g. the improver timed out
 failure_cases                 FAIL verdicts with resolvable evidence
 failure_cases_unattributed    real failures NOT tied to a skill (abstention, not absence)
 candidates_proposed           proposals written
@@ -89,6 +93,12 @@ open_candidates_after         the review backlog
 
 `records_scored` will be lower than `conversations_ingested` whenever anything was
 quarantined or deferred. That is the intended shape; it is not a bug to chase.
+
+`records_*` count conversations only. Skill-level outcomes of the propose and
+validate stages live in the receipt's `skills` table and the `skills_*` counts,
+because the remedies differ: a quarantined record is a data or normalizer problem,
+a deferred skill is almost always a model problem. Either kind makes the run
+`partial`.
 
 **`discovery.is_total`** — whether the source returned everything or a page. When
 `false`, `any_page_truncated_by_limit` is `true` and `honesty_note` says so. Do not

@@ -27,6 +27,11 @@ STATUS_PARTIAL = "partial"
 STATUS_STOOD_DOWN = "stood-down"
 STATUS_BLOCKED = "blocked"
 
+#: What a per-id outcome is about. Conversations and skills are different
+#: populations with different remedies, so they never share a table or a count.
+KIND_CONVERSATION = "conversation"
+KIND_SKILL = "skill"
+
 
 @dataclass
 class RunReceipt:
@@ -42,7 +47,13 @@ class RunReceipt:
     source: dict[str, Any] = field(default_factory=dict)
     discovery: dict[str, Any] = field(default_factory=dict)
     selection: dict[str, Any] = field(default_factory=dict)
+    #: Per-conversation outcome, keyed by record id.
     records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Per-skill outcome of the propose/validate stages, keyed by skill id.
+    #: Kept apart from ``records``: a skill that could not be proposed is not a
+    #: conversation that could not be scored, and a bare-id table shared by both
+    #: lets a skill named like a thread overwrite that thread's outcome.
+    skills: dict[str, dict[str, Any]] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     candidates: list[dict[str, Any]] = field(default_factory=list)
     skill_tree: dict[str, Any] = field(default_factory=dict)
@@ -63,11 +74,21 @@ class RunReceipt:
     def note(self, text: str) -> None:
         self.notes.append(text)
 
-    def record(self, record_id: str, *, status: str, stage: str, reason: str = "") -> None:
-        self.records[record_id] = {"status": status, "stage": stage, "reason": reason}
+    def record(
+        self,
+        record_id: str,
+        *,
+        status: str,
+        stage: str,
+        reason: str = "",
+        kind: str = KIND_CONVERSATION,
+    ) -> None:
+        table = self.skills if kind == KIND_SKILL else self.records
+        table[record_id] = {"status": status, "stage": stage, "reason": reason}
 
-    def count_of(self, status: str) -> int:
-        return sum(1 for info in self.records.values() if info.get("status") == status)
+    def count_of(self, status: str, *, kind: str = KIND_CONVERSATION) -> int:
+        table = self.skills if kind == KIND_SKILL else self.records
+        return sum(1 for info in table.values() if info.get("status") == status)
 
     def class_counts(self) -> dict[str, int]:
         from ..domain.authorship import class_histogram
@@ -81,12 +102,16 @@ class RunReceipt:
         quarantined = self.count_of("quarantined")
         deferred = self.count_of("deferred")
         scored = self.count_of("scored")
+        skills_quarantined = self.count_of("quarantined", kind=KIND_SKILL)
+        skills_deferred = self.count_of("deferred", kind=KIND_SKILL)
         self.counts.update(
             {
                 "records_scored": scored,
                 "records_quarantined": quarantined,
                 "records_deferred": deferred,
-                "proposals_refused_by_policy": self.count_of("refused"),
+                "skills_quarantined": skills_quarantined,
+                "skills_deferred": skills_deferred,
+                "proposals_refused_by_policy": self.count_of("refused", kind=KIND_SKILL),
                 "candidates_proposed": len(self.candidates),
                 "candidates_gate_passed": sum(1 for c in self.candidates if c.get("gate_passed")),
                 "candidates_gate_failed": sum(
@@ -104,7 +129,7 @@ class RunReceipt:
             )
         elif self.status == STATUS_STOOD_DOWN:
             pass
-        elif quarantined or deferred:
+        elif quarantined or deferred or skills_quarantined or skills_deferred:
             self.status = STATUS_PARTIAL
         elif scored == 0:
             self.status = STATUS_STOOD_DOWN
@@ -137,6 +162,7 @@ class RunReceipt:
             "discovery": dict(self.discovery),
             "selection": dict(self.selection),
             "records": dict(self.records),
+            "skills": dict(self.skills),
             "counts": dict(self.counts),
             "candidates": list(self.candidates),
             "skill_tree": dict(self.skill_tree),
@@ -156,6 +182,8 @@ class RunReceipt:
             f"scored={self.counts.get('records_scored', 0)}",
             f"quarantined={self.counts.get('records_quarantined', 0)}",
             f"deferred={self.counts.get('records_deferred', 0)}",
+            f"skills_quarantined={self.counts.get('skills_quarantined', 0)}",
+            f"skills_deferred={self.counts.get('skills_deferred', 0)}",
             f"candidates={self.counts.get('candidates_proposed', 0)}",
             f"gate_passed={self.counts.get('candidates_gate_passed', 0)}",
             f"live_mutation={self.skill_tree.get('mutation_detected')}",
