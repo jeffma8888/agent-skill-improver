@@ -29,6 +29,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from agent_skill_improver.cli import RC_OK, RC_REFUSED
 from agent_skill_improver.app.promote import apply_candidate, review_report
 from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.app.validate import ValidationResult, validate_candidate
@@ -72,9 +73,6 @@ from agent_skill_improver.errors import (
 from agent_skill_improver.hashing import sha256_file, sha256_text
 
 from tests.support import FIX_MARKER, build_env, run_cli
-
-RC_OK = 0
-RC_REFUSED = 3
 
 
 def frozen_clock() -> FrozenClock:

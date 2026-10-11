@@ -38,6 +38,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Sequence
 
+from agent_skill_improver.cli import RC_OK
 from agent_skill_improver.app.validate import validate_candidate
 from agent_skill_improver.config import PromptConfig
 from agent_skill_improver.domain.candidate import (
@@ -68,7 +69,6 @@ from agent_skill_improver.hashing import sha256_file, sha256_text
 from tests.support import FIX_MARKER, build_env, run_cli
 from tests.test_candidate_integrity import BASE_TEXT, build_candidate, build_validation
 
-RC_OK = 0
 SEED = "integrity-test-seed"
 FIX_LINE = "watch it fail for the right reason"
 

@@ -14,14 +14,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from agent_skill_improver.cli import RC_OK, RC_REFUSED
 from agent_skill_improver.domain.approval import AUTOMATION_ENV_VAR
 from agent_skill_improver.hashing import sha256_file
 
 from tests.support import FIX_MARKER, build_env, run_cli
-
-RC_OK = 0
-RC_NEGATIVE = 1
-RC_REFUSED = 3
 
 
 class EndToEndTests(unittest.TestCase):
@@ -212,8 +209,15 @@ class EndToEndTests(unittest.TestCase):
                 for c in payload.get("candidates", [])
                 if c.get("status") == "validated"
             ]
-            if not ids:
-                self.skipTest("no fresh validated candidate to test a stale base against")
+            # A hard assertion, not a skip: the rolled-back candidate from the
+            # earlier steps is closed, so the per-skill cap must let this run
+            # propose again. A skip here would turn a regression of that rule
+            # into a green run.
+            self.assertTrue(
+                ids,
+                "expected a fresh validated candidate after rollback closed the earlier one; "
+                f"got {payload.get('counts')}",
+            )
             fresh = ids[0]
             review = self.cli_json("--json", "review", fresh)
             token = review["approval_token"]
