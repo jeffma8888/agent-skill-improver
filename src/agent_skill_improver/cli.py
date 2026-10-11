@@ -574,10 +574,18 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     if not path.is_file():
         sys.stderr.write(f"template not found: {path}\n")
         return RC_MISSING_FILE
+    # The job must run the config this invocation was given, and its logs must
+    # land in THAT config's state tree: the output can carry private content, and
+    # the repository's own state/ is only the right place when it is the
+    # configured one. Measured before this was fixed, `--config X` printed a job
+    # for the default config with logs under the repository.
+    config_path = Path(args.config).expanduser().resolve() if args.config else default_config_path()
+    config = load_config(config_path)
     text = path.read_text(encoding="utf-8")
     text = text.replace("__REPO__", str(repo_root()))
     text = text.replace("__PYTHON__", sys.executable)
-    text = text.replace("__CONFIG__", str(default_config_path()))
+    text = text.replace("__CONFIG__", str(config_path))
+    text = text.replace("__STATE__", str(config.state_dir))
     sys.stdout.write(text)
     sys.stderr.write(
         "\nThis template was printed, not installed. Nothing is scheduled. "

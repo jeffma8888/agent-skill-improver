@@ -273,6 +273,31 @@ class EndToEndTests(unittest.TestCase):
                 sorted(Path(home).rglob("*")), [], "the template command installed something"
             )
 
+    def test_19b_the_templates_schedule_the_config_they_were_asked_about(self):
+        """Measured before this test existed, `asi --config X scheduler-template`
+        printed a job for the DEFAULT config, not X, and sent the logs to the
+        repository's state/ whatever X's state_dir said. A scheduler built from
+        that output would have run the example corpus and logged private output
+        outside the configured tree."""
+        config_path = Path(self.cfg[1]).resolve()
+        for kind in ("launchd", "cron"):
+            with self.subTest(kind=kind):
+                proc = self.cli("scheduler-template", kind)
+                self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+                self.assertIn(str(config_path), proc.stdout, "the job must use the given config")
+                self.assertNotIn("example.config.toml", proc.stdout)
+                state = self.base.resolve() / "state"
+                self.assertIn(
+                    (
+                        f">> {state / 'daily.out.log'}"
+                        if kind == "cron"
+                        else f"<string>{state / 'daily.out.log'}</string>"
+                    ),
+                    proc.stdout,
+                )
+                self.assertIn(str(state / "daily.err.log"), proc.stdout)
+                self.assertNotIn("__STATE__", proc.stdout)
+
     def test_20_the_launchd_template_is_a_well_formed_property_list(self):
         import plistlib
 
@@ -282,6 +307,7 @@ class EndToEndTests(unittest.TestCase):
         argv = parsed["ProgramArguments"]
         self.assertIn("daily", argv)
         self.assertNotIn("apply", argv, "a scheduled job must never promote")
+        self.assertEqual(argv[argv.index("--config") + 1], str(Path(self.cfg[1]).resolve()))
 
     def test_21_an_unknown_candidate_id_is_an_error_not_a_crash(self):
         proc = self.cli("review", "CAND-does-not-exist")

@@ -3,14 +3,15 @@
 <!--
   launchd template for the daily pass. PRINTED, NEVER INSTALLED.
 
-  The scheduler-template command substitutes __REPO__, __PYTHON__ and __CONFIG__
-  and writes the result to stdout. Nothing is scheduled until you copy it into
+  The scheduler-template command fills in the repository path, the interpreter,
+  the config file it was invoked with and that config's state directory, then
+  writes the result to stdout. Nothing is scheduled until you copy it into
   your own LaunchAgents directory and run launchctl yourself. Read
   docs/SCHEDULING.md first, in particular the part about what this job may and
   may not do.
 
   What this job runs: the daily driver in commit mode. That ingests, scores,
-  isolates, proposes and validates, and writes only under the gitignored state
+  isolates, proposes and validates, and writes only under the configured state
   directory. It can never modify a skill file: the driver refuses a writable
   skill store, it does not import the promotion module at all, and it hashes the
   skill tree before and after so a mutation from any source is visible in the
@@ -56,12 +57,13 @@
   <key>RunAtLoad</key>
   <false/>
 
-  <!-- Both streams go to the gitignored state tree. They can contain excerpts of
-       private conversation content, so treat them exactly like state/raw/. -->
+  <!-- Both streams go to the configured state tree. They can contain excerpts of
+       private conversation content, so treat them exactly like state/raw/; the
+       next daily run resets their mode to owner-only. -->
   <key>StandardOutPath</key>
-  <string>__REPO__/state/daily.out.log</string>
+  <string>__STATE__/daily.out.log</string>
   <key>StandardErrorPath</key>
-  <string>__REPO__/state/daily.err.log</string>
+  <string>__STATE__/daily.err.log</string>
 
   <key>ProcessType</key>
   <string>Background</string>

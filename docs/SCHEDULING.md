@@ -33,8 +33,12 @@ asi --config config/example.config.toml scheduler-template cron
 ```
 
 Both write to stdout and **install nothing**. Placeholders for the repository
-path, the interpreter and the config file are substituted with the values from the
-invocation, so the output is ready to install by hand after you have read it.
+path, the interpreter, the config file and that config's state directory are
+substituted with the values from the invocation (`--config` is honoured, and the
+config is loaded to find its `state_dir`), so the output is ready to install by
+hand after you have read it, and the job it describes is the one you asked about.
+A config that does not load is a `ConfigError` here as everywhere, exit 3: a job
+for a config that cannot run is not worth printing.
 
 To install the launchd job yourself, copy the output into your user LaunchAgents
 directory and load it with `launchctl`. To install the cron entry, paste it into
@@ -104,9 +108,12 @@ prose makes an unchanged state look like news.
 
 ## Logs
 
-Both streams go under the state tree. They can contain excerpts of private
-conversation content, so treat them exactly like `state/raw/`: local only, never
-committed, never pasted into a ticket.
+Both streams go under the configured state tree, as `daily.out.log` and
+`daily.err.log`. They can contain excerpts of private conversation content, so
+treat them exactly like `state/raw/`: local only, never committed, never pasted
+into a ticket. The scheduler creates them with your umask; the daily run they
+belong to resets them to owner-only on its way in, and says so in its receipt
+whenever it had to.
 
 The state tree is created `0700` with `0600` files regardless of the umask the
 scheduler hands the job, and existing permissions are repaired on every run. That

@@ -1,12 +1,13 @@
 # ---------------------------------------------------------------------------
 # crontab template for the daily pass. PRINTED, NEVER INSTALLED.
 #
-# `asi scheduler-template cron` substitutes __REPO__, __PYTHON__ and __CONFIG__
-# and writes the result to stdout. Nothing is scheduled until you put it in your
+# `asi scheduler-template cron` fills in the repository path, the interpreter,
+# the config file it was invoked with and that config's state directory, then
+# writes the result to stdout. Nothing is scheduled until you put it in your
 # own crontab. Read docs/SCHEDULING.md first.
 #
 # The job runs `asi daily --commit`: ingest, score, isolate, propose, validate.
-# It writes only under the gitignored state directory and can never modify a
+# It writes only under the configured state directory and can never modify a
 # skill file. Promotion is intentionally not here -- `asi apply` refuses to run
 # under the automation marker that the daily driver always sets, so adding it
 # would not work anyway.
@@ -19,12 +20,12 @@
 #     than double-counting records. A crashed run releases the lock automatically,
 #     because the kernel drops it when the process dies.
 #   * Redirect both streams. The output can contain excerpts of private
-#     conversation content, so it belongs under state/ with everything else the
-#     loop reads, and state/ is gitignored.
+#     conversation content, so it belongs in the configured state directory with
+#     everything else the loop reads, where the next run resets it to owner-only.
 # ---------------------------------------------------------------------------
 
 # m  h  dom mon dow   command
- 17  3   *   *   *    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ daily --commit >> __REPO__/state/daily.out.log 2>> __REPO__/state/daily.err.log
+ 17  3   *   *   *    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ daily --commit >> __STATE__/daily.out.log 2>> __STATE__/daily.err.log
 
 # Weekly reminder to review the queue. The loop deliberately cannot promote
 # anything; if nobody runs `asi candidates` and `asi review`, nothing ever ships,
