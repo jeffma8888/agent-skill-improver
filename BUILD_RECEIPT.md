@@ -8,6 +8,14 @@ command and the code it returned.
 Every exit code below was read from the process itself, unpiped. Nothing here is
 estimated.
 
+The receipt has two dated snapshots and says which is which. The sections headed
+*at original publication* are the record of the build that first published this
+tree and are kept as written, because a receipt that is quietly rewritten to match
+the present is not a receipt. The section headed **Current snapshot** was measured
+again, with the same commands, on the tree committed by the commit that introduced
+it; its parent was `fe12960`. Where the two disagree, the newer number is the one
+to check against.
+
 ## Provenance
 
 The design was set by a hostile architecture review whose brief was to find how a
@@ -160,7 +168,7 @@ exist -- and its healthy controls then apply the same candidate successfully and
 confirm the daily path is still proposal-only. Each derived field additionally has
 its own unit test in both directions.
 
-## Verification commands and their real exit codes
+## Verification commands and their real exit codes, at original publication
 
 Run from the repository root. `<venv>` is a local virtual environment with the two
 declared dev extras installed; the runtime itself needs nothing beyond the
@@ -202,11 +210,15 @@ non-zero instead.
 
 ## The end-to-end daily run
 
-Fixtures only, offline, with a deterministic fake model. First pass:
+Fixtures only, offline, with a deterministic fake model. First pass, as the
+current tree prints it (re-run from an empty state directory for the current
+snapshot; the original line lacked the two `skills_*` fields, which were added
+when skill-level quarantine and deferral became separately counted):
 
 ```
 status=partial day=2026-01-02 mode=commit scored=6 quarantined=1 deferred=1
-candidates=2 gate_passed=1 live_mutation=False isolation=none
+skills_quarantined=0 skills_deferred=0 candidates=2 gate_passed=1
+live_mutation=False isolation=none
 ```
 
 Read it as designed behaviour rather than as damage:
@@ -227,12 +239,20 @@ Read it as designed behaviour rather than as damage:
   single most important line.
 - `isolation=none` is honest: this corpus is synthetic, so no confinement was
   required and none is claimed.
+- `skills_quarantined=0 skills_deferred=0`: no proposal target was defective
+  (implicated but absent from every root, or a proposal that came back malformed)
+  and no proposal was deferred: no improver call failed transiently, and no
+  validation raised at all (validation defers on any tool error, not only a
+  transient one). So no skill-level isolation was needed. These are counted apart from the conversation-level `quarantined` and
+  `deferred` because a reader of the old line could not tell which kind of record
+  had been set aside, and the policy refusal of `example-guardrails` lands in
+  neither: a guard doing its job is not a defect.
 
 Second pass, same day key, same seed:
 
 ```
-status=partial ... scored=0 quarantined=0 deferred=1 candidates=0 gate_passed=0
-live_mutation=False isolation=none
+status=partial ... scored=0 quarantined=0 deferred=1 skills_quarantined=0
+skills_deferred=0 candidates=0 gate_passed=0 live_mutation=False isolation=none
 ```
 
 `scored=0` is the idempotence key working: records that reached a terminal state
@@ -279,7 +299,7 @@ injected clock (`test_two_identical_runs_produce_identical_receipts`); this is t
 weaker claim that survives a real wall clock, and it is stated as the weaker one
 on purpose.
 
-## What is in the tree
+## What was in the tree, at original publication
 
 | Thing | Count |
 | --- | --- |
@@ -293,6 +313,62 @@ on purpose.
 | Synthetic conversation fixtures | 8 |
 | Example skills | 4 across 2 roots, 1 carrying an executable payload |
 | `asi selftest` structural checks | 16 |
+
+## Current snapshot
+
+Measured on the tree as committed by the commit that introduced this section
+(parent `fe12960`, 30 commits scanned before it), from the repository root, with
+`uv run --extra dev` supplying the two dev extras. Every exit code was read from
+the process, unpiped. The two `daily` passes ran against a copy of
+`config/example.config.toml` whose `state_dir` pointed at an empty temporary
+directory, so nothing in the repository's own gitignored `state/` influenced them.
+
+| Command | Exit | What it reported |
+| --- | --- | --- |
+| `python -m unittest discover -s tests -t .` | **0** | `Ran 597 tests` / `OK`, 0 skipped |
+| `python -m compileall -q src tests examples tools` | **0** | silent |
+| `black --check .` | **0** | `69 files would be left unchanged` |
+| `mypy` | **0** | `Success: no issues found in 42 source files` |
+| `python tools/leakscan.py --selftest` | **0** | 27 rules, each fires on its positive sample and stays silent on its negative one |
+| `python tools/leakscan.py .` | **0** | `clean`: 116 tracked files, 30 commits scanned, 0 allowlist entries, `origin` fetch and push URLs checked |
+| `python examples/build_fixtures.py --check` | **0** | `8 fixture(s) match the builder exactly` |
+| `asi --config config/example.config.toml doctor` | **0** | `verdict: ready`; `isolation mode=none verified=False required=False satisfied=True`; `state perms dirs 0o700 / files 0o600, 0 repaired, 0 still wrong` |
+| `asi --config config/example.config.toml selftest` | **0** | 20 architectural checks, all `ok`, `selftest: passed` |
+| `asi --config <empty-state copy> daily --commit --day 2026-01-02 --seed t1` | **0** | the first-pass line quoted above |
+| the same command again | **0** | the second-pass line quoted above |
+| `git diff --exit-code -- examples/skills examples/skills-mirror rubrics config` | **0** | no tracked skill, rubric or config file changed during either run |
+
+| Thing | Count |
+| --- | --- |
+| Tracked files | 116 |
+| Source modules (`src/`) | 42, 11,690 lines |
+| Test files | 23, 9,836 lines, of which 20 are test modules |
+| Test methods collected by discovery | 597 |
+| Documentation files under `docs/` | 6, 1,534 lines |
+| Leak scanner | 784 lines, 27 rules, 0 allowances, configured remote URLs checked |
+| Rubrics | 5 (2 enabled in the example configuration) |
+| Synthetic conversation fixtures | 8 |
+| Example skills | 4 across 2 roots, 1 carrying an executable payload |
+| `asi selftest` structural checks | 20 |
+
+### What the refresh found, and what was done
+
+Counting definitions against collections for the table above turned up two tests
+that were **written but never run**. `tests/test_candidate_integrity.py` carried a
+`load_tests` hook that listed its test classes by hand; `CandidateIdTests` was
+added after the list and never added to it. `discover` printed `Ran 588 tests /
+OK` with both of its tests absent, and nothing in the suite, the acceptance map or
+CI could tell. The hook now takes the two end-to-end classes first and every other
+`TestCase` in the module by introspection, so no class name is spelled out; the
+equivalent single-class hook in `tests/test_end_to_end_cli.py`, harmless today and
+the same footgun tomorrow, was removed. `tests/test_suite_integrity.py` then makes
+the count mechanical: every test method the loader finds on a `TestCase` under
+`tests/` must appear in the suite discovery builds, every class that defines a
+`test_*` method must be collected under its own name, and the checker carries a
+mutation control that rebuilds the hand-listed hook and confirms the dropped class
+is reported by name. Restoring the old hook makes two of its checks fail, naming
+`CandidateIdTests`; that was run before the fix was kept. 597 is 588 plus the two
+recovered tests plus the seven new ones.
 
 ## Honest limits of this verification
 
@@ -362,7 +438,7 @@ clean, and the leak scanner accepts the real credential-free `origin` after chec
 both its fetch and push URLs. The remote CI result is recorded by the commit's
 GitHub Actions run, not predicted in this receipt.
 
-## Final state
+## Final state, at original publication
 
 | Property | Value |
 | --- | --- |

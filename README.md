@@ -169,8 +169,9 @@ python examples/build_fixtures.py --check    # fixtures are reproducible
 asi --config config/example.config.toml selftest
 ```
 
-`BUILD_RECEIPT.md` records the exact commands, counts and real exit codes from
-the build that produced this tree.
+`BUILD_RECEIPT.md` records the exact commands, counts and real exit codes, once
+for the original publication build and once for the latest refresh, each tied to
+the commit it was measured on.
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same commands on
 three Python versions, plus the end-to-end daily pass against the fixtures. It

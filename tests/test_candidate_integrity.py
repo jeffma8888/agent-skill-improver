@@ -508,17 +508,27 @@ class TamperMatrixTests(unittest.TestCase):
 
 
 def load_tests(loader, tests, pattern):  # noqa: D103 - unittest hook
+    # The two end-to-end classes run first so a broken interlock fails loudly
+    # before the unit classes explain which derived field is at fault. Every
+    # other TestCase defined in this module is then collected by introspection:
+    # an earlier version listed the classes by hand and silently dropped one
+    # that was added later, so no class name is spelled out below.
+    first = (TamperedApplyIsRefusedEndToEnd, TamperMatrixTests)
     suite = unittest.TestSuite()
-    suite.addTests(loader.loadTestsFromTestCase(TamperedApplyIsRefusedEndToEnd))
-    suite.addTests(loader.loadTestsFromTestCase(TamperMatrixTests))
-    for case in (
-        DerivedPatchFieldTests,
-        TargetIdentityTests,
-        GateStatusTests,
-        RefusalWrapperTests,
-        CallSiteTests,
-        StateReadTests,
-    ):
+    for case in first:
+        suite.addTests(loader.loadTestsFromTestCase(case))
+    rest = sorted(
+        (
+            obj
+            for obj in globals().values()
+            if isinstance(obj, type)
+            and issubclass(obj, unittest.TestCase)
+            and obj.__module__ == __name__
+            and obj not in first
+        ),
+        key=lambda cls: cls.__name__,
+    )
+    for case in rest:
         suite.addTests(loader.loadTestsFromTestCase(case))
     return suite
 

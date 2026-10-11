@@ -21,6 +21,9 @@ from agent_skill_improver.hashing import sha256_file
 from tests.support import FIX_MARKER, build_env, run_cli
 
 
+# Numbered method names give a deterministic order: unittest sorts test names
+# alphabetically, which here is the intended lifecycle order. No load_tests hook
+# is needed for that, and a hand-written one can drop a class added later.
 class EndToEndTests(unittest.TestCase):
     """Ordered on purpose: the whole point is one candidate through one lifecycle."""
 
@@ -265,12 +268,6 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(before.returncode, RC_OK, before.stderr)
         self.assertEqual(after.returncode, RC_OK, after.stderr)
         self.assertEqual(json.loads(before.stdout), json.loads(after.stdout))
-
-
-def load_tests(loader, tests, pattern):  # noqa: D103 - unittest hook
-    # Numbered method names give a deterministic order; unittest sorts
-    # alphabetically, which here is the intended lifecycle order.
-    return loader.loadTestsFromTestCase(EndToEndTests)
 
 
 if __name__ == "__main__":  # pragma: no cover
