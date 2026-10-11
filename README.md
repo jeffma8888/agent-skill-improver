@@ -113,12 +113,12 @@ hosted-model option for a private source, are in
 | `doctor` | `state/` modes only | validates config, reports the source class and isolation mode, repairs state permissions, exits non-zero if not runnable |
 | `skills` | nothing | inventory: canonical vs mirror, files that never load, executable payloads |
 | `rubrics` | nothing | loaded rubrics with versions and content hashes |
-| `discover` | nothing | what the source would ingest, with pagination honesty |
+| `discover` | `state/` directory modes only (created empty and owner-only if absent) | what the source would ingest, with pagination honesty |
 | `daily` | `state/` only | the whole automated pass. **Dry run by default**; `--commit` persists to `state/` |
-| `candidates` | nothing | the review queue |
-| `review` | nothing | a candidate's full argument, diff, validation evidence and approval token |
-| `apply` | **a skill file** | the only writer. Human-gated, see below |
-| `rollback` | a skill file | restores a backup and verifies the hash |
+| `candidates` | `state/` directory modes only (created empty and owner-only if absent) | the review queue |
+| `review` | as `candidates` | a candidate's full argument, diff, validation evidence and approval token |
+| `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | the only skill writer. Human-gated, see below |
+| `rollback` | a skill file, plus `state/` (candidate status, receipt) | restores a backup and verifies the hash |
 | `scheduler-template` | nothing | prints a launchd or cron template. Installs nothing |
 | `selftest` | nothing | re-checks the structural safety invariants on the deployed source |
 

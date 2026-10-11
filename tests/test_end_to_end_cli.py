@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agent_skill_improver.cli import RC_OK, RC_REFUSED
+from agent_skill_improver.cli import RC_MISSING_FILE, RC_OK, RC_REFUSED
 from agent_skill_improver.domain.approval import AUTOMATION_ENV_VAR
 from agent_skill_improver.hashing import sha256_file
 
@@ -261,13 +261,17 @@ class EndToEndTests(unittest.TestCase):
                 self.assertNotIn("__REPO__", proc.stdout)
                 self.assertNotIn("__PYTHON__", proc.stdout)
                 self.assertNotIn("__CONFIG__", proc.stdout)
-        self.assertFalse(
-            (
-                Path.home() / "Library" / "LaunchAgents" / "com.local.agent-skill-improver.plist"
-            ).exists()
-            and False,
-            "sanity: the template command must never install anything",
-        )
+        # The earlier form of this check was `assertFalse(x and False)`, which
+        # cannot fail. The launchd install target is under $HOME (cron's spool is
+        # not, and is not measured here), so give the command an empty one and
+        # require it to stay empty; the command also makes no subprocess call.
+        with TemporaryDirectory() as home:
+            for kind in ("launchd", "cron"):
+                proc = self.cli("scheduler-template", kind, env={"HOME": home})
+                self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            self.assertEqual(
+                sorted(Path(home).rglob("*")), [], "the template command installed something"
+            )
 
     def test_20_the_launchd_template_is_a_well_formed_property_list(self):
         import plistlib
@@ -290,6 +294,103 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(before.returncode, RC_OK, before.stderr)
         self.assertEqual(after.returncode, RC_OK, after.stderr)
         self.assertEqual(json.loads(before.stdout), json.loads(after.stdout))
+
+
+def _tree_snapshot(*roots: Path) -> dict[str, str]:
+    """Every file and directory under the roots: content hash (files), mode and
+    mtime, so a byte-identical rewrite of an existing file is still a change."""
+    out: dict[str, str] = {}
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*")):
+            st = p.stat()
+            mode = oct(st.st_mode & 0o777)
+            key = f"{root.name}/{p.relative_to(root)}"
+            body = "dir" if p.is_dir() else f"{sha256_file(p)} {st.st_mtime_ns}"
+            out[key] = f"{body} {mode}"
+    return out
+
+
+class ReadOnlyCommandsTests(unittest.TestCase):
+    """README's command table says `skills`, `rubrics`, `discover`, `candidates`,
+    `review` and `scheduler-template` write nothing. Measured through the real
+    CLI against a fresh environment whose state tree was populated by exactly one
+    committed `daily` pass and nothing else, so a write these commands make on
+    their own cannot already be on disk when the snapshot is taken, and a rewrite
+    of something `daily` wrote shows up through its mtime. Files and directories,
+    content, mode and mtime, over the environment and the shared fixture
+    corpus."""
+
+    READ_ONLY = (
+        ("skills",),
+        ("rubrics",),
+        ("--json", "discover"),
+        ("candidates",),
+        ("--json", "review", "{candidate}"),
+        ("scheduler-template", "launchd"),
+        ("scheduler-template", "cron"),
+    )
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.cfg = ["--config", str(build_env(self.base, dry_run=False, seed="ro-seed"))]
+        self.fixtures = Path(__file__).resolve().parent / "fixtures" / "exports"
+
+    def commands(self, candidate: str) -> list[tuple[str, ...]]:
+        return [tuple(a.format(candidate=candidate) for a in args) for args in self.READ_ONLY]
+
+    def test_against_a_populated_state_tree_nothing_changes(self):
+        proc = run_cli([*self.cfg, "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        candidates = sorted((self.base / "state" / "candidates").glob("*.json"))
+        self.assertTrue(candidates, "the committed pass must leave a candidate to review")
+        candidate = json.loads(candidates[0].read_text(encoding="utf-8"))["id"]
+        before = _tree_snapshot(self.base, self.fixtures)
+        self.assertTrue(any(k.startswith("exports/") for k in before), "fixtures are in scope")
+        for args in self.commands(candidate):
+            with self.subTest(command=args):
+                proc = run_cli([*self.cfg, *args])
+                self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+                after = _tree_snapshot(self.base, self.fixtures)
+                changed = sorted(
+                    k for k in set(before) | set(after) if before.get(k) != after.get(k)
+                )
+                self.assertEqual(changed, [], f"{args} changed these paths")
+
+    def test_against_an_absent_state_tree_only_owner_only_directories_may_appear(self):
+        """Without a state tree, the commands that read one create the empty
+        owner-only directories they look in, and nothing else; the commands that
+        never touch state leave it absent. A directory they look in that already
+        exists with a wider mode is reset to owner-only, which is the "modes only"
+        the README admits to."""
+        state = self.base / "state"
+        self.assertFalse(state.exists())
+        for args in (("skills",), ("rubrics",), ("scheduler-template", "cron")):
+            with self.subTest(command=args):
+                proc = run_cli([*self.cfg, *args])
+                self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+                self.assertFalse(state.exists(), f"{args} created a state tree")
+        for args in (("--json", "discover"), ("candidates",)):
+            with self.subTest(command=args):
+                proc = run_cli([*self.cfg, *args])
+                self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        # `review` of a candidate that does not exist is the only way to run it
+        # without a state tree; it must still create no file on the way out.
+        proc = run_cli([*self.cfg, "review", "CAND-2026-01-01-01-none"])
+        self.assertEqual(proc.returncode, RC_MISSING_FILE, proc.stderr)
+        self.assertTrue(state.is_dir(), "discover and candidates create the tree they read")
+        files = [p for p in state.rglob("*") if not p.is_dir()]
+        self.assertEqual(files, [], "a read-only command wrote a file")
+        wide = [p for p in [state, *state.rglob("*")] if p.stat().st_mode & 0o077]
+        self.assertEqual(wide, [], "a read-only command left a path readable beyond its owner")
+        (state / "candidates").chmod(0o755)
+        proc = run_cli([*self.cfg, "candidates"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        self.assertEqual((state / "candidates").stat().st_mode & 0o777, 0o700, "modes are reset")
+        self.assertEqual([p for p in state.rglob("*") if not p.is_dir()], [], "still no file")
 
 
 if __name__ == "__main__":  # pragma: no cover
