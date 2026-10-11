@@ -22,6 +22,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
+#: Longest thread id accepted. Real ids are tens of characters; the cap exists so
+#: a forged line cannot push kilobytes onto a command line or into a filename.
+MAX_THREAD_ID_LENGTH = 256
+
+
+def is_safe_thread_id(value: str) -> bool:
+    """Whether ``value`` may be placed on a command line as a thread id.
+
+    A discovered id is untrusted: the listing it was parsed from derives titles
+    from conversation content, so a conversation can carry a newline and a forged
+    ``Thread:`` line. Substituted into the export argv unchecked, an id such as
+    ``--output=/somewhere`` is an OPTION to the conversation CLI rather than the
+    thread it was asked for. An id is a value: it must not start with a dash, and
+    it must not contain whitespace or control characters, which would otherwise
+    split or hide on a command line and in a log.
+    """
+    if not value or len(value) > MAX_THREAD_ID_LENGTH:
+        return False
+    if value[0] == "-":
+        return False
+    return all(ch.isprintable() and not ch.isspace() for ch in value)
+
 
 @dataclass(frozen=True)
 class DiscoveredThread:

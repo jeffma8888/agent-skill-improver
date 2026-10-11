@@ -45,7 +45,12 @@ from typing import Any, Sequence
 
 from ..adapters.transcript_export import normalize_export
 from ..domain.conversation import NormalizedConversation
-from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
+from ..domain.discovery import (
+    DiscoveredThread,
+    DiscoveryPage,
+    is_safe_thread_id,
+    page_from_threads,
+)
 from ..errors import RecordDefect, SourceUnavailable
 from .bounded_process import OutputOverflow, RunTimedOut, run_bounded
 
@@ -124,6 +129,15 @@ def parse_discovery_output(text: str) -> list[DiscoveredThread]:
             continue
         thread = _THREAD_LINE.match(line)
         if thread:
+            if not is_safe_thread_id(thread.group("id")):
+                # An option-shaped or unprintable id is not a thread; it is text
+                # that reached the listing. Dropped here so it never becomes an
+                # argv element, and refused again in fetch() for ids that
+                # arrive by any other route.
+                title = ""
+                date = ""
+                workspace = ""
+                continue
             found.append(
                 DiscoveredThread(
                     thread_id=thread.group("id"),
@@ -236,6 +250,13 @@ class ConversationCliSource:
 
     # -- fetch -----------------------------------------------------------
     def fetch(self, thread_id: str) -> NormalizedConversation:
+        if not is_safe_thread_id(thread_id):
+            raise RecordDefect(
+                f"refusing to export {thread_id!r}: a thread id is a command-line VALUE and "
+                "must not start with a dash or contain whitespace or control characters; "
+                "this one would have been read as an option by the conversation command",
+                record_id=thread_id,
+            )
         argv = render_argv(self.export_argv, {"thread_id": thread_id})
         # One oversized or undecodable export is a defect of THAT record. The
         # cap is enforced while the command's output is read, so the export is

@@ -15,13 +15,17 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agent_skill_improver.adapters.conversation_cli import ConversationCliSource
+from agent_skill_improver.adapters.conversation_cli import (
+    ConversationCliSource,
+    parse_discovery_output,
+)
 from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.errors import RecordDefect, SourceUnavailable
 from agent_skill_improver.domain.discovery import (
     DiscoveredThread,
     DiscoveryPage,
     error_page,
+    is_safe_thread_id,
     merge_pages,
     page_from_threads,
 )
@@ -250,6 +254,65 @@ class SourceOutputBoundsTests(unittest.TestCase):
         source = self._source(program, str(fixture))
         conversation = source.fetch("thread-4")
         self.assertTrue(conversation.messages, "the fixture export must normalize to messages")
+
+
+class ThreadIdIsAnArgumentNotAnOptionTests(unittest.TestCase):
+    """A discovered id is untrusted text that ends up on a command line.
+
+    Discovery output is parsed from a tool whose titles are derived from
+    conversation content, so a conversation can carry a newline followed by a
+    forged ``Thread:`` line. The id on that line was substituted into the export
+    argv unchecked: ``--output=/somewhere`` or ``-rf`` became an OPTION to the
+    conversation CLI rather than the thread it was asked for. The id is a value,
+    and a value that starts with a dash or carries control characters is refused
+    at the boundary, before any command runs.
+    """
+
+    class _Recorded(ConversationCliSource):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.argvs: list[list[str]] = []
+
+        def _run(self, argv, **kwargs):  # type: ignore[override]
+            self.argvs.append(list(argv))
+            return "{}"
+
+    FORGED = (
+        '1. "a title" (2026-01-02)\n'
+        "   Thread: 1700000000101-1 (conversation://thread/1700000000101-1)\n"
+        '2. "injected" (2026-01-02)\n'
+        "   Thread: --output=/tmp/owned\n"
+        '3. "injected too" (2026-01-02)\n'
+        "   Thread: -rf\n"
+        '4. "fine" (2026-01-02)\n'
+        "   Thread: 1700000000102-1\n"
+    )
+
+    def test_an_option_shaped_id_is_dropped_at_parse_time(self):
+        ids = [t.thread_id for t in parse_discovery_output(self.FORGED)]
+        self.assertEqual(ids, ["1700000000101-1", "1700000000102-1"])
+
+    def test_fetch_refuses_an_option_shaped_id_before_running_anything(self):
+        source = self._Recorded()
+        for bad in ("--output=/tmp/owned", "-rf", "-", "a\nb", "a\x00b", "", " ", "x" * 300):
+            with self.subTest(bad=bad):
+                with self.assertRaises(RecordDefect):
+                    source.fetch(bad)
+        self.assertEqual(source.argvs, [], "no command may run for a refused id")
+
+    def test_the_control_id_still_reaches_the_command_line(self):
+        source = self._Recorded()
+        with self.assertRaises(RecordDefect):
+            # "{}" is not a valid export; the point is that the command RAN.
+            source.fetch("1700000000101-1")
+        self.assertEqual(len(source.argvs), 1)
+        self.assertIn("1700000000101-1", source.argvs[0])
+
+    def test_the_predicate_names_the_rule(self):
+        self.assertTrue(is_safe_thread_id("thr_abc.123:4/5"))
+        self.assertFalse(is_safe_thread_id("--x"))
+        self.assertFalse(is_safe_thread_id("a b"))
+        self.assertFalse(is_safe_thread_id("a\tb"))
 
 
 class ExplicitLimitTests(unittest.TestCase):
