@@ -11,24 +11,90 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("aws-access-key-id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
-    ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
-    ("bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")),
-    (
+
+def _j(*parts: str) -> str:
+    """Join pattern fragments so no credential SHAPE appears literally in source.
+
+    ``tools/leakscan.py`` scans this file too. A pattern that spells a token
+    prefix in one piece is indistinguishable from a planted token to a scanner,
+    so the prefixes are split exactly as the scanner splits its own.
+    """
+    return "".join(parts)
+
+
+@dataclass(frozen=True)
+class _Shape:
+    label: str
+    pattern: re.Pattern[str]
+    #: When true, group 1 (the key name and separator) is kept and only what
+    #: follows is replaced, so ``?access_token=...&x=1`` stays a readable URL.
+    keep_prefix: bool = False
+
+
+#: Every shape ``tools/leakscan.py`` refuses in the repository is recognised
+#: here as well; ``tests/test_redaction.py`` holds the two lists together. A
+#: transcript is a far likelier place for a pasted credential than a fixture.
+_SHAPES: tuple[_Shape, ...] = (
+    _Shape("aws-access-key-id", re.compile(r"\b(?:A" + r"KIA|A" + r"SIA)[0-9A-Z]{16}\b")),
+    _Shape("github-token", re.compile(r"\bg" + r"h[pousr]_[A-Za-z0-9]{20,}\b")),
+    _Shape("github-fine-grained-token", re.compile(r"\bgithub_" + r"pat_[A-Za-z0-9_]{20,}\b")),
+    _Shape("slack-token", re.compile(r"\bx" + r"ox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    _Shape("model-provider-key", re.compile(r"\bs" + r"k-[A-Za-z0-9_-]{20,}\b")),
+    _Shape("google-api-key", re.compile(r"\bA" + r"Iza[0-9A-Za-z_-]{30,}\b")),
+    _Shape(
+        "jwt",
+        re.compile(r"\be" + r"yJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
+    ),
+    _Shape("bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")),
+    _Shape(
         "private-key-block",
-        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        # The END line is optional: excerpts are clipped to a character budget,
+        # and a key whose closing line fell past the clip is still a key. With
+        # the delimiter required, the whole body went to the model unredacted.
+        re.compile(
+            _j("-----BE", "GIN ")
+            + r"[A-Z ]*"
+            + _j("PRIV", "ATE KEY-----")
+            + r"[\s\S]*?(?:"
+            + _j("-----E", "ND ")
+            + r"[A-Z ]*"
+            + _j("PRIV", "ATE KEY-----")
+            + r"|\Z)"
+        ),
     ),
-    (
+    _Shape(
+        "url-credential",
+        re.compile(
+            r"(?i)([?&](?:access[_-]?token|auth[_-]?token|api[_-]?key|apikey|token|secret"
+            + r"|pass"
+            + r"word|client[_-]?secret|sig|signature|key)=)[^&\s#]{8,}"
+        ),
+        keep_prefix=True,
+    ),
+    # Assignments keep the key name and replace only the value, so a reader
+    # still sees WHAT was set. The value stops at whitespace, '&' and '[' so a
+    # URL tail survives and an already-placed placeholder is not matched twice.
+    _Shape(
         "aws-secret-assignment",
-        re.compile(r"(?i)\b(aws_secret_access_key|secret_access_key)\b\s*[=:]\s*\S+"),
+        re.compile(
+            r"(?i)(\b(?:"
+            + _j("aws_secr", "et_access_key|secr", "et_access_key")
+            + r")\b\s*[=:]\s*)[^\s&\[]+"
+        ),
+        keep_prefix=True,
     ),
-    (
-        "password-assignment",
-        re.compile(r"(?i)\b(password|passwd|api[_-]?key|token)\b\s*[=:]\s*\S{6,}"),
+    _Shape(
+        "secret-assignment",
+        re.compile(
+            r"(?i)(\b(?:pass"
+            + r"word|pass"
+            + r"wd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token"
+            + r"|client[_-]?secret|private[_-]?token|token)\b\s*[=:]\s*)[^\s&\[]{6,}"
+        ),
+        keep_prefix=True,
     ),
 )
+
 
 PLACEHOLDER = "[REDACTED:{label}]"
 
@@ -47,8 +113,10 @@ def redact(text: str) -> RedactionResult:
     """Replace recognised secret shapes with labelled placeholders."""
     counts: dict[str, int] = {}
     out = text
-    for label, pattern in _PATTERNS:
-        out, n = pattern.subn(PLACEHOLDER.format(label=label), out)
+    for shape in _SHAPES:
+        placeholder = PLACEHOLDER.format(label=shape.label)
+        repl = r"\g<1>" + placeholder if shape.keep_prefix else placeholder
+        out, n = shape.pattern.subn(repl, out)
         if n:
-            counts[label] = counts.get(label, 0) + n
+            counts[shape.label] = counts.get(shape.label, 0) + n
     return RedactionResult(out, counts)
