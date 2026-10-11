@@ -502,7 +502,38 @@ def _propose_and_validate(
     if not by_skill:
         return []
 
-    items = sorted(by_skill.items())
+    # One open proposal per skill. Two open candidates for one file cannot both
+    # be applied (the second fails its base hash), so proposing again while
+    # yesterday's draft awaits review only fills the queue with competitors and
+    # spends the backlog cap on duplicates. Skipped skills are a policy refusal
+    # with the reason, and they stop occupying a proposal slot.
+    per_skill_cap = config.caps.max_open_candidates_per_skill
+    open_by_skill: dict[str, int] = {}
+    for open_candidate in state.open_candidates():
+        sid = open_candidate.target.skill_id
+        open_by_skill[sid] = open_by_skill.get(sid, 0) + 1
+    already_open = sorted(s for s in by_skill if open_by_skill.get(s, 0) >= per_skill_cap)
+    for skill_id in already_open:
+        reason = (
+            f"{open_by_skill[skill_id]} open candidate(s) already target {skill_id!r} "
+            f"(cap {per_skill_cap} per skill); review or close them and the next run "
+            "proposes again"
+        )
+        state.refuse(skill_id, stage=STAGE_PROPOSE, reason=reason)
+        receipt.record(
+            skill_id, status="refused", stage=STAGE_PROPOSE, reason=reason, kind=KIND_SKILL
+        )
+    receipt.counts["skills_with_open_candidate"] = len(already_open)
+    if already_open:
+        receipt.note(
+            f"{len(already_open)} implicated skill(s) skipped on purpose: an open candidate "
+            f"already targets each of them ({', '.join(already_open)})"
+        )
+
+    items = sorted((k, v) for k, v in by_skill.items() if open_by_skill.get(k, 0) < per_skill_cap)
+    if not items:
+        receipt.counts["skills_selected_for_proposal"] = 0
+        return []
     selected, report = select_fair(
         items,
         limit=min(config.caps.max_skills_per_run, config.caps.max_candidates_per_run),

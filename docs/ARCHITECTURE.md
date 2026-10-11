@@ -435,6 +435,12 @@ await review, the next run stands down instead of adding to the pile. Nothing is
 discarded, and the receipt says why it stood down. An unattended producer with no
 backlog guard is how a review queue becomes unbounded.
 
+Inside that total, `max_open_candidates_per_skill` (default 1) keeps the queue
+from filling with competitors for one file: a skill that already has an open
+candidate is skipped as a policy refusal, with the reason, and its proposal slot
+goes to another skill. Two open drafts for one `SKILL.md` cannot both be applied;
+whichever lands second fails its base hash.
+
 ## Determinism
 
 Given the same inputs, the same seed and the same day key, two runs produce

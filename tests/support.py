@@ -124,6 +124,7 @@ def build_env(
     max_open_candidates: int = 12,
     max_candidates_per_run: int = 3,
     max_defer_attempts: int = 3,
+    max_open_candidates_per_skill: int = 1,
     min_holdout_cases: int = 1,
     min_fixes: int = 1,
     require_judge: bool = True,
@@ -183,6 +184,7 @@ max_skills_per_run = 3
 max_failures_per_candidate = 6
 max_extra_holdout_conversations = 3
 max_defer_attempts = {max_defer_attempts}
+max_open_candidates_per_skill = {max_open_candidates_per_skill}
 
 [prompt]
 max_transcript_chars = 24000

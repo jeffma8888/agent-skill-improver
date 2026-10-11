@@ -111,6 +111,10 @@ max_extra_holdout_conversations = 3
 # score (or, for a skill id, a completed propose-and-validate) resets the streak.
 # Minimum 1, which means quarantine on the first miss.
 max_defer_attempts = 3
+# A skill that already has this many candidates awaiting review is not proposed
+# for again until they are closed: two open drafts for one file cannot both be
+# applied, and the duplicates would spend the backlog cap.
+max_open_candidates_per_skill = 1
 
 [prompt]
 # Budget per model call. When the budget binds, transcript blocks are dropped

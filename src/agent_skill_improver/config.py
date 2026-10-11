@@ -181,6 +181,7 @@ class CapsConfig:
     max_skills_per_run: int = 3
     max_extra_holdout_conversations: int = 3
     max_defer_attempts: int = 3
+    max_open_candidates_per_skill: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -190,6 +191,7 @@ class CapsConfig:
             "max_skills_per_run": self.max_skills_per_run,
             "max_extra_holdout_conversations": self.max_extra_holdout_conversations,
             "max_defer_attempts": self.max_defer_attempts,
+            "max_open_candidates_per_skill": self.max_open_candidates_per_skill,
         }
 
 
@@ -524,6 +526,9 @@ def _load_caps(table: Mapping[str, Any]) -> CapsConfig:
             table, "max_extra_holdout_conversations", 3, where="caps", minimum=0
         ),
         max_defer_attempts=_int_field(table, "max_defer_attempts", 3, where="caps", minimum=1),
+        max_open_candidates_per_skill=_int_field(
+            table, "max_open_candidates_per_skill", 1, where="caps", minimum=1
+        ),
     )
 
 

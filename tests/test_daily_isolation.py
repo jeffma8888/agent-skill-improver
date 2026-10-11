@@ -658,6 +658,14 @@ class PerRecordFailureTests(DailyHarness):
         healthy = run("2026-01-04")
         self.assertGreater(healthy["counts"]["candidates_proposed"], 0)
         self.assertEqual(state.deferred_ids(), [], "propose plus validate completed")
+        # Close the healthy run's candidate, or the per-skill cap (one open
+        # proposal per skill) would skip the skill before the improver is asked.
+        from dataclasses import replace
+
+        from agent_skill_improver.domain.candidate import STATUS_GATE_FAILED
+
+        for cand in state.open_candidates():
+            state.write_candidate(replace(cand, status=STATUS_GATE_FAILED))
         third = run("2026-01-05", fail_roles=("improver",))
         self.assertEqual(third["counts"]["skills_quarantined"], 0)
         self.assertEqual({state.deferred_attempts(i) for i in state.deferred_ids()}, {1})
@@ -834,6 +842,143 @@ class CredentialBearingSkillTests(DailyHarness):
         )
         self.assertTrue(refused)
         self.assertIn("credential", refused[0]["reason"].lower())
+
+
+class OnePerSkillTests(DailyHarness):
+    def test_a_skill_with_an_open_candidate_is_not_proposed_again_until_it_is_closed(self):
+        """Two open proposals for one file cannot both be applied: whichever
+        lands second fails its base hash. Proposing a new one every day while
+        yesterday's still awaits review turns the queue into competing drafts
+        and spends the backlog cap on duplicates. The skill is skipped as a
+        policy refusal, with the reason, until the open one is closed.
+        """
+        from dataclasses import replace
+
+        from agent_skill_improver.domain.candidate import STATUS_GATE_FAILED
+
+        config = self.env()
+        self.assertEqual(config.caps.max_open_candidates_per_skill, 1)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str) -> dict:
+            return run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        first = run("2026-01-02")
+        self.assertGreater(first["counts"]["candidates_proposed"], 0)
+        open_after_first = state.open_candidates()
+        self.assertTrue(open_after_first)
+        targeted = {c.target.skill_id for c in open_after_first}
+
+        second = run("2026-01-03")
+        self.assertEqual(
+            second["counts"]["candidates_proposed"],
+            0,
+            "the same failures implicate the same skill; it already has an open candidate",
+        )
+        self.assertEqual(len(state.open_candidates()), len(open_after_first))
+        for skill_id in targeted:
+            info = second["skills"][skill_id]
+            self.assertEqual(info["status"], "refused")
+            self.assertIn("open candidate", info["reason"])
+        self.assertGreater(second["counts"]["proposals_refused_by_policy"], 0)
+        self.assertEqual(second["counts"]["skills_with_open_candidate"], len(targeted))
+        self.assertEqual(
+            {c.id for c in state.open_candidates()},
+            {c.id for c in open_after_first},
+            "nothing was discarded or replaced",
+        )
+
+        for cand in open_after_first:
+            state.write_candidate(replace(cand, status=STATUS_GATE_FAILED))
+        third = run("2026-01-04")
+        self.assertGreater(
+            third["counts"]["candidates_proposed"], 0, "closing the queue re-opens the skill"
+        )
+
+    def test_the_slot_a_capped_skill_would_have_taken_goes_to_another_skill(self):
+        """The cap is applied before fair selection, so a capped skill does not
+        burn the run's proposal budget: with room for one proposal and two
+        implicated skills, day one proposes for one skill and day two proposes
+        for the other instead of refusing and producing nothing.
+        """
+        import shutil
+
+        from tests import fake_model
+
+        copy_thread = "1700000000009-1"
+        fixtures = self.base / "two-skill-fixtures"
+        fixtures.mkdir()
+        original = FIXTURE_EXPORTS / "failing.json"
+        shutil.copy(original, fixtures / "failing.json")
+        (fixtures / "failing-code-review.json").write_text(
+            original.read_text()
+            .replace("tdd", "code-review")
+            .replace(fake_model.FAILING_THREAD, copy_thread)
+        )
+
+        class ScoresTheCopyLikeTheOriginal(InProcessRunner):
+            """The fake scorer seeds failures for one thread id only; make the
+            copy fail the same way so a second skill is implicated."""
+
+            def run(self, *, role, system, user, response_schema):
+                if role == "scorer" and copy_thread in user:
+                    card = super().run(
+                        role=role,
+                        system=system,
+                        user=user.replace(copy_thread, fake_model.FAILING_THREAD),
+                        response_schema=response_schema,
+                    )
+                    card["conversation_id"] = copy_thread
+                    return card
+                return super().run(
+                    role=role, system=system, user=user, response_schema=response_schema
+                )
+
+        config = self.env(fixtures_dir=fixtures, max_candidates_per_run=1)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str) -> dict:
+            return run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=ScoresTheCopyLikeTheOriginal(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        first = run("2026-01-02")
+        self.assertEqual(first["counts"]["skills_implicated"], 2, first["counts"])
+        self.assertEqual(first["counts"]["candidates_proposed"], 1)
+        first_skill = first["candidates"][0]["skill_id"]
+
+        second = run("2026-01-03")
+        self.assertEqual(second["counts"]["skills_with_open_candidate"], 1)
+        self.assertEqual(second["skills"][first_skill]["status"], "refused")
+        self.assertEqual(second["counts"]["skills_selected_for_proposal"], 1)
+        self.assertEqual(second["counts"]["candidates_proposed"], 1, "the slot was reused")
+        self.assertNotEqual(second["candidates"][0]["skill_id"], first_skill)
+        self.assertEqual(
+            sorted(c.target.skill_id for c in state.open_candidates()),
+            sorted({first_skill, second["candidates"][0]["skill_id"]}),
+        )
 
 
 class StateCorruptionTests(DailyHarness):

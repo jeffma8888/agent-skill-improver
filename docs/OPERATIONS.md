@@ -89,7 +89,8 @@ failure_cases_unattributed    real failures NOT tied to a skill (abstention, not
 candidates_proposed           proposals written
 candidates_gate_passed        proposals with no-regression evidence
 candidates_gate_failed        kept, with reasons, for a human to read
-proposals_refused_by_policy   targets declined by a guard rule
+proposals_refused_by_policy   targets declined by a guard rule (includes the next line)
+skills_with_open_candidate    implicated skills skipped because a candidate of theirs awaits review
 open_candidates_after         the review backlog
 ```
 
@@ -190,6 +191,14 @@ exists to prevent.
 working. Review or discard candidates, or raise `max_open_candidates` if you have
 decided the queue can carry more. Do not remove the guard.
 
+**A skill has a validated candidate waiting, and later runs propose nothing new
+for it.** That is `max_open_candidates_per_skill` (default 1) holding: the
+receipt's `skills` table shows the skill as `refused` with "open candidate(s)
+already target". Two open drafts for one file cannot both be applied, so the run
+waits for you to review or close the existing one rather than queue a competitor.
+A `gate-failed` candidate is closed and does not hold the skill; a skill whose
+proposals keep failing the gate is re-proposed each run.
+
 **Records keep landing in quarantine.** Read the reason files; each one names the
 defect. A repeating shape defect usually means the source changed its export
 format, which is a normalizer fix, not a data problem.
@@ -220,10 +229,10 @@ receipt says a candidate could NOT be rewritten, its file may still read
 file under `state/` is truncated, hand-edited, or not a JSON object. Nothing is
 guessed at and the file is left as found; read it, then move it aside to continue
 without it. For a checkpoint that means the day's already-processed set is
-forgotten and those conversations are scored again. That re-spends model calls
-and adds a second, duplicate candidate (`-02-`) to the review queue for each skill
-it re-proposes, which counts toward `max_open_candidates`; nothing on disk is
-overwritten or mutated. Close the duplicates.
+forgotten and those conversations are scored again. That re-spends model calls;
+a skill whose candidate from the first run is still open is skipped by the
+per-skill cap, and a skill whose candidate was closed gets a fresh `-02-`
+proposal. Nothing on disk is overwritten or mutated.
 
 ## Housekeeping
 
