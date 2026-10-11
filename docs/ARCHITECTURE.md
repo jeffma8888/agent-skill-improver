@@ -128,6 +128,40 @@ The synthetic exception exists so public CI stays portable: fixtures are files
 this repository generates, contain no private content, and are the only class
 allowed to run the deterministic fake model without an OS sandbox.
 
+### What a child process can do to the parent
+
+Confinement bounds what a child may reach; it does not bound what a child may
+*send back*. Every external command (the conversation CLI and each model role)
+runs through `adapters/bounded_process.py`, the one place that reads a child's
+pipes:
+
+- the byte cap (`max_output_bytes` for a role, `max_export_bytes` for the
+  source) is enforced **while stdout is read**, and the child is killed the
+  moment it is exceeded. The earlier `capture_output=True` compared the length
+  afterwards, so a flooding command cost the parent that much memory before the
+  refusal fired. A limit checked after the resource is spent is a log line;
+- the timeout is a wall-clock deadline over the whole exchange, stdin included,
+  and a child that outlives it is killed and reaped rather than left running;
+- stdin is fed from a helper thread, so a child that answers before it reads
+  cannot wedge the parent on a full pipe;
+- stderr is drained concurrently and only a bounded tail is kept for the
+  failure message;
+- output that is not UTF-8, or JSON nested too deeply to parse, is a named
+  per-record failure (`MalformedModelOutput`, `RecordDefect`) rather than an
+  exception that escapes the per-record handlers and aborts the pass.
+
+Two more things are refused before any child runs. A discovered thread id must
+satisfy `is_safe_thread_id` (no leading dash, no whitespace or control
+characters), because listing titles derive from conversation content and a
+forged `Thread:` line could otherwise plant an id that the export argv would
+hand to the conversation CLI as an *option*. And a skill file that holds a
+credential (`credential_labels`, the high-confidence shapes only) is refused as
+a proposal target with `CredentialInSkill`: the transcript is redacted before a
+model sees it, but the skill text cannot be, because the improver returns the
+complete new file and a placeholder would come back as the file's content. The
+same detector runs on the improver's output, so a token the model wrote never
+becomes a candidate, a backup or a judge prompt.
+
 ## The daily pass, stage by stage
 
 ### 1. Discover
