@@ -47,10 +47,13 @@ from __future__ import annotations
 
 import json
 import os
+import selectors
 import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -65,6 +68,14 @@ from ..errors import MalformedModelOutput, TransientFailure
 WORKDIR_MODE = 0o700
 
 PLACEHOLDER_ROLE = "{role}"
+
+#: How much of the child's stderr is kept for the failure message. Stderr is
+#: diagnostic, not data, so only a bounded tail is retained while reading.
+STDERR_TAIL_BYTES = 4096
+
+#: Pipe read size. Small enough that the overshoot past ``max_output_bytes``
+#: before the kill is at most one chunk.
+_READ_CHUNK = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -200,41 +211,155 @@ class CommandModelRunner:
             "system": system,
             "user": user,
         }
-        payload = json.dumps(request, ensure_ascii=False)
+        payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
         workdir = self._new_workdir()
         try:
             # Raises IsolationRequired if a credential-shaped name survives.
             env = minimal_env(self._parent_env, workdir=str(workdir), extra=cmd.env)
             argv = self._isolation.wrap(cmd.argv, workdir=workdir)
-            proc = subprocess.run(  # noqa: S603 - argv from config, never shell
+            stdout, stderr_tail, returncode = _run_bounded(
                 argv,
-                input=payload,
-                capture_output=True,
-                text=True,
-                timeout=cmd.timeout_seconds,
-                check=False,
+                payload,
                 env=env,
+                timeout_seconds=cmd.timeout_seconds,
+                max_output_bytes=cmd.max_output_bytes,
+                role=role,
             )
         except FileNotFoundError as exc:
             raise TransientFailure(f"role {role!r} command not executable: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise TransientFailure(f"role {role!r} timed out after {cmd.timeout_seconds}s") from exc
         finally:
             # The scratch directory does not outlive the call, so one role cannot
             # leave private residue for the next one -- or for anything that
             # later walks the state tree.
             shutil.rmtree(workdir, ignore_errors=True)
-        if proc.returncode != 0:
-            tail = (proc.stderr or "").strip()[-500:]
-            raise TransientFailure(
-                f"role {role!r} exited {proc.returncode}: {tail or '<no stderr>'}"
-            )
-        out = proc.stdout or ""
-        if len(out.encode("utf-8", errors="ignore")) > cmd.max_output_bytes:
+        if returncode != 0:
+            tail = stderr_tail.decode("utf-8", errors="replace").strip()[-500:]
+            raise TransientFailure(f"role {role!r} exited {returncode}: {tail or '<no stderr>'}")
+        try:
+            out = stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
             raise MalformedModelOutput(
-                f"role {role!r} produced more than max_output_bytes ({cmd.max_output_bytes})"
-            )
+                f"role {role!r} produced output that is not UTF-8 ({exc.reason} at byte "
+                f"{exc.start}); the contract is one UTF-8 JSON object on stdout"
+            ) from exc
         return extract_json_object(out, role=role)
+
+
+def _run_bounded(
+    argv: Sequence[str],
+    payload: bytes,
+    *,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+    max_output_bytes: int,
+    role: str,
+) -> tuple[bytes, bytes, int]:
+    """Run ``argv`` and return ``(stdout, stderr_tail, returncode)``.
+
+    ``max_output_bytes`` is enforced *while reading*: the moment stdout exceeds
+    it the child is killed and ``MalformedModelOutput`` is raised. The previous
+    implementation captured everything and compared the length afterwards, so a
+    model command that streamed without end cost the parent that much memory
+    before the refusal fired. A cap applied after the resource is spent is a log
+    line, not a limit.
+
+    The timeout is a wall-clock deadline across the whole exchange, including
+    the stdin write. Stdin is written from a helper thread so a child that
+    answers before it reads (or never reads) cannot wedge the parent on a full
+    pipe. Stderr is drained concurrently and only a bounded tail is kept.
+
+    Raises ``FileNotFoundError`` (caller maps it), ``TransientFailure`` on
+    timeout, ``MalformedModelOutput`` on overflow.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    proc = subprocess.Popen(  # noqa: S603 - argv from config, never shell
+        list(argv),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(env),
+    )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(payload)  # type: ignore[union-attr]
+            proc.stdin.flush()  # type: ignore[union-attr]
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()  # type: ignore[union-attr]
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+    writer = threading.Thread(target=feed, name=f"asi-stdin-{role}", daemon=True)
+    writer.start()
+
+    out = bytearray()
+    err = bytearray()
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ, "out")
+    sel.register(proc.stderr, selectors.EVENT_READ, "err")
+    killed_for: Exception | None = None
+    try:
+        open_streams = 2
+        while open_streams and killed_for is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                killed_for = TransientFailure(f"role {role!r} timed out after {timeout_seconds}s")
+                break
+            for key, _events in sel.select(timeout=remaining):
+                stream = key.fileobj
+                chunk = os.read(stream.fileno(), _READ_CHUNK)  # type: ignore[union-attr]
+                if not chunk:
+                    sel.unregister(stream)
+                    open_streams -= 1
+                    continue
+                if key.data == "out":
+                    out += chunk
+                    if len(out) > max_output_bytes:
+                        killed_for = MalformedModelOutput(
+                            f"role {role!r} produced more than max_output_bytes "
+                            f"({max_output_bytes}); the command was stopped there"
+                        )
+                        break
+                else:
+                    err += chunk
+                    if len(err) > STDERR_TAIL_BYTES:
+                        del err[: len(err) - STDERR_TAIL_BYTES]
+        if killed_for is not None:
+            _kill(proc)
+            raise killed_for
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            returncode = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            _kill(proc)
+            raise TransientFailure(f"role {role!r} timed out after {timeout_seconds}s") from exc
+    finally:
+        sel.close()
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        if proc.poll() is None:
+            _kill(proc)
+        writer.join(timeout=1.0)
+    return bytes(out), bytes(err), returncode
+
+
+def _kill(proc: subprocess.Popen[bytes]) -> None:
+    """Stop the child and reap it; never leave a zombie or a writer blocked on us."""
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
 
 def extract_json_object(text: str, *, role: str = "model") -> dict[str, Any]:

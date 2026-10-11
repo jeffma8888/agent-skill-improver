@@ -31,6 +31,7 @@ import os
 import socket
 import stat
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -49,7 +50,12 @@ from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.config import SOURCE_CLI, SOURCE_FIXTURES, load_config
 from agent_skill_improver.domain import isolation as iso
-from agent_skill_improver.errors import ConfigError, IsolationRequired, TransientFailure
+from agent_skill_improver.errors import (
+    ConfigError,
+    IsolationRequired,
+    MalformedModelOutput,
+    TransientFailure,
+)
 from agent_skill_improver.domain.discovery import DiscoveredThread, page_from_threads
 
 from tests.support import FIXTURE_EXPORTS, InProcessRunner, build_env
@@ -485,6 +491,139 @@ class MinimalEnvironmentTests(unittest.TestCase):
     def test_an_ordinary_name_is_not_flagged(self):
         """The control for the denylist: it must not match everything."""
         self.assertEqual(iso.denied_env_names({"PATH": "/bin", "LANG": "C", "TZ": "UTC"}), ())
+
+
+class OutputCapIsEnforcedWhileReadingTests(unittest.TestCase):
+    """``max_output_bytes`` must bound what the runner reads, not what it reports.
+
+    The old code captured the whole of stdout into memory and compared its
+    length to the cap afterwards. A model command that streamed gigabytes (a
+    looping wrapper, a misconfigured verbose flag, or a hostile binary) therefore
+    cost the parent that much memory before the "too large" refusal fired. The
+    cap is a resource limit, and a resource limit checked after the resource is
+    spent is a log line.
+    """
+
+    FLOOD = (
+        "import sys,os,time\n"
+        "chunk = b'x' * (1 << 20)\n"
+        "for _ in range({chunks}):\n"
+        "    sys.stdout.buffer.write(chunk)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "open(sys.argv[1], 'w').write('finished')\n"
+    )
+
+    def _run_flood(self, *, chunks: int, cap: int, sentinel: Path) -> None:
+        cmd = RoleCommand(
+            role="scorer",
+            argv=(sys.executable, "-c", self.FLOOD.format(chunks=chunks), str(sentinel)),
+            env={},
+            max_output_bytes=cap,
+            timeout_seconds=120,
+            model_label="flood",
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        runner.run(role="scorer", system="s", user="u", response_schema="x")
+
+    def test_a_flooding_role_is_stopped_at_the_cap_before_it_finishes(self):
+        with TemporaryDirectory() as tmp:
+            sentinel = Path(tmp) / "finished"
+            with self.assertRaises(MalformedModelOutput) as ctx:
+                self._run_flood(chunks=256, cap=64 * 1024, sentinel=sentinel)
+            self.assertIn("max_output_bytes", str(ctx.exception))
+            self.assertFalse(
+                sentinel.exists(),
+                "the child ran to completion, so the parent drained every byte it "
+                "wrote before measuring: the cap was applied after the cost was paid",
+            )
+
+    def test_the_control_output_under_the_cap_is_parsed(self):
+        cmd = RoleCommand(
+            role="scorer",
+            argv=(sys.executable, "-c", "import sys;sys.stdout.write('{\"ok\": true}')"),
+            env={},
+            max_output_bytes=64,
+            model_label="small",
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        self.assertEqual(
+            runner.run(role="scorer", system="s", user="u", response_schema="x"), {"ok": True}
+        )
+
+    def test_output_that_is_not_utf8_is_a_malformed_output_not_a_crash(self):
+        cmd = RoleCommand(
+            role="scorer",
+            argv=(sys.executable, "-c", 'import sys;sys.stdout.buffer.write(b\'{"a": "\\xff"}\')'),
+            env={},
+            model_label="binary",
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        with self.assertRaises(MalformedModelOutput):
+            runner.run(role="scorer", system="s", user="u", response_schema="x")
+
+    def test_a_large_request_does_not_deadlock_a_child_that_answers_first(self):
+        """A child that writes before it reads must not wedge the stdin writer."""
+        program = (
+            "import sys\n"
+            "sys.stdout.write('{\"echo\": 1}')\n"
+            "sys.stdout.flush()\n"
+            "sys.stdin.read()\n"
+        )
+        cmd = RoleCommand(
+            role="scorer",
+            argv=(sys.executable, "-c", program),
+            env={},
+            timeout_seconds=60,
+            model_label="eager",
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        big = "u" * (4 * 1024 * 1024)
+        self.assertEqual(
+            runner.run(role="scorer", system="s", user=big, response_schema="x"), {"echo": 1}
+        )
+
+    def test_a_child_that_never_finishes_is_a_transient_failure_and_is_reaped(self):
+        """The deadline is wall-clock over the whole exchange, and the child dies with it."""
+        program = (
+            "import sys,os,time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "sys.stdout.write('{')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(600)\n"
+        )
+        with TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "pid"
+            cmd = RoleCommand(
+                role="scorer",
+                argv=(sys.executable, "-c", program, str(pidfile)),
+                env={},
+                timeout_seconds=1,
+                model_label="hang",
+            )
+            runner = CommandModelRunner(
+                {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+            )
+            started = time.monotonic()
+            with self.assertRaises(TransientFailure) as ctx:
+                runner.run(role="scorer", system="s", user="u", response_schema="x")
+            self.assertIn("timed out", str(ctx.exception))
+            self.assertLess(time.monotonic() - started, 10.0)
+            pid = int(pidfile.read_text())
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                alive = False
+            else:
+                alive = True
+            self.assertFalse(alive, "a timed-out model child must be killed, not left running")
 
 
 class NoHostedModelOptOutTests(unittest.TestCase):
