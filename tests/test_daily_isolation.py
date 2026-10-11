@@ -1263,9 +1263,12 @@ class DeterminismTests(DailyHarness):
 
 
 def _state_snapshot(root: Path) -> dict[str, str]:
-    """Every file under the state root except the run lock, with its hash."""
+    """Every file under the state root except the run lock: its hash and mode.
+
+    The mode is part of the snapshot so "byte-identical" cannot hide a chmod.
+    """
     return {
-        str(path.relative_to(root)): sha256_file(path)
+        str(path.relative_to(root)): f"{sha256_file(path)} {oct(path.stat().st_mode & 0o777)}"
         for path in sorted(root.rglob("*"))
         if path.is_file() and path.relative_to(root).parts[0] != "locks"
     }
@@ -1334,6 +1337,47 @@ class DryRunPersistsNothingTests(DailyHarness):
         self.assertEqual(_state_snapshot(config.state_dir), before)
         self.assertEqual(committed.to_dict()["counts"]["artifacts_withheld_dry_run"], 0)
         self.assertGreater(preview["counts"]["artifacts_withheld_dry_run"], 0)
+
+    def test_a_dry_run_still_resets_a_drifted_mode_without_touching_the_bytes(self):
+        """The one change a dry run makes to existing state is a repair: ``daily``
+        runs ``ensure()`` first, which resets any file or directory whose mode is
+        not owner-only, wider or narrower. The content is untouched, the receipt
+        counts and names what it reset, and the dry-run note says so."""
+        config = self.env()
+        committed, state, _ = self.run_pass(config, day="2026-01-02")
+        self.assertGreater(committed.to_dict()["counts"]["records_scored"], 0)
+        self.assertEqual(committed.to_dict()["counts"]["state_modes_repaired"], 0)
+        before = _state_snapshot(config.state_dir)
+        wider, narrower = sorted(config.state_dir.glob("scorecards/*.json"))[:2]
+        wider.chmod(0o644)
+        narrower.chmod(0o400)
+        (config.state_dir / "conversations").chmod(0o755)
+        self.assertNotEqual(_state_snapshot(config.state_dir), before, "the drift is visible")
+        preview = self.dry_pass(config, state=state, day="2026-01-03").to_dict()
+        self.assertEqual(wider.stat().st_mode & 0o777, 0o600, "reset, not preserved")
+        self.assertEqual(narrower.stat().st_mode & 0o777, 0o600, "reset, not preserved")
+        self.assertEqual((config.state_dir / "conversations").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(_state_snapshot(config.state_dir), before, "and nothing else moved")
+        self.assertEqual(preview["counts"]["state_modes_repaired"], 3)
+        self.assertEqual(
+            sorted(state.repaired_paths),
+            sorted(
+                [
+                    "conversations",
+                    str(wider.relative_to(config.state_dir)),
+                    str(narrower.relative_to(config.state_dir)),
+                ]
+            ),
+        )
+        named = [n for n in preview["notes"] if "had a mode other than owner-only" in n]
+        self.assertEqual(len(named), 1, preview["notes"])
+        self.assertIn("conversations", named[0])
+        self.assertIn(wider.name, named[0])
+        self.assertIn(narrower.name, named[0])
+        self.assertTrue(
+            any("dry run" in n and "drifted mode" in n for n in preview["notes"]),
+            "the dry-run note must admit the one change it can make",
+        )
 
     def test_a_dry_run_reports_the_backlog_on_disk_not_the_proposals_it_withheld(self):
         """``open_candidates_after`` is the backlog a reviewer can open with
@@ -1412,7 +1456,8 @@ class DryRunPersistsNothingTests(DailyHarness):
         with self.assertRaises(SafetyRefusal):
             state.backup_dir_for("CAND-2026-01-02-01-tdd", "stamp")
         self.assertEqual(
-            _state_snapshot(state.root), {"README.txt": sha256_file(state.root / "README.txt")}
+            _state_snapshot(state.root),
+            {"README.txt": f"{sha256_file(state.root / 'README.txt')} 0o600"},
         )
 
 

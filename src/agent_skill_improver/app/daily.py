@@ -779,12 +779,23 @@ def _finish(
     # Taken before the receipt and the day checkpoint are handed to the store, so
     # those two withheld writes are not in this count; the receipt says so.
     receipt.counts["artifacts_withheld_dry_run"] = len(state.withheld_writes)
+    receipt.counts["state_modes_repaired"] = len(state.repaired_paths)
+    if state.repaired_paths:
+        shown = ", ".join(state.repaired_paths[:5])
+        more = "" if len(state.repaired_paths) <= 5 else f", +{len(state.repaired_paths) - 5} more"
+        receipt.note(
+            f"{len(state.repaired_paths)} path(s) under state/ had a mode other than owner-only "
+            f"and were reset to it before the run ({shown}{more}). Mode repair is never "
+            "withheld, so a dry run makes it too; it changes no content."
+        )
     if dry_run:
         receipt.note(
             f"dry run: {len(state.withheld_writes)} state write(s) were withheld (conversations, "
             "scorecards, failure cases, quarantine/refusal/deferral records and their removals, "
             "candidates), and the receipt and day checkpoint that follow are withheld too. "
-            "Nothing under state/ changed. Re-run with --commit."
+            "Beyond the layout, its README and the lock, no content under state/ changed; "
+            "the only change a dry run makes to existing state is to reset a drifted mode "
+            "to owner-only. Re-run with --commit."
         )
     receipt.finalize(finished_at=iso(clock.now()), mutation_detected=mutation_detected)
 

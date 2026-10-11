@@ -64,7 +64,9 @@ proposes and validates exactly as a committed run does, but the store withholds
 every artifact (normalized conversations, raw exports, scorecards, failure cases,
 quarantine, refusal and deferral records, candidates, checkpoint and receipt), so
 the only things it leaves behind are the owner-only directory layout and the run
-lock. The receipt still reports how many files it withheld
+lock. Every `daily` run, dry or committed, also resets any existing state path whose
+mode drifted from owner-only (`state_modes_repaired`, as `doctor` does); that repair
+writes no content, so it is not withheld. The receipt still reports how many files it withheld
 (`artifacts_withheld_dry_run`) and `--json` prints it. For a private source this is
 the difference between a preview and a copy of the transcripts on disk.
 
@@ -112,6 +114,9 @@ state_deferred_files          this run's work; in a dry run they reflect earlier
 artifacts_withheld_dry_run    state writes (and deferral-record removals) a committed run would
                               have made and this dry run withheld; 0 on a committed run. Taken
                               before the receipt and the day checkpoint, which are withheld too
+state_modes_repaired          existing paths under state/ whose mode was not owner-only and
+                              was reset to it before the run; a dry run repairs them too,
+                              since a repair writes no content (the note names them)
 ```
 
 `records_scored` will be lower than `conversations_ingested` whenever anything was

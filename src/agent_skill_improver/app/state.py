@@ -155,6 +155,10 @@ class StateStore:
         self.dry_run = dry_run
         #: Paths (relative to the root) a committed run would have written.
         self.withheld_writes: list[str] = []
+        #: Paths (relative to the root) whose mode the last ``ensure()`` reset to
+        #: owner-only. Repair is never withheld: it is the one change to existing
+        #: state a dry run makes, and it writes no content.
+        self.repaired_paths: list[str] = []
 
     def _persist(self, path: Path, write: Callable[[], object]) -> Path:
         """Perform ``write`` unless writes are withheld; return the artifact path."""
@@ -176,17 +180,25 @@ class StateStore:
         outside the configured directory.
         """
         self.verify_layout()
+        # A directory that already existed and had to be re-moded is a repair
+        # worth reporting; one created just now is not, whatever the umask did.
+        repaired: list[str] = []
+        existed = self.root.exists()
         self.root.mkdir(parents=True, exist_ok=True)
-        _chmod_to(self.root, DIR_MODE)
+        if _chmod_to(self.root, DIR_MODE) and existed:
+            repaired.append(".")
         for name in SUBDIRS:
             path = self.root / name
             _refuse_unless_real_dir(path, self.root)
+            existed = path.exists()
             path.mkdir(exist_ok=True)
-            _chmod_to(path, DIR_MODE)
+            if _chmod_to(path, DIR_MODE) and existed:
+                repaired.append(name)
         readme = self.root / "README.txt"
         if not readme.exists():
             write_text_atomic(readme, README_TEXT)
-        self.repair_permissions()
+        repaired.extend(p for p in self.repair_permissions() if p not in repaired)
+        self.repaired_paths = repaired
         self.verify_permissions()
 
     def layout_problems(self) -> list[str]:
