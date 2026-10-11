@@ -98,6 +98,34 @@ _SHAPES: tuple[_Shape, ...] = (
 
 PLACEHOLDER = "[REDACTED:{label}]"
 
+#: Shapes that are a credential on their own evidence: a vendor prefix plus a
+#: long random body, or a key block. Assignment and URL shapes are excluded
+#: here because ``password: <your-password>`` in a skill's prose is common and
+#: harmless, and this set drives a REFUSAL rather than a replacement.
+HIGH_CONFIDENCE_LABELS: frozenset[str] = frozenset(
+    {
+        "aws-access-key-id",
+        "github-token",
+        "github-fine-grained-token",
+        "slack-token",
+        "model-provider-key",
+        "google-api-key",
+        "jwt",
+        "bearer-token",
+        "private-key-block",
+    }
+)
+
+
+def credential_labels(text: str) -> tuple[str, ...]:
+    """The high-confidence credential shapes present in ``text``, sorted."""
+    found = {
+        shape.label
+        for shape in _SHAPES
+        if shape.label in HIGH_CONFIDENCE_LABELS and shape.pattern.search(text)
+    }
+    return tuple(sorted(found))
+
 
 @dataclass(frozen=True)
 class RedactionResult:

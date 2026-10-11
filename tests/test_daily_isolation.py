@@ -385,6 +385,56 @@ class PerRecordFailureTests(DailyHarness):
         del json
 
 
+class CredentialBearingSkillTests(DailyHarness):
+    """A skill file that contains a credential is never handed to the improver.
+
+    The transcript is redacted before it reaches a model; the skill text was
+    not. A skill with a pasted token in an example block went to the improver
+    verbatim, and because the improver returns the COMPLETE new file, the
+    candidate would then carry that token into a reviewable diff, a backup and
+    a prompt to the judge. Refusing is the only move that leaks nothing: the
+    operator removes the credential, and the next pass proposes normally.
+    """
+
+    def _plant(self) -> str:
+        token = "g" + "hp_" + "A" * 36  # assembled so no token shape is tracked
+        for skill_id in ("tdd", "code-review"):
+            path = self.base / "skills-canonical" / skill_id / "SKILL.md"
+            path.write_text(
+                path.read_text(encoding="utf-8") + f"\n- Example: export GH_TOKEN={token}\n",
+                encoding="utf-8",
+            )
+        return token
+
+    def test_a_skill_holding_a_token_is_refused_at_propose_and_the_improver_never_runs(self):
+        config = self.env()
+        token = self._plant()
+        runner = InProcessRunner()
+        receipt, state, _ = self.run_pass(config, runner=runner)
+        counts = receipt.to_dict()["counts"]
+        self.assertGreater(
+            counts["records_scored"], 0, "scoring still happens; only proposing stops"
+        )
+        self.assertGreater(counts["proposals_refused_by_policy"], 0)
+        self.assertEqual(counts["candidates_proposed"], 0)
+        self.assertEqual(
+            [c for c in runner.calls if c[0] in ("improver", "judge")],
+            [],
+            "neither the improver nor the judge may ever see a skill that holds a credential",
+        )
+        for sent in runner.prompts_seen():
+            self.assertNotIn(token, sent, "the token must not reach any model role")
+
+    def test_the_refusal_is_recorded_as_policy_not_as_a_defect(self):
+        config = self.env()
+        self._plant()
+        receipt, _, _ = self.run_pass(config)
+        payload = receipt.to_dict()
+        refused = [r for r in payload["records"].values() if r["status"] == "refused"]
+        self.assertTrue(refused)
+        self.assertIn("credential", refused[0]["reason"].lower())
+
+
 class IdempotenceAndLockTests(DailyHarness):
     def test_re_running_the_same_day_does_not_re_score(self):
         config = self.env()

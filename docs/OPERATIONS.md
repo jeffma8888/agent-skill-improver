@@ -136,6 +136,7 @@ Refusals you should expect, and what each means:
 | `AutomationRefused` | you are inside a scheduled run. Apply from an interactive shell |
 | `BaseHashMismatch` | the skill file changed since the candidate was built. The evidence no longer describes this file; revalidate |
 | `MirrorEditRefused` | the target is not a canonical editable root |
+| `CredentialInSkill` | the skill file holds a token, key or key block, so no model role was shown it and nothing was proposed. Remove the credential from the skill; the next pass proposes normally |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
 | `BackupUnusable` | rollback's backup or manifest does not verify, or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
 | `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |

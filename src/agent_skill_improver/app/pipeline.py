@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..config import ROLE_IMPROVER, ROLE_SCORER, PromptConfig
+from ..domain.redaction import credential_labels
 from ..domain.candidate import (
     Candidate,
     STATUS_PROPOSED,
@@ -28,7 +29,7 @@ from ..domain.failure import FailureCase, isolate_failures, passing_cases
 from ..domain.rubric import Rubric
 from ..domain.scoring import ScoreCard, parse_scorecard
 from ..domain.skills import SkillGroup, parse_frontmatter
-from ..errors import MalformedModelOutput, RecordDefect, SelfMutationRefused
+from ..errors import CredentialInSkill, MalformedModelOutput, RecordDefect, SelfMutationRefused
 from ..hashing import sha256_text
 from ..ports import ModelRunner
 from . import prompts
@@ -181,6 +182,17 @@ def propose_candidate(
         )
     canonical = group.canonical
     base_text = Path(canonical.path).read_text(encoding="utf-8")
+    found = credential_labels(base_text)
+    if found:
+        # The transcript is redacted before any model sees it; the skill text
+        # cannot be, because the improver rewrites it whole and a placeholder
+        # would come back as the file's new content. A credential-bearing skill
+        # is therefore refused outright, before any role is called.
+        raise CredentialInSkill(
+            f"skill {group.skill_id!r} contains a credential ({', '.join(found)}) at "
+            f"{canonical.path}; refusing to show it to any model role. Remove the "
+            "credential from the skill file and the next pass will propose normally."
+        )
     base_sha = sha256_text(base_text)
     if base_sha != canonical.sha256:
         raise RecordDefect(

@@ -259,8 +259,14 @@ class InProcessRunner:
         self.mode = mode
         self.fail_roles = set(fail_roles)
         self.calls: list[tuple[str, str]] = []
+        #: Every prompt body any role was shown, so a test can assert that a
+        #: given string never reached a model.
+        self.prompts: list[str] = []
         if isolation_mode is not None:
             self.isolation_mode = isolation_mode
+
+    def prompts_seen(self) -> list[str]:
+        return list(self.prompts)
 
     def command_id(self, role: str) -> str:
         return f"{role}:in-process-fake:iso={self.isolation_mode}"
@@ -285,6 +291,7 @@ class InProcessRunner:
 
     def run(self, *, role: str, system: str, user: str, response_schema: str) -> dict[str, Any]:
         self.calls.append((role, response_schema))
+        self.prompts.append(system + "\n" + user)
         if role in self.fail_roles:
             raise TransientFailure(f"in-process fake refuses role {role!r}")
         if self.mode == "malformed_json" and role == "scorer":

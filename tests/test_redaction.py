@@ -18,7 +18,11 @@ import sys
 import unittest
 from pathlib import Path
 
-from agent_skill_improver.domain.redaction import redact
+from agent_skill_improver.domain.redaction import (
+    HIGH_CONFIDENCE_LABELS,
+    credential_labels,
+    redact,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 _SPEC = importlib.util.spec_from_file_location("leakscan", REPO / "tools" / "leakscan.py")
@@ -115,6 +119,37 @@ class SpecificShapesTests(unittest.TestCase):
     def test_a_git_sha_and_a_uuid_are_not_mistaken_for_credentials(self):
         text = "commit 3a87c3d51fae0a8fab8419392d75c3e9cf8c6d25 id 123e4567-e89b-12d3-a456-426614174000"
         self.assertEqual(redact(text).total, 0)
+
+
+class HighConfidenceDetectorTests(unittest.TestCase):
+    """``credential_labels`` drives a REFUSAL (a skill is never shown to a model),
+    so it must fire on vendor-prefixed tokens and key blocks and stay silent on
+    the prose shapes a skill legitimately contains."""
+
+    def test_a_vendor_token_in_a_skill_is_detected_by_label(self):
+        text = "Example:\n  export GH_TOKEN=" + "g" + "hp_" + "A" * 36 + "\n"
+        self.assertEqual(credential_labels(text), ("github-token",))
+
+    def test_a_clipped_key_block_is_detected(self):
+        text = _j("-----BE", "GIN EC PRIV", "ATE KEY-----") + "\nMHcCAQEE" + "k" * 40
+        self.assertIn("private-key-block", credential_labels(text))
+
+    def test_placeholder_prose_does_not_trigger_a_refusal(self):
+        text = (
+            "Set `password: <your-password>` in the config.\n"
+            "Pass `--token $MY_TOKEN` on the command line.\n"
+            "The key= parameter accepts api_key=YOUR_KEY_HERE_12345.\n"
+        )
+        self.assertEqual(credential_labels(text), ())
+        self.assertGreater(redact(text).total, 0, "the same prose IS still redacted in transcripts")
+
+    def test_the_high_confidence_set_is_a_subset_of_the_known_shapes(self):
+        from agent_skill_improver.domain import redaction
+
+        labels = {shape.label for shape in redaction._SHAPES}
+        self.assertTrue(HIGH_CONFIDENCE_LABELS <= labels, HIGH_CONFIDENCE_LABELS - labels)
+        self.assertNotIn("secret-assignment", HIGH_CONFIDENCE_LABELS)
+        self.assertNotIn("url-credential", HIGH_CONFIDENCE_LABELS)
 
 
 if __name__ == "__main__":

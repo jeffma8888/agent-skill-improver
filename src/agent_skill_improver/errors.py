@@ -56,6 +56,16 @@ class SafetyRefusal(AsiError):
     """A deliberate refusal enforcing one of the loop's safety invariants."""
 
 
+class CredentialInSkill(SafetyRefusal):
+    """A skill file holds a credential, so no model role may be shown it.
+
+    The improver returns the COMPLETE new file, so a token in the base text
+    would come back inside the candidate, its diff, its backup and the judge's
+    prompt. Refusing leaks nothing; the operator removes the credential and the
+    next pass proposes normally.
+    """
+
+
 class IsolationRequired(SafetyRefusal):
     """A private conversation source was configured without an enforced sandbox.
 
