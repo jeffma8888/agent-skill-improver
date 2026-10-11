@@ -41,8 +41,10 @@ changed. A repair that cannot take effect is a refusal, not a warning.
 | --- | --- |
 | 0 | success, including "stood down for a stated reason" |
 | 1 | the command ran and the answer is negative (`doctor` not ready, `selftest` failed, a gate not met) |
-| 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, ...) |
+| 2 | usage error (unknown subcommand or flag); argparse's code, never returned by a command |
+| 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, `ConfigError`, ...) |
 | 4 | a required file was missing |
+| 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree |
 
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
 "the tool declined and told you why".

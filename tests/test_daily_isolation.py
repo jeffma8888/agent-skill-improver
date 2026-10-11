@@ -97,6 +97,67 @@ class NoLiveMutationTests(DailyHarness):
         self.assertEqual(tree["digest_before"], tree["digest_after"])
         self.assertFalse(tree["mutation_detected"])
 
+    def test_a_skill_edited_mid_run_blocks_the_run_and_the_exit_code_says_so(self):
+        """Every other test here proves the digest does not move. This one moves
+        it on purpose, from inside a model call, and checks that the receipt
+        earns ``blocked``, says so in a note, and that the CLI maps that status
+        to its own exit code rather than the generic "answer was negative" one.
+        A scheduler that cannot tell "a candidate failed its gate" from "something
+        wrote to the live skill tree while we were reading it" will retry the
+        second as if it were the first.
+        """
+        from agent_skill_improver.app.receipt import STATUS_BLOCKED
+        from agent_skill_improver.cli import RC_BLOCKED, RC_NEGATIVE, RC_OK, exit_code_for
+
+        config = self.env()
+        target = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        before = target.read_text()
+
+        class EditsASkillWhileScoring(InProcessRunner):
+            edited = False
+
+            def run(self, *, role, system, user, response_schema):
+                if role == "scorer" and not EditsASkillWhileScoring.edited:
+                    EditsASkillWhileScoring.edited = True
+                    target.write_text(before + "\n\nSomeone else wrote this during the run.\n")
+                return super().run(
+                    role=role, system=system, user=user, response_schema=response_schema
+                )
+
+        receipt, _, _ = self.run_pass(config, runner=EditsASkillWhileScoring())
+        payload = receipt.to_dict()
+        self.assertEqual(receipt.status, STATUS_BLOCKED)
+        self.assertTrue(payload["skill_tree"]["mutation_detected"])
+        self.assertNotEqual(
+            payload["skill_tree"]["digest_before"], payload["skill_tree"]["digest_after"]
+        )
+        self.assertTrue(
+            any("LIVE SKILL MUTATION DETECTED" in n for n in payload["notes"]),
+            payload["notes"],
+        )
+        self.assertEqual(exit_code_for(STATUS_BLOCKED), RC_BLOCKED)
+        self.assertEqual(RC_BLOCKED, 5, "the documented exit code for a blocked run")
+        self.assertNotIn(RC_BLOCKED, (RC_OK, RC_NEGATIVE, 3, 4))
+        for benign in ("ok", "partial", "stood-down"):
+            self.assertEqual(exit_code_for(benign), RC_OK)
+        self.assertEqual(exit_code_for("something-new"), RC_NEGATIVE)
+
+        # And through the real command entry point, not just the pure mapping:
+        # the same mutating runner, wired in where `asi daily` builds its own.
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        from agent_skill_improver import cli
+
+        EditsASkillWhileScoring.edited = False
+        target.write_text(before)
+        with mock.patch.object(cli, "build_runner", lambda *_: EditsASkillWhileScoring()):
+            with redirect_stdout(io.StringIO()) as out:
+                rc = cli.main(["--config", str(config.config_path), "daily", "--day", "2026-01-03"])
+        self.assertEqual(rc, RC_BLOCKED, out.getvalue())
+        self.assertIn("status=blocked", out.getvalue())
+
     def test_no_skill_file_content_changes_on_disk(self):
         config = self.env()
         before = {

@@ -48,6 +48,27 @@ from .app.wiring import build_runner, build_skill_store, build_source, build_sta
 
 ENV_CONFIG = "ASI_CONFIG"
 
+#: Exit codes. 2 is argparse's usage error and is not returned by any command.
+RC_OK = 0
+RC_NEGATIVE = 1
+RC_REFUSED = 3
+RC_MISSING_FILE = 4
+#: The daily run saw the live skill tree change under it. Not a negative answer
+#: and not a refusal: an invariant may be broken, and a scheduler must not treat
+#: it as "try again tomorrow".
+RC_BLOCKED = 5
+
+BENIGN_RUN_STATUSES = ("ok", "stood-down", "partial")
+
+
+def exit_code_for(run_status: str) -> int:
+    """Map a daily receipt status to the process exit code."""
+    if run_status in BENIGN_RUN_STATUSES:
+        return RC_OK
+    if run_status == "blocked":
+        return RC_BLOCKED
+    return RC_NEGATIVE
+
 
 def _require_isolation(config: Config, state: StateStore) -> None:
     """Refuse before any command reads a private source.
@@ -98,7 +119,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         config = _load(args)
     except ConfigError as exc:
         sys.stderr.write(f"config error: {exc}\n")
-        return 2
+        return RC_REFUSED
     store = build_skill_store(config)
     missing = [r.id for r in store.missing_roots()]
     if missing:
@@ -361,7 +382,7 @@ def cmd_daily(args: argparse.Namespace) -> int:
         for note in receipt.notes:
             sys.stdout.write(f"note: {note}\n")
         sys.stdout.write(f"receipt: {state.receipt_path(receipt.day, dry_run=receipt.dry_run)}\n")
-    return 0 if receipt.status in ("ok", "stood-down", "partial") else 1
+    return exit_code_for(receipt.status)
 
 
 def cmd_candidates(args: argparse.Namespace) -> int:
@@ -540,7 +561,7 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     )
     if not path.is_file():
         sys.stderr.write(f"template not found: {path}\n")
-        return 2
+        return RC_MISSING_FILE
     text = path.read_text(encoding="utf-8")
     text = text.replace("__REPO__", str(repo_root()))
     text = text.replace("__PYTHON__", sys.executable)
@@ -984,12 +1005,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(args.func(args))
     except AsiError as exc:
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
-        return 3
+        return RC_REFUSED
     except FileNotFoundError as exc:
         sys.stderr.write(f"not found: {exc}\n")
-        return 4
+        return RC_MISSING_FILE
     except BrokenPipeError:  # pragma: no cover - piping into head/less
-        return 0
+        return RC_OK
 
 
 if __name__ == "__main__":  # pragma: no cover

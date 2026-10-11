@@ -78,6 +78,12 @@ available, so the run declined **before** reading any conversation. Fix the host
 (install `bwrap` on Linux; `sandbox-exec` ships with macOS) rather than looking
 for a flag, because there isn't one.
 
+Exit 5 is the one to page on. It means `blocked`: the skill tree's digest changed
+while the run was in flight, so something wrote to a live skill during the pass.
+The daily loop never does, so either another process edited a skill file or an
+invariant of this tool is broken. Do not let the scheduler retry it; find out
+what wrote to the tree first, and treat any candidate from that run as suspect.
+
 ## Reading the results
 
 ```bash
