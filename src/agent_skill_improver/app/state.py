@@ -290,7 +290,7 @@ class StateStore:
 
     def read_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         path = self.dir("conversations") / f"{keyed_name(conversation_id)}.json"
-        return _read_state_json(path) if path.is_file() else None
+        return _read_state_object(path, what="conversation") if path.is_file() else None
 
     def write_scorecard(
         self, conversation_id: str, rubric_id: str, payload: dict[str, Any]
@@ -477,7 +477,7 @@ class StateStore:
                 "candidates": [],
                 "completed": False,
             }
-        data = _read_state_json(path)
+        data = _read_state_object(path, what="checkpoint")
         data.setdefault("records", {})
         data.setdefault("skills", {})
         data.setdefault("candidates", [])
@@ -576,6 +576,27 @@ def _read_state_json(path: Path) -> Any:
         except OSError:
             pass
         raise
+
+
+def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
+    """Read one state leaf that must be a JSON object, or refuse by name.
+
+    A truncated or hand-edited leaf used to escape as a bare ``JSONDecodeError``
+    from the middle of a pass: a traceback, exit code 1, and no file named. Every
+    state read is a refusal with the path and the remedy instead. The corrupt
+    file is left in place; nothing here guesses at what it was meant to say.
+    """
+    try:
+        raw = _read_state_json(path)
+    except (OSError, ValueError, RecursionError) as exc:
+        raise StateUnreadable(
+            f"refusing to use the {what} record {path}: it could not be read ({exc}). "
+            "A truncated or hand-edited state file is never guessed at; move it aside "
+            "to continue without it."
+        ) from exc
+    if not isinstance(raw, dict):
+        raise StateUnreadable(f"refusing to use the {what} record {path}: it is not a JSON object.")
+    return raw
 
 
 def _candidate_from_file(path: Path) -> Candidate:

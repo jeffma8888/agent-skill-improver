@@ -216,6 +216,15 @@ refuses them, and the proposal text stays readable for the post-mortem. If the
 receipt says a candidate could NOT be rewritten, its file may still read
 `validated`: do not apply it.
 
+**`StateUnreadable: refusing to use the checkpoint record ...`** (exit 3). A state
+file under `state/` is truncated, hand-edited, or not a JSON object. Nothing is
+guessed at and the file is left as found; read it, then move it aside to continue
+without it. For a checkpoint that means the day's already-processed set is
+forgotten and those conversations are scored again. That re-spends model calls
+and adds a second, duplicate candidate (`-02-`) to the review queue for each skill
+it re-proposes, which counts toward `max_open_candidates`; nothing on disk is
+overwritten or mutated. Close the duplicates.
+
 ## Housekeeping
 
 `state/` grows: raw exports, records, receipts, backups. It is all local and all

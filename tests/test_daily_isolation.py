@@ -836,6 +836,75 @@ class CredentialBearingSkillTests(DailyHarness):
         self.assertIn("credential", refused[0]["reason"].lower())
 
 
+class StateCorruptionTests(DailyHarness):
+    def test_a_truncated_checkpoint_is_refused_by_name_not_guessed_at(self):
+        """The checkpoint decides what was already processed today. A truncated
+        one used to surface as a bare ``JSONDecodeError`` traceback from the
+        middle of the pass, exit code 1, no file named. A corrupt state leaf is
+        a refusal with the path and the remedy, like every other state read.
+        """
+        from agent_skill_improver.errors import StateUnreadable
+
+        config = self.env()
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        state.ensure()
+        bad = state.checkpoint_path(DAY)
+        bad.write_text('{"schema": "asi.checkpoint.v1", "records": {"a": ')
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        with self.assertRaises(StateUnreadable) as caught:
+            run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=DAY,
+                commit=True,
+            )
+        message = str(caught.exception)
+        self.assertIn(str(bad), message, "the refusal names the file")
+        self.assertIn("checkpoint", message.lower())
+        self.assertEqual(
+            bad.read_text(),
+            '{"schema": "asi.checkpoint.v1", "records": {"a": ',
+            "the corrupt file is left for the operator, never overwritten",
+        )
+
+    def test_the_receipt_reaches_disk_before_the_checkpoint_is_touched(self):
+        """If the checkpoint update fails, the run still fails, but the receipt
+        describing what the run did is already on disk. The reverse order
+        would leave a checkpoint claiming the day completed with no receipt
+        behind it.
+        """
+
+        class CheckpointWriteFails(StateStore):
+            def write_checkpoint(self, day, payload):
+                raise OSError("simulated: disk full while writing the checkpoint")
+
+        config = self.env()
+        state = CheckpointWriteFails(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        with self.assertRaises(OSError):
+            run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=DAY,
+                commit=True,
+            )
+        receipt_path = state.receipt_path(DAY, dry_run=False)
+        self.assertTrue(receipt_path.is_file(), "the receipt was written first")
+        self.assertFalse(state.checkpoint_path(DAY).is_file())
+
+
 class IdempotenceAndLockTests(DailyHarness):
     def test_re_running_the_same_day_does_not_re_score(self):
         config = self.env()

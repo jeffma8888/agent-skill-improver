@@ -740,6 +740,11 @@ def _finish(
     receipt.counts["open_candidates_after"] = len(state.open_candidates())
     receipt.finalize(finished_at=iso(clock.now()), mutation_detected=mutation_detected)
 
+    # Receipt first. If the checkpoint update fails the run still fails, but the
+    # account of what it did is already on disk; the reverse order can leave a
+    # checkpoint claiming the day completed with no receipt behind it. The receipt
+    # path is per day, so the next commit run of the same day overwrites it.
+    state.write_receipt(run_day, receipt.to_dict(), dry_run=dry_run)
     if not dry_run:
         checkpoint = state.read_checkpoint(run_day)
         checkpoint["runs"] = int(checkpoint.get("runs", 0)) + 1
@@ -755,5 +760,4 @@ def _finish(
         checkpoint["completed"] = receipt.status != STATUS_STOOD_DOWN
         checkpoint["last_receipt"] = str(state.receipt_path(run_day, dry_run=False))
         state.write_checkpoint(run_day, checkpoint)
-    state.write_receipt(run_day, receipt.to_dict(), dry_run=dry_run)
     return receipt
