@@ -40,7 +40,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -48,6 +47,7 @@ from ..adapters.transcript_export import normalize_export
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
 from ..errors import RecordDefect, SourceUnavailable
+from .bounded_process import OutputOverflow, RunTimedOut, run_bounded
 
 __all__ = [
     "ConversationCliSource",
@@ -237,11 +237,10 @@ class ConversationCliSource:
     # -- fetch -----------------------------------------------------------
     def fetch(self, thread_id: str) -> NormalizedConversation:
         argv = render_argv(self.export_argv, {"thread_id": thread_id})
-        raw = self._run(argv)
-        if len(raw.encode("utf-8", errors="ignore")) > self.max_export_bytes:
-            raise RecordDefect(
-                f"export for {thread_id} exceeds max_export_bytes", record_id=thread_id
-            )
+        # One oversized or undecodable export is a defect of THAT record. The
+        # cap is enforced while the command's output is read, so the export is
+        # never buffered past it.
+        raw = self._run(argv, record_id=thread_id)
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -269,24 +268,43 @@ class ConversationCliSource:
                 "and [source].export_argv in your config"
             )
 
-    def _run(self, argv: Sequence[str]) -> str:
+    def _run(self, argv: Sequence[str], *, record_id: str | None = None) -> str:
+        """Run the conversation command with its output bounded while read.
+
+        ``max_export_bytes`` applies to every call, discovery included: a
+        listing that never ends is as capable of exhausting the parent as an
+        export is. With ``record_id`` set, an oversized or undecodable result is
+        a :class:`RecordDefect` of that one record (quarantine it, keep the
+        batch going); without it, it is the source being unusable. A timeout is
+        always the source: the command, not the record, failed to answer.
+        """
+        shown = " ".join(argv)
         try:
-            proc = subprocess.run(  # noqa: S603 - argv is constructed, never shell
-                list(argv),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
+            result = run_bounded(
+                argv,
+                timeout_seconds=self.timeout_seconds,
+                max_output_bytes=self.max_export_bytes,
             )
         except FileNotFoundError as exc:
             raise SourceUnavailable(f"cannot execute {argv[0]!r}: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise SourceUnavailable(
-                f"{' '.join(argv)} timed out after {self.timeout_seconds}s"
-            ) from exc
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip()[-500:]
-            raise SourceUnavailable(
-                f"{' '.join(argv)} exited {proc.returncode}: {tail or '<no output>'}"
+        except RunTimedOut as exc:
+            raise SourceUnavailable(f"{shown} timed out after {self.timeout_seconds}s") from exc
+        except OutputOverflow as exc:
+            reason = (
+                f"{shown} exceeds max_export_bytes ({self.max_export_bytes}); "
+                "the command was stopped there"
             )
-        return proc.stdout
+            if record_id is not None:
+                raise RecordDefect(reason, record_id=record_id) from exc
+            raise SourceUnavailable(reason) from exc
+        if result.returncode != 0:
+            tail = (result.stderr_tail or result.stdout).decode("utf-8", errors="replace")
+            tail = tail.strip()[-500:]
+            raise SourceUnavailable(f"{shown} exited {result.returncode}: {tail or '<no output>'}")
+        try:
+            return result.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            reason = f"{shown} produced output that is not UTF-8 ({exc.reason} at byte {exc.start})"
+            if record_id is not None:
+                raise RecordDefect(reason, record_id=record_id) from exc
+            raise SourceUnavailable(reason) from exc

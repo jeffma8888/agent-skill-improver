@@ -9,12 +9,15 @@ population nobody chose.
 
 from __future__ import annotations
 
+import os
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from agent_skill_improver.adapters.conversation_cli import ConversationCliSource
 from agent_skill_improver.app.state import StateStore
+from agent_skill_improver.errors import RecordDefect, SourceUnavailable
 from agent_skill_improver.domain.discovery import (
     DiscoveredThread,
     DiscoveryPage,
@@ -137,7 +140,7 @@ class RawExportConfinementTests(unittest.TestCase):
             super().__init__(**kwargs)
             self.raw = raw
 
-        def _run(self, argv):  # type: ignore[override]
+        def _run(self, argv, **kwargs):  # type: ignore[override]
             return self.raw
 
     def test_a_discovered_thread_id_cannot_escape_the_state_raw_directory(self):
@@ -157,6 +160,98 @@ class RawExportConfinementTests(unittest.TestCase):
             self.assertEqual(written[0].read_text(encoding="utf-8"), raw)
 
 
+class SourceOutputBoundsTests(unittest.TestCase):
+    """The conversation command is a subprocess too, and it gets the same bounds.
+
+    ``max_export_bytes`` used to be compared against the export after the whole
+    of stdout had been captured, and discovery had no cap at all. A command that
+    streamed without end (a wrapper stuck in a loop, a corpus far larger than
+    expected) therefore cost the daily run that much memory before anything
+    refused. The same cap now stops the read, and one oversized or undecodable
+    export is a record defect rather than a crash of the pass.
+    """
+
+    FLOOD = (
+        "import sys\n"
+        "chunk = b'x' * (1 << 20)\n"
+        "for _ in range({chunks}):\n"
+        "    sys.stdout.buffer.write(chunk)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "open(sys.argv[1], 'w').write('finished')\n"
+    )
+
+    def _source(self, program: str, *extra: str, **kwargs) -> ConversationCliSource:
+        argv = (sys.executable, "-c", program, *extra, "{thread_id}")
+        disc = (sys.executable, "-c", program, *extra, "{since}", "{limit}")
+        return ConversationCliSource(export_argv=argv, discovery_argv=disc, **kwargs)
+
+    def test_a_flooding_export_is_a_record_defect_stopped_at_the_cap(self):
+        with TemporaryDirectory() as tmp:
+            sentinel = Path(tmp) / "finished"
+            source = self._source(
+                self.FLOOD.format(chunks=256),
+                str(sentinel),
+                max_export_bytes=64 * 1024,
+                timeout_seconds=120,
+            )
+            with self.assertRaises(RecordDefect) as ctx:
+                source.fetch("thread-1")
+            self.assertIn("max_export_bytes", str(ctx.exception))
+            self.assertEqual(ctx.exception.record_id, "thread-1")
+            self.assertFalse(
+                sentinel.exists(),
+                "the child ran to completion: every byte was buffered before the cap applied",
+            )
+
+    def test_a_flooding_discovery_is_stopped_at_the_cap_too(self):
+        with TemporaryDirectory() as tmp:
+            sentinel = Path(tmp) / "finished"
+            source = self._source(
+                self.FLOOD.format(chunks=256),
+                str(sentinel),
+                max_export_bytes=64 * 1024,
+                timeout_seconds=120,
+            )
+            with self.assertRaises(SourceUnavailable):
+                source.discover_page(since="1d", limit=5)
+            self.assertFalse(sentinel.exists())
+
+    def test_an_export_that_is_not_utf8_is_a_record_defect_not_a_crash(self):
+        source = self._source('import sys;sys.stdout.buffer.write(b\'{"a": "\\xff"}\')')
+        with self.assertRaises(RecordDefect) as ctx:
+            source.fetch("thread-2")
+        self.assertEqual(ctx.exception.record_id, "thread-2")
+
+    def test_a_hanging_command_is_unavailable_and_the_child_is_reaped(self):
+        program = (
+            "import sys,os,time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(600)\n"
+        )
+        with TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "pid"
+            source = self._source(program, str(pidfile), timeout_seconds=1)
+            with self.assertRaises(SourceUnavailable) as ctx:
+                source.fetch("thread-3")
+            self.assertIn("timed out", str(ctx.exception))
+            pid = int(pidfile.read_text())
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                alive = False
+            else:
+                alive = True
+            self.assertFalse(alive, "a timed-out conversation command must be killed")
+
+    def test_the_control_export_under_the_cap_is_normalized(self):
+        fixture = Path(__file__).parent / "fixtures" / "exports" / "compliant.json"
+        program = "import sys;sys.stdout.write(open(sys.argv[1]).read())"
+        source = self._source(program, str(fixture))
+        conversation = source.fetch("thread-4")
+        self.assertTrue(conversation.messages, "the fixture export must normalize to messages")
+
+
 class ExplicitLimitTests(unittest.TestCase):
     """The limit is always sent. Relying on an interface default is the bug."""
 
@@ -169,7 +264,7 @@ class ExplicitLimitTests(unittest.TestCase):
             super().__init__(**kwargs)
             self.argvs: list[list[str]] = []
 
-        def _run(self, argv):  # type: ignore[override]
+        def _run(self, argv, **kwargs):  # type: ignore[override]
             self.argvs.append(list(argv))
             return ""
 
