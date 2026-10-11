@@ -416,5 +416,119 @@ class DocumentedFlagsExist(unittest.TestCase):
                 self.assertTrue(owner.strip(), f"{flag} has no named owner")
 
 
+class DocumentedRefusalsExist(unittest.TestCase):
+    """Every refusal the CLI can print must be explained, and every explained one
+    must exist.
+
+    ``cli.main`` prints ``<ClassName>: <message>`` for any ``AsiError``, so the
+    class name is the first thing an operator sees and the thing they search the
+    docs for. Measured before this class existed, six names the code actually
+    raises (``GateFailed``, ``CandidateTampered``, ``ApprovalRequired``,
+    ``SelfMutationRefused``, ``ReadOnlyViolation``, ``LockHeld``) appeared nowhere
+    in ``docs/OPERATIONS.md``.
+    """
+
+    ERRORS = REPO / "src" / "agent_skill_improver" / "errors.py"
+    SRC = REPO / "src" / "agent_skill_improver"
+    OPERATIONS = REPO / "docs" / "OPERATIONS.md"
+    #: Operator-facing: refusals the human-gated paths raise, and the daily lock.
+    #: ``RecordDefect``/``TransientFailure`` subclasses are per-record outcomes
+    #: that land in quarantine or deferral files, not on stderr, and
+    #: ``ConfigError`` is covered by ``asi doctor``.
+    ROOTS = ("SafetyRefusal", "LockHeld")
+    #: CamelCase code spans in OPERATIONS that are not error classes, each with
+    #: the reason, so this cannot quietly become an allowance list for typos.
+    NOT_A_CLASS = {"PROBLEM": "the word `asi doctor` prints for a failed check"}
+
+    @staticmethod
+    def error_classes(source: str) -> dict[str, str | None]:
+        """``{class_name: base_name}`` for every class in ``errors.py``."""
+        import ast
+
+        out: dict[str, str | None] = {}
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.ClassDef):
+                base = (
+                    node.bases[0].id if node.bases and isinstance(node.bases[0], ast.Name) else None
+                )
+                out[node.name] = base
+        return out
+
+    @classmethod
+    def operator_facing(cls, classes: dict[str, str | None]) -> set[str]:
+        def descends(name: str) -> bool:
+            seen: set[str] = set()
+            while name and name not in seen:
+                if name in cls.ROOTS:
+                    return True
+                seen.add(name)
+                name = classes.get(name) or ""
+            return False
+
+        return {name for name in classes if descends(name)}
+
+    @classmethod
+    def raised_somewhere(cls, names: set[str]) -> set[str]:
+        pattern = re.compile(r"\braise (" + "|".join(sorted(names)) + r")\b")
+        found: set[str] = set()
+        for path in cls.SRC.rglob("*.py"):
+            found.update(pattern.findall(path.read_text(encoding="utf-8")))
+        return found
+
+    @staticmethod
+    def documented_names(text: str) -> set[str]:
+        """Class names a document cites: the leading identifier of a code span."""
+        out: set[str] = set()
+        for span in re.findall(r"`([^`\n]+)`", text):
+            head = re.match(r"[A-Z][A-Za-z0-9]*", span)
+            if head and (head.end() == len(span) or span[head.end()] in ":( "):
+                out.add(head.group(0))
+        return out
+
+    def test_every_raised_operator_facing_refusal_is_documented(self) -> None:
+        classes = self.error_classes(self.ERRORS.read_text(encoding="utf-8"))
+        facing = self.operator_facing(classes)
+        raised = self.raised_somewhere(facing)
+        self.assertGreaterEqual(len(raised), 8, "the inventory must not be vacuous")
+        documented = self.documented_names(self.OPERATIONS.read_text(encoding="utf-8"))
+        self.assertEqual(
+            sorted(raised - documented), [], "raised by the code, unexplained in OPERATIONS"
+        )
+
+    def test_every_documented_refusal_name_is_a_real_error_class(self) -> None:
+        classes = self.error_classes(self.ERRORS.read_text(encoding="utf-8"))
+        documented = self.documented_names(self.OPERATIONS.read_text(encoding="utf-8"))
+        # Every CamelCase code span is checked, not only the refusal-looking ones:
+        # a suffix filter would let an invented name like ``GateFailure`` through.
+        self.assertGreaterEqual(len(documented), 10, "the extractor found almost nothing")
+        unknown = sorted(documented - set(classes) - set(self.NOT_A_CLASS))
+        self.assertEqual(unknown, [], "named in OPERATIONS, absent from errors.py")
+        for name, reason in self.NOT_A_CLASS.items():
+            self.assertNotIn(name, classes, f"{name} is a real class, drop the exemption")
+            self.assertTrue(reason.strip(), name)
+
+    def test_the_lock_path_in_the_docs_is_the_one_the_code_uses(self) -> None:
+        daily = (self.SRC / "app" / "daily.py").read_text(encoding="utf-8")
+        self.assertIn('state.dir("locks") / "daily.lock"', daily)
+        ops = self.OPERATIONS.read_text(encoding="utf-8")
+        self.assertIn("`state/locks/daily.lock`", ops)
+        self.assertNotIn("`state/lock`", ops, "the old, wrong lock path")
+
+    def test_controls_for_the_extractors(self) -> None:
+        classes = self.error_classes(
+            "class AsiError(Exception):\n    pass\n"
+            "class SafetyRefusal(AsiError):\n    pass\n"
+            "class Deep(SafetyRefusal):\n    pass\n"
+            "class Other(AsiError):\n    pass\n"
+            "class LockHeld(AsiError):\n    pass\n"
+        )
+        self.assertEqual(self.operator_facing(classes), {"SafetyRefusal", "Deep", "LockHeld"})
+        names = self.documented_names(
+            "see `GateFailed` and `StateUnreadable: refusing...` and `LockHeld (daily)`; "
+            "not `asi apply`, not `SKILL.md`, not `--commit`, not `max_open_candidates`"
+        )
+        self.assertEqual(names, {"GateFailed", "StateUnreadable", "LockHeld"})
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

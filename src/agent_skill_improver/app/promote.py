@@ -41,7 +41,13 @@ from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
 from ..domain.integrity import verify_full_integrity
-from ..errors import ApprovalRequired, AutomationRefused, BaseHashMismatch, GateFailed
+from ..errors import (
+    ApprovalRequired,
+    AutomationRefused,
+    BaseHashMismatch,
+    GateFailed,
+    SafetyRefusal,
+)
 from ..hashing import sha256_text, short
 from .state import StateStore
 
@@ -153,7 +159,9 @@ def apply_candidate(
     verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="apply")
     approval.verify(expected_token=candidate.required_approval_token)
     if getattr(skill_store, "read_only", True):
-        raise ApprovalRequired(
+        # A wiring defect, not a token problem: name it as the residual refusal
+        # so the operator is not sent hunting for a new token.
+        raise SafetyRefusal(
             "internal error: apply was handed a read-only skill store; refusing to continue"
         )
 
