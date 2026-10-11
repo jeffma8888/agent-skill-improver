@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -336,6 +337,41 @@ class WritePathRefusalTests(Harness):
             self.store(read_only=False).write_canonical(
                 outside, "y", expected_sha256=sha256_file(outside), backup_dir=self.base / "bak"
             )
+
+
+class BackupWriteSafetyTests(Harness):
+    """The backup is the only copy of the original; it must land where it says."""
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_link_planted_at_the_backup_path_is_replaced_not_written_through(self):
+        """``shutil.copy2`` follows a symlink at its destination. A link planted
+        at ``<backup_dir>/SKILL.md.bak`` turned the pre-apply backup into a write
+        to wherever the link pointed, and left the backup itself as a link to a
+        file the rollback checks would later read through. The backup is
+        written as a fresh regular file, atomically, and the link target is
+        never touched."""
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        backup_dir = self.base / "bak"
+        backup_dir.mkdir()
+        decoy = write(self.base / "elsewhere" / "decoy.txt", "untouched\n")
+        try:
+            os.symlink(decoy, backup_dir / f"{SKILL_FILENAME}.bak")
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+        receipt = self.store(read_only=False).write_canonical(
+            target,
+            GOOD + "\n- an approved addition\n",
+            expected_sha256=sha256_file(target),
+            backup_dir=backup_dir,
+            skill_id="shared",
+        )
+        backup = Path(receipt.backup_path)
+        self.assertFalse(
+            backup.is_symlink(), "the backup must be a regular file, not the planted link"
+        )
+        self.assertEqual(backup.read_text(encoding="utf-8"), GOOD)
+        self.assertEqual(decoy.read_text(encoding="utf-8"), "untouched\n")
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
 
 
 class RollbackSafetyTests(Harness):

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -215,11 +214,12 @@ class FilesystemSkillStore:
         backup_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(backup_dir, 0o700)
         backup_path = backup_dir / f"{target.name}.bak"
-        shutil.copy2(target, backup_path)
-        # The backup lives under the state tree, which is owner-only. copy2
-        # preserves the source mode, so a world-readable skill would otherwise
-        # put a world-readable file inside a directory that promises 0600.
-        os.chmod(backup_path, BACKUP_FILE_MODE)
+        # Written as a fresh regular file at 0600, atomically. The backup lives
+        # under the owner-only state tree, so it must not inherit a
+        # world-readable skill's mode; and ``os.replace`` swaps the directory
+        # entry, so a link planted at this path is replaced rather than written
+        # through to wherever it pointed.
+        write_bytes_atomic(backup_path, target.read_bytes(), mode=BACKUP_FILE_MODE)
         backup_sha = sha256_file(backup_path)
         if backup_sha != current:
             raise BaseHashMismatch(
