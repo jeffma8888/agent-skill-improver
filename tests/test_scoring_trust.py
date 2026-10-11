@@ -472,6 +472,17 @@ class MalformedModelOutputTests(unittest.TestCase):
         text = 'note: "a } brace { inside"\n{"real": "yes {not a brace} here"}'
         self.assertEqual(extract_json_object(text)["real"], "yes {not a brace} here")
 
+    def test_pathologically_nested_output_is_malformed_not_a_crash(self) -> None:
+        """``json.loads`` raises RecursionError on deep nesting; that must be a
+        record defect like any other unparseable reply, not an escape from the
+        per-record handlers that aborts the pass."""
+        bomb = "{" + '"a":' * 50_000 + "1" + "}" * 50_000
+        with self.assertRaises(MalformedModelOutput):
+            extract_json_object(bomb)
+        wrapped = "Here you go:\n" + "[" * 100_000 + "]" * 100_000
+        with self.assertRaises(MalformedModelOutput):
+            extract_json_object(wrapped)
+
     def test_empty_output_is_malformed(self) -> None:
         for text in ("", "   ", "\n\n"):
             with self.subTest(text=repr(text)):

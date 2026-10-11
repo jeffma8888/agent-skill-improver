@@ -42,6 +42,7 @@ from ..domain.conversation import (
     ToolEvent,
 )
 from ..errors import RecordDefect
+from ..jsonio import loads_untrusted
 
 DEFAULT_OUTPUT_EXCERPT_CHARS = 2000
 DEFAULT_INPUT_EXCERPT_CHARS = 800
@@ -159,8 +160,8 @@ def normalize_export(
 
 def normalize_export_text(text: str, **kwargs: Any) -> NormalizedConversation:
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = loads_untrusted(text)
+    except ValueError as exc:
         raise RecordDefect(f"export is not valid JSON: {exc}") from exc
     return normalize_export(payload, **kwargs)
 

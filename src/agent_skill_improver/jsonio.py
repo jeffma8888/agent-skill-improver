@@ -46,6 +46,22 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def loads_untrusted(text: str) -> Any:
+    """Parse JSON that came from outside this process.
+
+    ``json.loads`` raises ``RecursionError`` rather than ``JSONDecodeError`` on
+    deep nesting, and every caller that caught only the latter let one
+    pathological export or model reply abort the whole pass: a single record
+    vetoing the batch. Here the recursion failure is folded into ``ValueError``
+    (which ``JSONDecodeError`` already is) so a caller's one ``except ValueError``
+    covers both, and classifies the record rather than crashing the run.
+    """
+    try:
+        return json.loads(text)
+    except RecursionError as exc:
+        raise ValueError("JSON is nested too deeply to be a conversation or a verdict") from exc
+
+
 def write_text_atomic(path: Path, text: str, *, mode: int = FILE_MODE) -> None:
     """Write via a temp file in the same directory, then ``os.replace``.
 

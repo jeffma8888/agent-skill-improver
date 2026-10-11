@@ -14,10 +14,10 @@ construction. Truncating a sorted list is a permanent filter, not a sample.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from ..jsonio import loads_untrusted
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
 from ..errors import RecordDefect, SourceUnavailable
@@ -50,8 +50,8 @@ class FixtureConversationSource:
         out: list[tuple[Path, dict[str, Any]]] = []
         for path in sorted(self.directory.glob("*.json")):
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                payload = loads_untrusted(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
                 continue
             if isinstance(payload, dict):
                 out.append((path, payload))

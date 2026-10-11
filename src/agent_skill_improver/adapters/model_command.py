@@ -57,6 +57,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
 from ..errors import MalformedModelOutput, TransientFailure
+from ..jsonio import loads_untrusted
 from .bounded_process import OutputOverflow, RunTimedOut, run_bounded
 
 #: Mode 0700 on every per-call working directory, set explicitly rather than left
@@ -257,8 +258,8 @@ def extract_json_object(text: str, *, role: str = "model") -> dict[str, Any]:
     if not stripped:
         raise MalformedModelOutput(f"role {role!r} produced empty output")
     try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
+        parsed = loads_untrusted(stripped)
+    except ValueError:
         parsed = _last_balanced_object(stripped, role=role)
     if not isinstance(parsed, dict):
         raise MalformedModelOutput(
@@ -302,8 +303,8 @@ def _last_balanced_object(text: str, *, role: str) -> Any:
     for span_start, span_end in reversed(spans):
         chunk = text[span_start:span_end]
         try:
-            return json.loads(chunk)
-        except json.JSONDecodeError:
+            return loads_untrusted(chunk)
+        except ValueError:
             continue
     raise MalformedModelOutput(
         f"role {role!r} produced no parseable JSON object " f"(first 120 chars: {text[:120]!r})"

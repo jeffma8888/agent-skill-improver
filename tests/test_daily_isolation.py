@@ -323,6 +323,67 @@ class PerRecordFailureTests(DailyHarness):
         self.assertGreater(counts["records_quarantined"], 0)
         self.assertEqual(counts["candidates_proposed"], 0, "no evidence means no proposal")
 
+    def test_a_pathologically_nested_export_quarantines_only_that_record(self):
+        """``json.loads`` raises ``RecursionError``, not ``JSONDecodeError``, on
+        deep nesting. Every parse site caught only the latter, so one export of
+        a hundred thousand brackets aborted the whole pass: a single record
+        vetoing the batch, which is the exact failure the per-record quarantine
+        exists to prevent."""
+        import json
+        import shutil
+
+        fixtures = self.base / "exports-with-a-bomb"
+        shutil.copytree(FIXTURE_EXPORTS, fixtures)
+        (fixtures / "zzz-nested.json").write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+
+        class DeepExport(FixtureConversationSource):
+            """Serve the bomb as a real export for one discovered id."""
+
+            def discover_page(self, **kwargs):
+                page = super().discover_page(**kwargs)
+                from agent_skill_improver.domain.discovery import DiscoveredThread
+
+                extra = DiscoveredThread(thread_id="nested-bomb", title="bomb")
+                return page.__class__(
+                    threads=page.threads + (extra,),
+                    limit=page.limit,
+                    since=page.since,
+                    workspace=page.workspace,
+                    query=page.query,
+                    truncated_by_limit=page.truncated_by_limit,
+                )
+
+            def fetch(self, thread_id):
+                if thread_id == "nested-bomb":
+                    from agent_skill_improver.adapters.transcript_export import (
+                        normalize_export_text,
+                    )
+
+                    return normalize_export_text(
+                        (fixtures / "zzz-nested.json").read_text(encoding="utf-8")
+                    )
+                return super().fetch(thread_id)
+
+        config = self.env(fixtures_dir=fixtures)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        receipt = run_daily(
+            config,
+            source=DeepExport(config.source.fixtures_dir),
+            runner=InProcessRunner(),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day=DAY,
+            commit=True,
+        )
+        counts = receipt.to_dict()["counts"]
+        self.assertGreater(counts["records_quarantined"], 0, "the bomb is one bad record")
+        self.assertGreater(counts["records_scored"], 0, "the healthy records were still scored")
+        del json
+
 
 class IdempotenceAndLockTests(DailyHarness):
     def test_re_running_the_same_day_does_not_re_score(self):

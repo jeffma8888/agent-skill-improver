@@ -37,7 +37,6 @@ whole argument rather than passing an empty string.
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 from pathlib import Path
@@ -52,6 +51,7 @@ from ..domain.discovery import (
     page_from_threads,
 )
 from ..errors import RecordDefect, SourceUnavailable
+from ..jsonio import loads_untrusted
 from .bounded_process import OutputOverflow, RunTimedOut, run_bounded
 
 __all__ = [
@@ -263,8 +263,8 @@ class ConversationCliSource:
         # never buffered past it.
         raw = self._run(argv, record_id=thread_id)
         try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            payload = loads_untrusted(raw)
+        except ValueError as exc:
             raise RecordDefect(f"export for {thread_id} is not JSON: {exc}", record_id=thread_id)
         if self.raw_store is not None:
             # The discovered id is untrusted. StateStore owns both confinement
