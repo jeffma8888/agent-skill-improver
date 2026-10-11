@@ -1270,6 +1270,27 @@ class DryRunPersistsNothingTests(DailyHarness):
         self.assertEqual(committed.to_dict()["counts"]["artifacts_withheld_dry_run"], 0)
         self.assertGreater(preview["counts"]["artifacts_withheld_dry_run"], 0)
 
+    def test_a_dry_run_reports_the_backlog_on_disk_not_the_proposals_it_withheld(self):
+        """``open_candidates_after`` is the backlog a reviewer can open with
+        ``asi review``, so it counts candidate files, never this run's proposals.
+        On a committed run from an empty store whose proposals all pass their
+        gate the two agree; a dry run keeps ``candidates_proposed`` for the work
+        it did and reports the backlog it left untouched, zero on an empty store."""
+        config = self.env()
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        preview = self.dry_pass(config, state=state).to_dict()["counts"]
+        self.assertGreater(preview["candidates_proposed"], 0, "the preview did the work")
+        self.assertEqual(preview["open_candidates_after"], 0)
+        self.assertEqual(state.open_candidates(), [])
+
+        config = self.env()
+        committed, state, _ = self.run_pass(config, day="2026-01-02")
+        counts = committed.to_dict()["counts"]
+        self.assertGreater(counts["candidates_proposed"], 0)
+        self.assertEqual(counts["candidates_gate_failed"], 0, "a gate-failed file is not open")
+        self.assertEqual(counts["open_candidates_after"], counts["candidates_proposed"])
+        self.assertEqual(len(state.open_candidates()), counts["open_candidates_after"])
+
     def test_a_dry_run_reaches_the_defer_verdict_a_commit_would(self):
         """Deferral attempts are counted before the write, so the preview and the
         committed run agree on when a streak becomes a quarantine."""

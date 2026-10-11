@@ -98,12 +98,14 @@ skills_implicated             distinct skills cited by at least one attributed f
 skills_selected_for_proposal  of those, how many were handed to the improver this run, after
                               the open-candidate filter and the smaller of
                               caps.max_skills_per_run and caps.max_candidates_per_run
-candidates_proposed           proposals written
+candidates_proposed           proposals this run made; written on a committed run, withheld
+                              on a dry run (each one's `persisted` flag says which)
 candidates_gate_passed        proposals with no-regression evidence
 candidates_gate_failed        kept, with reasons, for a human to read
 proposals_refused_by_policy   targets declined by a guard rule (includes the next line)
 skills_with_open_candidate    implicated skills skipped because a candidate of theirs awaits review
-open_candidates_after         the review backlog
+open_candidates_after         open-status candidate files on disk, what a bare `asi review`
+                              lists; a dry run's own proposals are never in it
 state_quarantine_files        files under state/quarantine/ after the run, ALL days, so this
 state_refusal_files           and the two beside it are cumulative backlog rather than
 state_deferred_files          this run's work; in a dry run they reflect earlier commits only
