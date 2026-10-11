@@ -78,7 +78,8 @@ def review_report(
         raise GateFailed(
             f"refusing to review candidate {candidate.id}: status is {candidate.status!r}, not "
             f"{STATUS_VALIDATED!r}. Only a validated candidate may expose a review token or an "
-            "apply command; a closed candidate (applied, rolled-back or gate-failed) never does, "
+            "apply command; a closed candidate (applied, rolled-back, gate-failed or blocked-run) "
+            "never does, "
             "regardless of what its recorded gate says."
         )
     verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="review")

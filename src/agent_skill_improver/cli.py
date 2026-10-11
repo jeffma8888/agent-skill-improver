@@ -34,6 +34,7 @@ from . import __version__
 from .clock import SystemClock, iso
 from .config import SOURCE_FIXTURES, Config, load_config, package_dir
 from .domain.approval import HumanApproval, automation_active
+from .domain.candidate import STATUS_VALIDATED
 from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
@@ -406,7 +407,8 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     }
     lines = [
         f"{c.id}  {c.status:<12} {c.target.skill_id:<28} "
-        f"gate={'pass' if (c.validation or {}).get('gate', {}).get('passed') else 'fail'} "
+        f"gate={'pass' if (c.validation or {}).get('gate', {}).get('passed') else 'fail'}"
+        f"{' (closed)' if c.status != STATUS_VALIDATED else ''} "
         f"+{c.patch.added_lines}/-{c.patch.removed_lines}"
         for c in items
     ]
@@ -794,7 +796,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
             "STATUS_VALIDATED" in promote_src
             and "candidate.status != STATUS_VALIDATED" in promote_src,
             "review_report must refuse any status other than exactly 'validated'; applied, "
-            "rolled-back and gate-failed candidates must never expose a token again",
+            "rolled-back, gate-failed and blocked-run candidates must never expose a token again",
         )
     )
     checks.append(
