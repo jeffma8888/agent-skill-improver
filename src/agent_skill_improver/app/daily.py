@@ -52,7 +52,7 @@ from ..domain.authorship import (
     classify_conversation,
     classify_thread,
 )
-from ..domain.candidate import STATUS_GATE_FAILED, STATUS_VALIDATED
+from ..domain.candidate import STATUS_BLOCKED_RUN, STATUS_GATE_FAILED, STATUS_VALIDATED
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import error_page, merge_pages
 from ..domain.failure import FailureCase
@@ -654,6 +654,67 @@ def _now(state: StateStore) -> datetime:
     return (clock or SystemClock()).now()
 
 
+BLOCKED_RUN_NOTE = (
+    "run blocked: a live skill mutation was detected (the skill tree changed while this run was "
+    "in flight), so the evidence behind this candidate described a tree state that no longer "
+    "exists. Closed as blocked-run regardless of the gate verdict it earned; it cannot be "
+    "applied. Re-propose after finding what wrote to the tree."
+)
+
+
+def _downgrade_candidates_of_blocked_run(
+    receipt: RunReceipt, state: StateStore, *, dry_run: bool
+) -> None:
+    """Make "treat every candidate from a blocked run as suspect" a property of
+    the queue rather than advice in a document.
+
+    The digest check fires at the end of the pass, after candidates were already
+    persisted as ``validated``. Left alone, ``apply`` would take one on a token:
+    its base hash still matches when the mutation hit a *different* skill, and
+    the gate verdict was computed against a tree that then moved. So every
+    candidate this run produced is rewritten with the closed status
+    ``blocked-run`` and the reason in its notes, and the receipt entry says the
+    same. The status is distinct from ``gate-failed`` on purpose: the recorded
+    gate verdict stays whatever it was, and the integrity checker must not read
+    a record this tool wrote as tampered. Nothing is deleted: the proposal text
+    stays readable, it just stops being applicable.
+
+    A candidate file that cannot be rewritten is reported in the receipt rather
+    than allowed to abort the finish: the blocked receipt is the most valuable
+    artifact of this run, and the trigger condition (an uncontrolled writer in
+    the tree) is exactly when state files may also be disturbed.
+    """
+    rewritten = 0
+    for entry in receipt.candidates:
+        entry["gate_passed"] = False
+        entry["status"] = STATUS_BLOCKED_RUN
+        entry["blocked_run"] = True
+        if dry_run or not entry.get("persisted"):
+            continue
+        candidate_id = str(entry["candidate_id"])
+        try:
+            persisted = state.read_candidate(candidate_id)
+            state.write_candidate(
+                replace(
+                    persisted,
+                    status=STATUS_BLOCKED_RUN,
+                    notes=tuple(persisted.notes) + (BLOCKED_RUN_NOTE,),
+                )
+            )
+            rewritten += 1
+        except (OSError, AsiError) as exc:
+            entry["downgrade_failed"] = str(exc)
+            receipt.note(
+                f"candidate {candidate_id} could NOT be rewritten as blocked-run ({exc}); "
+                "its stored status may still read validated. Do not apply it."
+            )
+    if receipt.candidates:
+        receipt.note(
+            f"{len(receipt.candidates)} candidate(s) from this blocked run were closed as "
+            f"blocked-run ({rewritten} rewritten on disk) and cannot be applied"
+        )
+
+
 def _finish(
     receipt: RunReceipt,
     state: StateStore,
@@ -666,15 +727,18 @@ def _finish(
     candidates: Sequence[dict[str, Any]],
 ) -> RunReceipt:
     digest_after = skill_store.tree_digest()
-    receipt.candidates = list(candidates)
+    mutation_detected = digest_after != digest_before
+    receipt.candidates = [dict(c) for c in candidates]
+    if mutation_detected:
+        _downgrade_candidates_of_blocked_run(receipt, state, dry_run=dry_run)
     receipt.skill_tree["digest_after"] = digest_after
-    receipt.skill_tree["mutation_detected"] = digest_after != digest_before
+    receipt.skill_tree["mutation_detected"] = mutation_detected
     receipt.counts["conversations_ingested"] = len(conversations)
     receipt.counts["state_quarantine_files"] = state.count("quarantine")
     receipt.counts["state_refusal_files"] = state.count("refusals")
     receipt.counts["state_deferred_files"] = state.count("deferred")
     receipt.counts["open_candidates_after"] = len(state.open_candidates())
-    receipt.finalize(finished_at=iso(clock.now()), mutation_detected=digest_after != digest_before)
+    receipt.finalize(finished_at=iso(clock.now()), mutation_detected=mutation_detected)
 
     if not dry_run:
         checkpoint = state.read_checkpoint(run_day)

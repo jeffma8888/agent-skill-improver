@@ -288,7 +288,9 @@ The gate then requires, all of them:
   says so out loud rather than passing quietly.
 
 A candidate that fails the gate is kept with `STATUS_GATE_FAILED` and its reasons.
-Nothing is deleted; a human can still read why.
+Nothing is deleted; a human can still read why. `STATUS_BLOCKED_RUN` is the other
+closed-by-automation status: the run that produced the candidate saw the skill
+tree change under it.
 
 ## What separates automated from human
 
@@ -301,7 +303,13 @@ The interlock is structural, not a flag:
 - `daily` refuses a writable skill store outright.
 - `daily` hashes the entire skill tree before and after and records both digests,
   so a mutation from *any* source during the run is visible even if it came from
-  outside this tool.
+  outside this tool. When the digests differ the run is `blocked` (exit 5) and
+  every candidate it persisted is rewritten with the closed status `blocked-run`
+  and the reason in its notes: the gate verdict was computed against a tree that
+  then moved, and a base-hash check on the target alone would not catch an edit
+  to a *different* skill. The status is distinct from `gate-failed` so the
+  recorded verdict can stay as measured without the integrity checker reading
+  the record as tampered.
 - `daily` sets `ASI_AUTOMATED_RUN`, and `approval.HumanApproval.from_cli` refuses
   when that marker is present. An apply reached from inside a scheduled run fails
   even with a valid token.

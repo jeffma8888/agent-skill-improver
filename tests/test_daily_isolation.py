@@ -158,6 +158,147 @@ class NoLiveMutationTests(DailyHarness):
         self.assertEqual(rc, RC_BLOCKED, out.getvalue())
         self.assertIn("status=blocked", out.getvalue())
 
+    def test_candidates_from_a_blocked_run_are_downgraded_so_apply_refuses_them(self):
+        """OPERATIONS says a blocked run's candidates describe a tree state that
+        no longer exists. The code has to make that true: a candidate persisted
+        before the digest check fired must not sit in the queue as ``validated``,
+        because ``apply`` would then take it on a token alone. Here a DIFFERENT
+        skill than the candidate's target is edited mid-run, so the base-hash
+        check on the target cannot be what refuses it.
+        """
+        from agent_skill_improver.app.promote import apply_candidate
+        from agent_skill_improver.app.receipt import STATUS_BLOCKED
+        from agent_skill_improver.domain.approval import HumanApproval
+        from agent_skill_improver.domain.candidate import STATUS_BLOCKED_RUN, STATUS_VALIDATED
+        from agent_skill_improver.domain.integrity import (
+            gate_status_problems,
+            verify_full_integrity,
+        )
+        from agent_skill_improver.errors import GateFailed
+
+        config = self.env()
+        bystander = self.base / "skills-canonical" / "code-review" / "SKILL.md"
+        before = bystander.read_text()
+
+        class EditsABystanderWhileScoring(InProcessRunner):
+            edited = False
+
+            def run(self, *, role, system, user, response_schema):
+                if role == "scorer" and not EditsABystanderWhileScoring.edited:
+                    EditsABystanderWhileScoring.edited = True
+                    bystander.write_text(before + "\n\nEdited by someone else mid-run.\n")
+                return super().run(
+                    role=role, system=system, user=user, response_schema=response_schema
+                )
+
+        receipt, state, store = self.run_pass(config, runner=EditsABystanderWhileScoring())
+        payload = receipt.to_dict()
+        self.assertEqual(receipt.status, STATUS_BLOCKED)
+        self.assertGreater(
+            payload["counts"]["candidates_proposed"], 0, "the scenario needs a candidate"
+        )
+        self.assertEqual(payload["counts"]["candidates_gate_passed"], 0)
+        for entry in payload["candidates"]:
+            self.assertFalse(entry["gate_passed"])
+            self.assertTrue(entry["blocked_run"])
+            self.assertEqual(entry["status"], STATUS_BLOCKED_RUN)
+            self.assertNotIn("downgrade_failed", entry)
+            persisted = state.read_candidate(entry["candidate_id"])
+            self.assertEqual(persisted.status, STATUS_BLOCKED_RUN)
+            self.assertNotEqual(persisted.status, STATUS_VALIDATED)
+            self.assertEqual(
+                gate_status_problems(persisted),
+                [],
+                "a record this tool wrote on purpose must not read as tampered",
+            )
+            self.assertTrue(
+                persisted.validation and "gate" in persisted.validation,
+                "the measured gate verdict is kept, not erased",
+            )
+            verify_full_integrity(
+                persisted,
+                base_text=Path(persisted.target.canonical_path).read_text(),
+                rubrics={r.id: r for r in config.rubrics},
+                action="audit",
+            )
+            self.assertTrue(
+                any("blocked" in n.lower() and "mutation" in n.lower() for n in persisted.notes),
+                persisted.notes,
+            )
+            self.assertNotEqual(
+                persisted.target.canonical_path, str(bystander), "target was not the edited file"
+            )
+            approval = HumanApproval.from_cli(
+                token=persisted.required_approval_token, acknowledged=True
+            )
+            with self.assertRaises(GateFailed):
+                apply_candidate(
+                    persisted,
+                    approval=approval,
+                    skill_store=FilesystemSkillStore(config.skill_roots, read_only=False),
+                    state=state,
+                    clock=frozen_clock(),
+                )
+        self.assertEqual(
+            state.open_candidates(), [], "nothing from a blocked run is left awaiting review"
+        )
+
+    def test_a_candidate_that_cannot_be_rewritten_does_not_cost_the_blocked_receipt(self):
+        """The downgrade runs when an uncontrolled writer is known to be active,
+        which is when state files are most likely to be disturbed too. One
+        unreadable candidate file must not abort the finish: the receipt that
+        says "blocked" is the artifact the post-mortem starts from.
+        """
+        from agent_skill_improver.app.receipt import STATUS_BLOCKED
+        from agent_skill_improver.errors import StateUnreadable
+
+        config = self.env()
+        bystander = self.base / "skills-canonical" / "code-review" / "SKILL.md"
+        before = bystander.read_text()
+
+        class EditsABystanderWhileScoring(InProcessRunner):
+            edited = False
+
+            def run(self, *, role, system, user, response_schema):
+                if role == "scorer" and not EditsABystanderWhileScoring.edited:
+                    EditsABystanderWhileScoring.edited = True
+                    bystander.write_text(before + "\n\nEdited by someone else mid-run.\n")
+                return super().run(
+                    role=role, system=system, user=user, response_schema=response_schema
+                )
+
+        class CandidateFilesGoBad(StateStore):
+            def read_candidate(self, candidate_id):
+                raise StateUnreadable(f"simulated: {candidate_id} is unreadable")
+
+        state = CandidateFilesGoBad(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        receipt = run_daily(
+            config,
+            source=FixtureConversationSource(config.source.fixtures_dir),
+            runner=EditsABystanderWhileScoring(),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day=DAY,
+            commit=True,
+        )
+        payload = receipt.to_dict()
+        self.assertEqual(receipt.status, STATUS_BLOCKED)
+        self.assertTrue(payload["candidates"])
+        for entry in payload["candidates"]:
+            self.assertIn("simulated", entry["downgrade_failed"])
+            self.assertFalse(entry["gate_passed"])
+        self.assertTrue(
+            any("could NOT be rewritten" in n for n in payload["notes"]), payload["notes"]
+        )
+        self.assertTrue(
+            state.receipt_path(DAY, dry_run=False).is_file(),
+            "the blocked receipt reached disk despite the unreadable candidate",
+        )
+
     def test_no_skill_file_content_changes_on_disk(self):
         config = self.env()
         before = {

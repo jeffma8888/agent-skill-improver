@@ -70,7 +70,7 @@ def review_report(
       outcomes, judgements and policy (see
       :func:`~agent_skill_improver.domain.integrity.validation_mismatches`);
     * the status is anything other than exactly ``validated``. ``applied``,
-      ``rolled-back`` and ``gate-failed`` are all closed: none of them may ever
+      ``rolled-back``, ``gate-failed`` and ``blocked-run`` are all closed: none of them may ever
       expose a token or an apply command again, no matter what the recorded
       gate says.
     """

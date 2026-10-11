@@ -208,9 +208,13 @@ miss is not transient; read the reason rather than waiting for the retry to work
 The quarantine *file name* flattens `:` to `_`, so match on the `stage` field
 inside the JSON, not on the name.
 
-**A skill tree mutation was detected.** Do not re-run. Find out what wrote to the
-tree. The candidate evidence gathered during that run described a file state that
-no longer exists.
+**A skill tree mutation was detected.** The run is `blocked` and exits 5. Do not
+re-run. Find out what wrote to the tree. The candidate evidence gathered during
+that run described a file state that no longer exists, so every candidate the run
+persisted was closed as `blocked-run` with that reason in its notes; `apply`
+refuses them, and the proposal text stays readable for the post-mortem. If the
+receipt says a candidate could NOT be rewritten, its file may still read
+`validated`: do not apply it.
 
 ## Housekeeping
 

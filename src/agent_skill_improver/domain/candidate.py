@@ -33,6 +33,10 @@ STATUS_VALIDATED = "validated"
 STATUS_GATE_FAILED = "gate-failed"
 STATUS_APPLIED = "applied"
 STATUS_ROLLED_BACK = "rolled-back"
+#: Closed by the daily driver because the skill tree moved during the run that
+#: produced the candidate. Independent of the gate verdict, which was computed
+#: against a tree that then changed.
+STATUS_BLOCKED_RUN = "blocked-run"
 
 CHALLENGE_DOMAIN = "asi-challenge:v1"
 APPROVAL_DOMAIN = "asi-approve:v1"

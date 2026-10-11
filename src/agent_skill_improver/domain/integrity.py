@@ -29,6 +29,7 @@ from ..errors import CandidateTampered
 from ..hashing import sha256_text, short
 from .candidate import (
     STATUS_APPLIED,
+    STATUS_BLOCKED_RUN,
     STATUS_GATE_FAILED,
     STATUS_PROPOSED,
     STATUS_ROLLED_BACK,
@@ -48,6 +49,7 @@ _STATUSES_REQUIRING_VALIDATION = (
     STATUS_GATE_FAILED,
     STATUS_APPLIED,
     STATUS_ROLLED_BACK,
+    STATUS_BLOCKED_RUN,
 )
 
 #: Statuses that assert the gate passed.
@@ -112,6 +114,9 @@ def gate_status_problems(candidate: Candidate) -> list[str]:
         problems.append(f"status is {status!r} but the recorded gate did not pass")
     if status == STATUS_GATE_FAILED and gate.get("passed"):
         problems.append("status is 'gate-failed' but the recorded gate passed")
+    # STATUS_BLOCKED_RUN is deliberately consistent with either gate verdict: the
+    # run that computed the verdict saw the skill tree change under it, so the
+    # verdict is not what closed the candidate.
     if status == STATUS_PROPOSED and gate:
         problems.append("status is 'proposed' but a gate decision is already recorded")
     return problems
