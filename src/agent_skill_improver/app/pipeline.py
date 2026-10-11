@@ -152,6 +152,17 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
             f"replacement is {len(new_text)} chars against a {len(base_text)}-char base; a rewrite "
             "that large cannot be reviewed as a targeted fix"
         )
+    # The transcript the model saw was redacted and a base skill holding a
+    # credential was refused before the model ran, so a credential shape in the
+    # output can only have come from the model. It must not become a candidate,
+    # a backup or a judge prompt. The shape is named; the value is never copied
+    # into a receipt.
+    introduced = credential_labels(new_text)
+    if introduced:
+        problems.append(
+            f"replacement contains a credential ({', '.join(introduced)}); a model-written "
+            "token or key never becomes a reviewable candidate"
+        )
     return problems
 
 
