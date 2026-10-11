@@ -157,6 +157,40 @@ class PayloadDetectionTests(Harness):
         snaps = self.canonical_snapshots()
         self.assertIn("a b 'c'.py", snaps["shared"].payload_files)
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_symlinked_launcher_is_inventoried_not_skipped(self):
+        """A symlink is the cheapest way to put a binary beside a skill without
+        the inventory noticing: the scan skipped every symlink before looking
+        at its name or mode, so ``hook.sh -> /usr/bin/something`` reported as a
+        plain document. The link is a payload on its own evidence (its name, or
+        the executable bit of what it points to); where it points is secondary.
+        """
+        outside = write(self.base / "elsewhere" / "real-tool", "#!/bin/sh\n")
+        os.chmod(outside, 0o755)
+        skill_dir = self.canonical_dir / "shared"
+        try:
+            os.symlink(outside, skill_dir / "hook.sh")
+            os.symlink(outside, skill_dir / "tool")
+            os.symlink(self.base / "elsewhere" / "missing", skill_dir / "dangling.py")
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+        snaps = self.canonical_snapshots()
+        payloads = snaps["shared"].payload_files
+        self.assertIn("hook.sh", payloads, "a payload-named link is a payload")
+        self.assertIn("tool", payloads, "a link to an executable is a payload")
+        self.assertIn("dangling.py", payloads, "a dangling payload-named link still counts")
+        self.assertTrue(snaps["shared"].has_executable_payload)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_symlink_to_a_plain_text_file_is_not_a_payload(self):
+        note = write(self.base / "elsewhere" / "notes.txt", "hello\n")
+        try:
+            os.symlink(note, self.canonical_dir / "shared" / "notes.txt")
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+        snaps = self.canonical_snapshots()
+        self.assertEqual(snaps["shared"].payload_files, ())
+
     def test_the_payload_extension_set_covers_the_obvious_executables(self):
         for name in ("x.sh", "x.py", "x.js"):
             self.assertTrue(is_payload_name(name), name)

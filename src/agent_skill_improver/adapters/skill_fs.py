@@ -484,14 +484,25 @@ class FilesystemSkillStore:
             return ()
         for entry in entries:
             try:
-                if entry.is_dir() or entry.is_symlink():
-                    continue
                 if entry.name == SKILL_FILENAME:
+                    continue
+                # A symlink is judged on its own name and on the mode of what it
+                # points to. Skipping links outright made a symlinked launcher
+                # invisible to the inventory, which is the cheapest way to put a
+                # binary beside a skill. A link to a directory is still skipped:
+                # rglob does not descend into it, and the directory is not itself
+                # an executable.
+                is_link = entry.is_symlink()
+                if entry.is_dir() and not is_link:
                     continue
                 rel = entry.relative_to(skill_dir).as_posix()
                 if is_payload_name(entry.name):
                     found.append(rel)
                     continue
+                if is_link and entry.is_dir():
+                    continue
+                # stat() follows the link; a dangling link raises and is skipped
+                # here (a dangling non-payload name is noise, not a payload).
                 if entry.stat().st_mode & 0o111:
                     found.append(rel)
             except (OSError, ValueError):

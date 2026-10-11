@@ -96,7 +96,7 @@ guardrails.
 | Finding | Answer | Where | Test |
 | --- | --- | --- | --- |
 | Only the document may ever be written | Any write whose target is not the skill document is refused, and the document check runs before the hash check | `adapters/skill_fs.py` | `test_only_the_skill_document_is_writable`, `test_the_document_check_runs_before_the_hash_check` |
-| Executable payloads must be surfaced, not ignored | The inventory reports payloads by extension and by executable bit, and rolls them up across copies | `domain/skills.py` | `test_a_shell_script_beside_a_skill_is_a_payload`, `test_the_executable_bit_counts_even_with_an_unremarkable_name`, `test_the_group_rolls_payloads_up_across_copies` |
+| Executable payloads must be surfaced, not ignored | The inventory reports payloads by extension and by executable bit, and rolls them up across copies | `domain/skills.py` | `test_a_shell_script_beside_a_skill_is_a_payload`, `test_a_symlinked_launcher_is_inventoried_not_skipped`, `test_a_symlink_to_a_plain_text_file_is_not_a_payload`, `test_the_executable_bit_counts_even_with_an_unremarkable_name`, `test_the_group_rolls_payloads_up_across_copies` |
 | Backslash and quoted filenames must not mangle path handling | Payload detection is done on real paths, never through a shell | `domain/skills.py` | `test_a_filename_containing_a_backslash_is_handled`, `test_a_filename_with_spaces_and_quotes_is_handled` |
 | A broken-frontmatter skill must not look successful | A `SKILL.md` with no opening delimiter loads with a reported warning instead of reading as empty | `domain/skills.py` | `test_a_missing_opening_delimiter_is_reported_not_ignored` |
 
