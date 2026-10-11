@@ -65,13 +65,20 @@ def review_report(
 ) -> dict[str, Any]:
     """Everything a human needs in order to decide, plus the exact apply command.
 
-    Refuses before it prints anything in three cases:
+    Refuses before it prints anything in four cases, checked in this order so
+    that each is named for what it is:
 
-    * a derived field on the candidate itself does not recompute (the diff or
-      its counts, checked against ``base_text`` -- the *live* canonical text,
-      never a value the record asserts about itself -- so changing only the
-      persisted diff or its line counts cannot make review show a token for a
-      diff that does not describe the patch);
+    * a derived field on the candidate itself does not recompute from the
+      record alone (``CandidateTampered``);
+    * the live canonical text no longer hashes to the base the candidate was
+      written against (``BaseHashMismatch``). This is the ordinary case of a
+      skill edited since the proposal, and it is reported as that rather than as
+      a tampered record, exactly as ``apply`` reports it;
+    * a derived field does not recompute against ``base_text`` -- the *live*
+      canonical text, never a value the record asserts about itself -- so
+      changing only the persisted diff or its line counts cannot make review
+      show a token for a diff that does not describe the patch
+      (``CandidateTampered``);
     * the persisted validation does not recompute byte-exact from its own
       outcomes, judgements and policy (see
       :func:`~agent_skill_improver.domain.integrity.validation_mismatches`);
@@ -87,6 +94,16 @@ def review_report(
             "apply command; a closed candidate (applied, rolled-back, gate-failed or blocked-run) "
             "never does, "
             "regardless of what its recorded gate says."
+        )
+    verify_full_integrity(candidate, rubrics=rubrics, action="review")
+    live_sha = sha256_text(base_text)
+    if live_sha != candidate.target.base_sha256:
+        raise BaseHashMismatch(
+            f"refusing to review {candidate.id}: {candidate.target.canonical_path} now hashes "
+            f"{short(live_sha)} but the candidate was written against "
+            f"{short(candidate.target.base_sha256)}. The skill changed since the proposal was "
+            "made, so the diff and the token would describe a file that no longer exists -- "
+            "re-run `asi daily --commit` to propose and validate against the new base."
         )
     verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="review")
     gate = (candidate.validation or {}).get("gate") or {}

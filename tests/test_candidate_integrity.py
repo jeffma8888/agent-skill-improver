@@ -911,6 +911,22 @@ class CallSiteTests(unittest.TestCase):
         with self.assertRaises(CandidateTampered):
             review_report(self.tampered, base_text=BASE_TEXT)
 
+    def test_review_names_an_edited_skill_as_a_base_mismatch_not_as_tampering(self):
+        # The record is intact; the FILE moved. Measured before this test: review
+        # raised CandidateTampered here, telling the operator the record had been
+        # edited and to delete it, when the remedy is to re-propose. apply already
+        # made the distinction; review must make the same one, in the same order.
+        with self.assertRaises(BaseHashMismatch) as caught:
+            review_report(self.clean, base_text=BASE_TEXT + "- edited by hand\n")
+        self.assertIn("skill changed since the proposal", str(caught.exception))
+        self.assertNotIn("tamper", str(caught.exception).lower())
+
+    def test_review_still_names_a_tampered_record_first_when_the_skill_also_moved(self):
+        # Record-only integrity runs before the live-base comparison, as in apply,
+        # so a tampered record is never excused as a mere base mismatch.
+        with self.assertRaises(CandidateTampered):
+            review_report(self.tampered, base_text=BASE_TEXT + "- edited by hand\n")
+
     def test_review_command_contains_no_shell_control_syntax_from_candidate_id(self):
         report = review_report(self.clean, base_text=BASE_TEXT)
         self.assertEqual(

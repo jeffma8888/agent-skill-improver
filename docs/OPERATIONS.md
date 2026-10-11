@@ -172,7 +172,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `CandidateTampered` | a derived field of the candidate record (patch hash, approval challenge, diff, target identity, status against the recorded gate, validation binding) does not recompute from its inputs. The file was edited after it was written; nothing was backed up or applied. Do not "fix" the record: re-propose |
 | `ApprovalRequired` | no token was passed, `--i-reviewed-this` is missing, or the token does not match the challenge recomputed from the candidate id, base hash and patch text. Re-run `review` and copy the token it prints now |
 | `AutomationRefused` | you are inside a scheduled run. Apply from an interactive shell |
-| `BaseHashMismatch` | the skill file changed since the candidate was built. The evidence no longer describes this file; revalidate |
+| `BaseHashMismatch` | on `review` or `apply`: the skill file changed since the candidate was built. The record is intact as far as it can be checked without the file (a record that fails its own recomputation is `CandidateTampered`, checked first); the evidence no longer describes this file, so re-run `asi daily --commit` to propose and validate against the new base |
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `CredentialInSkill` | the skill file holds a token, key or key block, so no model role was shown it and nothing was proposed. Remove the credential from the skill; the next pass proposes normally |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
