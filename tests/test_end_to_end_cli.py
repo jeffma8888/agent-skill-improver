@@ -18,7 +18,7 @@ from agent_skill_improver.cli import RC_MISSING_FILE, RC_OK, RC_REFUSED
 from agent_skill_improver.domain.approval import AUTOMATION_ENV_VAR
 from agent_skill_improver.hashing import sha256_file
 
-from tests.support import FIX_MARKER, build_env, run_cli
+from tests.support import FIX_MARKER, REPO_ROOT, build_env, run_cli
 
 
 # Numbered method names give a deterministic order: unittest sorts test names
@@ -297,6 +297,14 @@ class EndToEndTests(unittest.TestCase):
                 )
                 self.assertIn(str(state / "daily.err.log"), proc.stdout)
                 self.assertNotIn("__STATE__", proc.stdout)
+        # The default config may arrive through a RELATIVE ASI_CONFIG; the job
+        # must still name it absolutely, or cron would resolve it against its
+        # own working directory.
+        relative = os.path.relpath(config_path, REPO_ROOT)
+        self.assertFalse(Path(relative).is_absolute(), relative)
+        proc = run_cli(["scheduler-template", "cron"], env={"ASI_CONFIG": relative})
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        self.assertIn(f"--config {config_path} ", proc.stdout)
 
     def test_20_the_launchd_template_is_a_well_formed_property_list(self):
         import plistlib
@@ -412,10 +420,12 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         self.assertEqual(files, [], "a read-only command wrote a file")
         wide = [p for p in [state, *state.rglob("*")] if p.stat().st_mode & 0o077]
         self.assertEqual(wide, [], "a read-only command left a path readable beyond its owner")
+        state.chmod(0o755)
         (state / "candidates").chmod(0o755)
         proc = run_cli([*self.cfg, "candidates"])
         self.assertEqual(proc.returncode, RC_OK, proc.stderr)
         self.assertEqual((state / "candidates").stat().st_mode & 0o777, 0o700, "modes are reset")
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700, "the root it looked through too")
         self.assertEqual([p for p in state.rglob("*") if not p.is_dir()], [], "still no file")
 
 

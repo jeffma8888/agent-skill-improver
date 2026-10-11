@@ -1352,17 +1352,23 @@ class DryRunPersistsNothingTests(DailyHarness):
         wider.chmod(0o644)
         narrower.chmod(0o400)
         (config.state_dir / "conversations").chmod(0o755)
+        config.state_dir.chmod(0o755)
         self.assertNotEqual(_state_snapshot(config.state_dir), before, "the drift is visible")
+        # Wiring opens the sandbox scratch root before the run begins; that
+        # access resets the root, and the run must still report it.
+        state.dir("sandbox")
+        self.assertEqual(config.state_dir.stat().st_mode & 0o777, 0o700)
         preview = self.dry_pass(config, state=state, day="2026-01-03").to_dict()
         self.assertEqual(wider.stat().st_mode & 0o777, 0o600, "reset, not preserved")
         self.assertEqual(narrower.stat().st_mode & 0o777, 0o600, "reset, not preserved")
         self.assertEqual((config.state_dir / "conversations").stat().st_mode & 0o777, 0o700)
         self.assertEqual(_state_snapshot(config.state_dir), before, "and nothing else moved")
-        self.assertEqual(preview["counts"]["state_modes_repaired"], 3)
+        self.assertEqual(preview["counts"]["state_modes_repaired"], 4)
         self.assertEqual(
             sorted(state.repaired_paths),
             sorted(
                 [
+                    ".",
                     "conversations",
                     str(wider.relative_to(config.state_dir)),
                     str(narrower.relative_to(config.state_dir)),

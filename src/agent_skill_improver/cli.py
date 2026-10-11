@@ -579,7 +579,9 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     # the repository's own state/ is only the right place when it is the
     # configured one. Measured before this was fixed, `--config X` printed a job
     # for the default config with logs under the repository.
-    config_path = Path(args.config).expanduser().resolve() if args.config else default_config_path()
+    config_path = (
+        Path(args.config).expanduser() if args.config else default_config_path()
+    ).resolve()
     config = load_config(config_path)
     text = path.read_text(encoding="utf-8")
     text = text.replace("__REPO__", str(repo_root()))

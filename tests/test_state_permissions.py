@@ -238,6 +238,27 @@ class ExistingStateIsRepairedTests(StateTreeHarness):
         self.assertEqual(oct(mode_of(artifact)), oct(STATE_FILE_MODE))
         self.assertEqual(store.permission_problems(), [])
 
+    def test_a_reset_made_by_dir_before_the_walk_is_still_reported_once(self):
+        """``dir()`` runs before ``ensure()`` in every command (wiring takes the
+        sandbox scratch root first). Measured before this test existed, that
+        early access reset a world-readable root and the walk that followed,
+        finding it already fine, reported nothing."""
+        sub, artifact = self._make_wide_tree()
+        store = self.store()
+        store.dir("raw")
+        self.assertEqual(oct(mode_of(self.root)), oct(DIR_MODE), "dir() reset the root")
+        self.assertEqual(oct(mode_of(sub)), oct(DIR_MODE), "and the directory it opened")
+        changed = store.repair_permissions()
+        self.assertEqual(changed[:2], [".", "raw"], "reported first, in the order they happened")
+        self.assertEqual(changed.count("."), 1)
+        self.assertIn(str(Path("raw") / "old-export.json"), changed)
+        self.assertEqual(store.repair_permissions(), [], "and not reported twice")
+
+    def test_a_directory_dir_creates_is_not_reported_as_a_repair(self):
+        store = self.store()
+        store.dir("raw")
+        self.assertEqual(store.repair_permissions(), [])
+
     def test_ensure_repairs_a_pre_existing_tree_rather_than_refusing_it(self):
         sub, artifact = self._make_wide_tree()
         self.store().ensure()

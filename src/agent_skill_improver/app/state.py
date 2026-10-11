@@ -159,6 +159,11 @@ class StateStore:
         #: owner-only. Repair is never withheld: it is the one change to existing
         #: state a dry run makes, and it writes no content.
         self.repaired_paths: list[str] = []
+        #: Resets made by ``dir()`` that no repair walk has reported yet. ``dir()``
+        #: runs before ``ensure()`` in every command (the sandbox scratch root is
+        #: taken while wiring), so without this hand-off a root it reset would be
+        #: measured as already fine and never reported.
+        self._pending_repairs: list[str] = []
 
     def _persist(self, path: Path, write: Callable[[], object]) -> Path:
         """Perform ``write`` unless writes are withheld; return the artifact path."""
@@ -247,17 +252,21 @@ class StateStore:
         Returns the paths it changed, relative to the root, so ``doctor`` can say
         what it did instead of claiming the tree was always fine.
         """
+        # Resets ``dir()`` already made are reported here, once, even when the
+        # walk itself is declined: they happened.
+        changed: list[str] = list(self._pending_repairs)
+        self._pending_repairs.clear()
         if self.layout_problems():
-            return []
-        changed: list[str] = []
-        if self.root.exists() and _chmod_to(self.root, DIR_MODE):
+            return changed
+        if self.root.exists() and _chmod_to(self.root, DIR_MODE) and "." not in changed:
             changed.append(".")
         for path in sorted(self.root.rglob("*")):
             if path.is_symlink():
                 continue
             want = DIR_MODE if path.is_dir() else STATE_FILE_MODE
-            if _chmod_to(path, want):
-                changed.append(str(path.relative_to(self.root)))
+            rel = str(path.relative_to(self.root))
+            if _chmod_to(path, want) and rel not in changed:
+                changed.append(rel)
         return changed
 
     def permission_problems(self) -> list[str]:
@@ -301,12 +310,24 @@ class StateStore:
         _refuse_unless_real_dir(self.root, self.root)
         path = self.root / name
         _refuse_unless_real_dir(path, self.root)
-        if not path.is_dir():
+        root_existed = self.root.is_dir()
+        existed = path.is_dir()
+        if not existed:
             self.root.mkdir(parents=True, exist_ok=True)
-            _chmod_to(self.root, DIR_MODE)
             path.mkdir(exist_ok=True)
-        _chmod_to(path, DIR_MODE)
+        # Both levels, every time: the root used to be re-moded only when the
+        # subdirectory was being created, so a command that read an existing
+        # subdirectory left a world-readable root as it found it. A directory
+        # created just now is not a repair, whatever the umask did to it.
+        if _chmod_to(self.root, DIR_MODE) and root_existed:
+            self._note_repair(".")
+        if _chmod_to(path, DIR_MODE) and existed:
+            self._note_repair(name)
         return path
+
+    def _note_repair(self, rel: str) -> None:
+        if rel not in self._pending_repairs:
+            self._pending_repairs.append(rel)
 
     def _now(self) -> str:
         if self._clock is None:
