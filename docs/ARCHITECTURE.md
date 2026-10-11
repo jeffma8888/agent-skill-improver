@@ -304,6 +304,17 @@ previous hash. A backup that was truncated, edited or lost is therefore a
 overwrite followed by the discovery that the restored content was never the
 original. Recovery must not be the step that loses the file.
 
+The live file is held to the same standard as the backup. Rollback undoes one
+apply, so the only text it may overwrite is the text that apply wrote: the
+manifest's `new_sha256` must match the file on disk. A file that already holds
+the previous text is reported as `already_restored` with no write. Anything else
+is a later edit, by a human or by another candidate's apply, and is a
+`BaseHashMismatch` refusal, because a recovery command that silently discards
+work made after the apply is a second incident rather than a fix. A symbolic
+link planted at the recorded path is refused before any hash is read, and the
+restore itself is an atomic replace of the directory entry, never a copy through
+whatever sits there.
+
 **What the approval token is and is not.** It is a deterministic function of the
 candidate id, the base hash and the hash recomputed from the candidate's patch
 text (never the stored hash field), derived with the same code on

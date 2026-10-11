@@ -27,6 +27,7 @@ from agent_skill_improver.domain.skills import (
 )
 from agent_skill_improver.errors import (
     BackupUnusable,
+    BaseHashMismatch,
     MirrorEditRefused,
     NonDocumentWriteRefused,
     ReadOnlyViolation,
@@ -386,6 +387,66 @@ class RollbackSafetyTests(Harness):
         with self.assertRaises(NonDocumentWriteRefused):
             self.store(read_only=False).rollback(manifest)
         self.assertEqual(script.read_text(encoding="utf-8"), "#!/bin/sh\n")
+
+    def test_a_rollback_refuses_to_overwrite_edits_made_after_the_apply(self):
+        """Rollback undoes ONE apply; it is not permission to overwrite the file.
+
+        ``apply`` refuses when the live file is not the base the candidate was
+        built against. Rollback had no such check: it copied the backup over
+        whatever was on disk, so a human edit made after the apply (or a later
+        apply of a different candidate) was silently destroyed by a command the
+        docs describe as safe to run without diagnosing first.
+        """
+        target, manifest, _previous = self.apply_a_change()
+        edited = target.read_text(encoding="utf-8") + "\n- a later human edit\n"
+        target.write_text(edited, encoding="utf-8")
+        with self.assertRaises(BaseHashMismatch) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("is unchanged", str(ctx.exception))
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            edited,
+            "a refused rollback must leave the later edit exactly where it was",
+        )
+
+    def test_rolling_back_twice_is_a_verified_no_op(self):
+        target, manifest, previous = self.apply_a_change()
+        store = self.store(read_only=False)
+        store.rollback(manifest)
+        result = store.rollback(manifest)
+        self.assertEqual(target.read_text(encoding="utf-8"), previous)
+        self.assertEqual(result["restored_sha256"], sha256_file(target))
+        self.assertTrue(result.get("already_restored"), "the receipt must say nothing was written")
+
+    def test_a_manifest_missing_the_applied_hash_is_refused_by_name(self):
+        _target, manifest, _previous = self.apply_a_change()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        del payload["new_sha256"]
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(BackupUnusable) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("new_sha256", str(ctx.exception))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_target_that_became_a_symlink_is_refused_and_the_link_target_untouched(self):
+        """The manifest recorded a resolved regular file; a link in its place is not it.
+
+        ``shutil.copy2`` follows a symlink at the destination, so a link planted
+        at the recorded path between apply and rollback would turn the recovery
+        command into a write to wherever the link points.
+        """
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        decoy = write(self.base / "elsewhere" / "decoy.md", applied)
+        target.unlink()
+        try:
+            os.symlink(decoy, target)
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+        with self.assertRaises(BackupUnusable):
+            self.store(read_only=False).rollback(manifest)
+        self.assertTrue(target.is_symlink(), "the link itself must not be replaced or removed")
+        self.assertEqual(decoy.read_text(encoding="utf-8"), applied)
 
 
 class CanonicalResolutionTests(Harness):

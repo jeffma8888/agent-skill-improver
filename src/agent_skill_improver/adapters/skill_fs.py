@@ -45,7 +45,7 @@ from ..errors import (
     SelfMutationRefused,
 )
 from ..hashing import normalize_text, sha256_file, sha256_text, tree_digest
-from ..jsonio import write_json, write_text_atomic
+from ..jsonio import write_bytes_atomic, write_json, write_text_atomic
 
 #: Backups live under the owner-only state tree, so they are owner-only too.
 BACKUP_FILE_MODE = 0o600
@@ -232,8 +232,7 @@ class FilesystemSkillStore:
         if written_sha != new_sha:
             # Restore immediately: a write that did not land as intended is a
             # rollback trigger, not something to report and leave in place.
-            shutil.copy2(backup_path, target)
-            os.chmod(target, target_mode)
+            write_bytes_atomic(target, backup_path.read_bytes(), mode=target_mode)
             raise BaseHashMismatch(
                 f"post-write verification failed for {target} "
                 f"(expected {new_sha[:12]}, found {written_sha[:12]}); original restored"
@@ -278,11 +277,20 @@ class FilesystemSkillStore:
 
         The post-copy hash check stays. It is now a check on the copy itself
         rather than the only check there is.
+
+        The live file is checked too. Rollback undoes ONE apply, so the only
+        text it may overwrite is the text that apply wrote (``new_sha256``). A
+        file that already holds the previous text is reported as restored
+        without a write; anything else is a later edit, by a human or by another
+        candidate's apply, and overwriting it would make the recovery command
+        the thing that destroyed work. ``apply`` has refused a changed base
+        since the start; rollback holding the same line is the symmetric half.
         """
         manifest = self._read_backup_manifest(manifest_path)
         target = Path(str(manifest["target_path"]))
         backup = Path(str(manifest["backup_path"]))
         expected = str(manifest["previous_sha256"])
+        applied = str(manifest["new_sha256"])
         if self.read_only:
             raise ReadOnlyViolation(f"refusing to roll back {target}: store is read-only")
         self._assert_document(target)
@@ -300,18 +308,49 @@ class FilesystemSkillStore:
                 f"replaced, so restoring it would overwrite the live skill with unverified "
                 f"content. {target} is unchanged."
             )
-        shutil.copy2(backup, target)
-        # The backup was tightened to 0600 when it was taken, so copying it back
-        # would leave the skill owner-only unless the recorded mode is restored.
-        # Manifests written before this field existed have no recorded mode; in
-        # that case leave whatever the copy produced rather than guessing, and
-        # say so here so a reader is not surprised by the asymmetry.
+        # The manifest recorded a resolved regular file. A symlink now sitting at
+        # that path is not that file, and a copy through it would write wherever
+        # the link points. Checked with lstat semantics before any hash is read,
+        # because hashing follows the link and would report the decoy's bytes.
+        if target.is_symlink():
+            raise BackupUnusable(
+                f"refusing to roll back {target}: the recorded target is now a symbolic link, "
+                f"not the regular file this apply wrote. Neither the link nor what it points "
+                f"to was touched."
+            )
+        if not target.is_file():
+            raise BaseHashMismatch(
+                f"refusing to roll back {target}: the recorded target is not a regular file "
+                f"any more, so nothing here can be verified as the text this apply wrote."
+            )
+        live = sha256_file(target)
+        if live == expected:
+            # Already holds the previous text: a second rollback, or a manual
+            # `cp` of the backup. Nothing to write; say so rather than rewrite.
+            self._snapshot_cache = None
+            return {
+                "rolled_back": str(target),
+                "restored_sha256": live,
+                "from_backup": str(backup),
+                "already_restored": True,
+            }
+        if live != applied:
+            raise BaseHashMismatch(
+                f"refusing to roll back {target}: the live file hashes {live[:12]}, but this "
+                f"apply wrote {applied[:12]}. The skill was edited after the apply, so the "
+                f"backup would overwrite work this candidate never touched. Restore by hand "
+                f"from {backup} if that is what you want. {target} is unchanged."
+            )
+        # The backup was tightened to 0600 when it was taken, so restoring its
+        # bytes must carry the skill's recorded mode or the skill ends up
+        # owner-only. Manifests written before the field existed have no mode;
+        # fall back to the live file's current mode rather than guessing.
         recorded_mode = str(manifest.get("target_mode", ""))
-        if recorded_mode:
-            try:
-                os.chmod(target, int(recorded_mode, 8))
-            except (OSError, ValueError):
-                pass
+        try:
+            mode = int(recorded_mode, 8) if recorded_mode else stat.S_IMODE(target.stat().st_mode)
+        except ValueError:
+            mode = stat.S_IMODE(target.stat().st_mode)
+        write_bytes_atomic(target, backup.read_bytes(), mode=mode)
         restored = sha256_file(target)
         if restored != expected:
             raise BaseHashMismatch(
@@ -322,6 +361,7 @@ class FilesystemSkillStore:
             "rolled_back": str(target),
             "restored_sha256": restored,
             "from_backup": str(backup),
+            "already_restored": False,
         }
 
     # -- internals -------------------------------------------------------
@@ -350,7 +390,7 @@ class FilesystemSkillStore:
             )
         missing = [
             field
-            for field in ("target_path", "backup_path", "previous_sha256")
+            for field in ("target_path", "backup_path", "previous_sha256", "new_sha256")
             if not str(manifest.get(field, "")).strip()
         ]
         if missing:

@@ -57,11 +57,21 @@ def write_text_atomic(path: Path, text: str, *, mode: int = FILE_MODE) -> None:
     outside the state tree (a skill document, say) pass its existing mode, since
     tightening somebody else's file is a surprise, not a safety improvement.
     """
+    write_bytes_atomic(path, text.encode("utf-8"), mode=mode)
+
+
+def write_bytes_atomic(path: Path, data: bytes, *, mode: int = FILE_MODE) -> None:
+    """Byte-exact form of :func:`write_text_atomic`.
+
+    Used where the content is a verified copy of an existing file (a rollback
+    from backup) and must land byte-for-byte. ``os.replace`` swaps the directory
+    entry, so a symlink sitting at ``path`` is replaced rather than followed.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".part")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
             os.fchmod(handle.fileno(), mode)

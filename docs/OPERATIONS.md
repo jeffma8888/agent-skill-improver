@@ -137,7 +137,8 @@ Refusals you should expect, and what each means:
 | `BaseHashMismatch` | the skill file changed since the candidate was built. The evidence no longer describes this file; revalidate |
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
-| `BackupUnusable` | rollback's backup or manifest does not verify. The live file was not touched; find an older backup under `state/backups/` |
+| `BackupUnusable` | rollback's backup or manifest does not verify, or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
+| `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |
 | `SafetyRefusal` | the candidate did not pass the gate, the skill is protected, or a `state/` permission could not be repaired |
 | `IsolationRequired` | the source is private and the model roles are not confined by a verified OS sandbox. Install the mechanism or use the fixture corpus |
 | status already `applied` | re-applying is refused. Use `rollback` first if you want to redo it |
@@ -155,6 +156,12 @@ diagnose first.
 The backup and its manifest are verified before anything is written, so a
 `BackupUnusable` refusal means the applied file is still exactly as it was and
 you can try a different backup directory under `state/backups/`.
+
+Rollback overwrites only the text its own apply wrote. If the skill has been
+edited since (by you, or by applying another candidate), it refuses with
+`BaseHashMismatch` and leaves the file alone. Running it twice is safe: the
+second run finds the previous text already in place and reports
+`already_restored` without writing.
 
 ## Recovery
 
