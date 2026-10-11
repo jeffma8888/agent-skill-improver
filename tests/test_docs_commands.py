@@ -530,5 +530,59 @@ class DocumentedRefusalsExist(unittest.TestCase):
         self.assertEqual(names, {"GateFailed", "StateUnreadable", "LockHeld"})
 
 
+class DocumentedStateTreeIsComplete(unittest.TestCase):
+    """Every ``state/<dir>/`` the docs name must exist, and every directory that
+    can hold transcript-derived content must have a row in the privacy asset
+    table.
+
+    Measured before this class existed, the asset table in
+    ``docs/PRIVACY_AND_THREAT_MODEL.md`` named four of the thirteen state
+    directories. Candidates (improver-written prose about a transcript),
+    quarantine, refusal and deferral records (reasons that quote a role's stderr
+    tail or its unparseable output) and receipts (a ``diff_preview`` per
+    candidate) were not in it, so a reader deciding what is safe to paste into a
+    bug report had no row to consult.
+    """
+
+    DOCS = tuple(sorted((REPO / "docs").glob("*.md"))) + (REPO / "README.md",)
+    PRIVACY = REPO / "docs" / "PRIVACY_AND_THREAT_MODEL.md"
+    PATH_RE = re.compile(r"`state/([a-z_]+)/")
+    #: Directories whose contents are bookkeeping, never transcript-derived, each
+    #: with the reason, so this cannot quietly become an allowance list. A day
+    #: checkpoint is NOT one: it copies each record's ``reason`` string.
+    NO_ASSET_ROW = {
+        "locks": "the daily lock file, whose only content is the owner's pid",
+    }
+
+    @staticmethod
+    def subdirs() -> tuple[str, ...]:
+        from agent_skill_improver.app.state import SUBDIRS
+
+        return tuple(SUBDIRS)
+
+    def documented_paths(self, path: Path) -> set[str]:
+        return set(self.PATH_RE.findall(path.read_text(encoding="utf-8")))
+
+    def test_every_documented_state_directory_exists(self):
+        known = set(self.subdirs())
+        for doc in self.DOCS:
+            with self.subTest(doc=doc.name):
+                self.assertLessEqual(self.documented_paths(doc), known)
+
+    def test_every_content_bearing_directory_has_a_privacy_row(self):
+        expected = set(self.subdirs()) - set(self.NO_ASSET_ROW)
+        self.assertLessEqual(set(self.NO_ASSET_ROW), set(self.subdirs()), "stale exemption")
+        text = self.PRIVACY.read_text(encoding="utf-8")
+        asset_table = text.split("## Assets", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("| Asset |", asset_table, "the section slice must be the table")
+        self.assertEqual(expected - set(self.PATH_RE.findall(asset_table)), set())
+
+    def test_the_extractor_sees_the_known_rows(self):
+        """The control: a regex that found nothing would pass the subset test."""
+        found = self.documented_paths(self.PRIVACY)
+        self.assertTrue({"raw", "candidates", "quarantine", "receipts"} <= found, found)
+        self.assertNotIn("records", found, "the directory that never existed")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
