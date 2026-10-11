@@ -344,6 +344,71 @@ class NoLiveMutationTests(DailyHarness):
                 used.add(node.id)
         self.assertNotIn("write_canonical", used)
 
+    def test_only_apply_and_rollback_ask_for_a_writable_skill_store(self):
+        """OPERATIONS says only ``apply`` and ``rollback`` open the store writable.
+
+        Every ``build_skill_store`` call in the CLI is attributed to the top-level
+        command function around it; the ones passing a literal ``writable=True``
+        must be exactly those two, ``daily`` must be among the read-only callers,
+        the wiring default those callers rely on must be read-only, and the CLI
+        must not reference ``FilesystemSkillStore`` as a name or attribute.
+        """
+        import ast
+        import inspect
+
+        from agent_skill_improver.app.wiring import build_skill_store
+        from agent_skill_improver.config import package_dir
+
+        self.assertIs(
+            inspect.signature(build_skill_store).parameters["writable"].default,
+            False,
+            "the read-only callers below omit the flag and rely on this default",
+        )
+        tree = ast.parse((package_dir() / "cli.py").read_text(encoding="utf-8"))
+
+        def is_build_call(node: ast.AST) -> bool:
+            return (
+                isinstance(node, ast.Call) and getattr(node.func, "id", None) == "build_skill_store"
+            )
+
+        every_call = sum(1 for node in ast.walk(tree) if is_build_call(node))
+        attributed = 0
+        writable: set[str] = set()
+        read_only: set[str] = set()
+        referenced: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                referenced.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                referenced.add(node.attr)
+        for func in tree.body:
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            for node in ast.walk(func):
+                if not is_build_call(node):
+                    continue
+                assert isinstance(node, ast.Call)  # narrowed by is_build_call
+                attributed += 1
+                flags: list[object] = []
+                for kw in node.keywords:
+                    if kw.arg == "writable":
+                        self.assertIsInstance(
+                            kw.value, ast.Constant, f"{func.name}: writable must be a literal"
+                        )
+                        flags.append(kw.value.value)
+                (writable if any(v is True for v in flags) else read_only).add(func.name)
+        self.assertEqual(
+            attributed,
+            every_call,
+            "a build_skill_store call outside a top-level command function is unaccounted for",
+        )
+        self.assertEqual(writable, {"cmd_apply", "cmd_rollback"})
+        self.assertIn("cmd_daily", read_only, "the daily driver always opens it read-only")
+        self.assertTrue(read_only.isdisjoint(writable), "one command opened the store both ways")
+        self.assertFalse(
+            "FilesystemSkillStore" in referenced, "the CLI references the store class directly"
+        )
+
     def test_the_automation_marker_is_set_for_the_duration_of_the_pass(self):
         from agent_skill_improver.domain.approval import automation_active
 
