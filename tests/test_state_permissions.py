@@ -337,6 +337,24 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         self.assertFalse((outside / "state").exists())
         self._assert_outside_untouched(outside)
 
+    def test_a_lazy_subdirectory_access_refuses_a_symlinked_ancestor_too(self):
+        """``dir()`` is how every command that does not call ``ensure()`` reaches
+        the tree (`candidates`, `review`, `apply`, wiring's sandbox root).
+        Measured before this test existed, it checked the root and the
+        subdirectory but not the ancestors, so `asi candidates` created the
+        layout through an aliased parent that ``ensure()`` refuses."""
+        outside = self._outside_dir()
+        alias = self.root.parent / "alias"
+        alias.symlink_to(outside)
+        redirected_root = alias / "state"
+
+        with self.assertRaises(SafetyRefusal) as ctx:
+            StateStore(redirected_root).dir("candidates")
+
+        self.assertIn("ancestor", str(ctx.exception))
+        self.assertFalse((outside / "state").exists())
+        self._assert_outside_untouched(outside)
+
     def test_a_state_root_that_is_a_symlink_is_refused_before_anything_is_created(self):
         outside = self._outside_dir()
         self.root.symlink_to(outside)

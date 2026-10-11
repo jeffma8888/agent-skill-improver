@@ -307,6 +307,19 @@ class StateStore:
     def dir(self, name: str) -> Path:
         if name not in SUBDIRS:
             raise KeyError(f"unknown state subdirectory {name!r}")
+        # The same three checks ``ensure()`` makes, because this is the path every
+        # command that never calls ``ensure()`` takes into the tree: an aliased
+        # ancestor would redirect the mkdir and the chmod below just as surely as
+        # an aliased root.
+        reason = _ancestor_layout_reason(self.root)
+        if reason:
+            raise SafetyRefusal(
+                f"refusing to use {self.root} as the state directory: {reason}. Every state "
+                "directory must be reachable without following a symlink, because mkdir, "
+                "chmod and every later write would carry private conversation content "
+                "outside the configured state directory. Point [run].state_dir at the "
+                "real location you actually want."
+            )
         _refuse_unless_real_dir(self.root, self.root)
         path = self.root / name
         _refuse_unless_real_dir(path, self.root)
