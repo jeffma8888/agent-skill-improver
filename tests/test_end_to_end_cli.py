@@ -85,12 +85,34 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn("PAGE, not a total", proc.stdout)
 
     def test_04_a_dry_run_persists_nothing(self):
+        # The whole tree, not one directory: an earlier version of this test
+        # watched candidates/ alone while conversations, scorecards, quarantine
+        # records and a receipt were being written under the same flag.
         state = self.base / "state"
-        before = sorted(p.name for p in state.glob("candidates/*")) if state.exists() else []
+
+        def snapshot() -> dict[str, str]:
+            if not state.exists():
+                return {}
+            return {
+                str(p.relative_to(state)): sha256_file(p)
+                for p in state.rglob("*")
+                if p.is_file() and p.relative_to(state).parts[0] != "locks"
+            }
+
+        before = snapshot()
         proc = self.cli("daily", "--day", "2026-01-01")
         self.assertEqual(proc.returncode, RC_OK, proc.stderr)
-        after = sorted(p.name for p in state.glob("candidates/*")) if state.exists() else []
-        self.assertEqual(before, after, "dry run is the default and must write no candidate")
+        self.assertIn("mode=dry-run", proc.stdout)
+        self.assertIn("scored=", proc.stdout)
+        self.assertIn("receipt: not written (dry run)", proc.stdout)
+        after = snapshot()
+        self.assertEqual(
+            {k for k in after if k != "README.txt"},
+            {k for k in before if k != "README.txt"},
+            "dry run is the default and must add or remove nothing under state/",
+        )
+        for rel, digest in before.items():
+            self.assertEqual(after.get(rel), digest, f"{rel} changed during a dry run")
 
     def test_05_a_committed_daily_pass_produces_a_validated_candidate(self):
         payload = self.cli_json("--json", "daily", "--commit", "--day", "2026-01-02")

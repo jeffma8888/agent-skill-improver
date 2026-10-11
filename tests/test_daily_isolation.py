@@ -1197,5 +1197,194 @@ class DeterminismTests(DailyHarness):
         )
 
 
+def _state_snapshot(root: Path) -> dict[str, str]:
+    """Every file under the state root except the run lock, with its hash."""
+    return {
+        str(path.relative_to(root)): sha256_file(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.relative_to(root).parts[0] != "locks"
+    }
+
+
+class DryRunPersistsNothingTests(DailyHarness):
+    """``asi daily`` without ``--commit`` is documented as persisting nothing.
+
+    Measured before this class existed, a dry run wrote the normalized
+    conversations, every scorecard and failure case, the quarantine, refusal and
+    deferral records and a receipt into ``state/``; only the candidates were held
+    back, and the one test behind the claim looked only at ``candidates/``. For a
+    private source that is verbatim transcript text on disk under a flag that says
+    it writes nothing. The store now withholds every artifact write in dry-run
+    mode, and these tests measure the whole tree rather than one directory.
+    """
+
+    def dry_pass(self, config, *, state, day=DAY, runner=None, source=None):
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        return run_daily(
+            config,
+            source=source or FixtureConversationSource(config.source.fixtures_dir),
+            runner=runner or InProcessRunner(),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day=day,
+            commit=False,
+        )
+
+    def test_a_dry_run_from_an_empty_state_writes_no_artifact(self):
+        config = self.env()
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        receipt = self.dry_pass(config, state=state).to_dict()
+        written = _state_snapshot(config.state_dir)
+        self.assertEqual(
+            sorted(written),
+            ["README.txt"],
+            "a dry run may create the owner-only layout and take the lock, nothing else",
+        )
+        # The run did real work and said what it would have written.
+        self.assertGreater(receipt["counts"]["records_scored"], 0)
+        self.assertGreater(receipt["counts"]["candidates_proposed"], 0)
+        self.assertTrue(all(c["persisted"] is False for c in receipt["candidates"]))
+        withheld = receipt["counts"]["artifacts_withheld_dry_run"]
+        # The count is taken before the receipt and the day checkpoint are handed
+        # to the store, so those two withheld writes sit outside it.
+        self.assertEqual(withheld + 2, len(state.withheld_writes))
+        kinds = {Path(rel).parts[0] for rel in state.withheld_writes}
+        self.assertEqual(
+            {"conversations", "scorecards", "failures", "candidates", "receipts", "checkpoints"},
+            kinds,
+        )
+        self.assertTrue(any("dry run" in n and "NOT written" in n for n in receipt["notes"]))
+
+    def test_a_dry_run_leaves_existing_state_byte_identical(self):
+        config = self.env()
+        committed, state, _ = self.run_pass(config, day="2026-01-02")
+        self.assertGreater(committed.to_dict()["counts"]["records_scored"], 0)
+        before = _state_snapshot(config.state_dir)
+        self.assertTrue(before, "the committed run must have left artifacts to protect")
+        preview = self.dry_pass(config, state=state, day="2026-01-03").to_dict()
+        self.assertGreater(preview["counts"]["records_scored"], 0, "the preview did the work")
+        self.assertEqual(_state_snapshot(config.state_dir), before)
+        self.assertEqual(committed.to_dict()["counts"]["artifacts_withheld_dry_run"], 0)
+        self.assertGreater(preview["counts"]["artifacts_withheld_dry_run"], 0)
+
+    def test_a_dry_run_reaches_the_defer_verdict_a_commit_would(self):
+        """Deferral attempts are counted before the write, so the preview and the
+        committed run agree on when a streak becomes a quarantine."""
+
+        class Down(FixtureConversationSource):
+            def fetch(self, thread_id):
+                raise SourceUnavailable("network is down")
+
+        config = self.env(max_defer_attempts=2)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        self.run_pass(config, day="2026-01-02", runner=InProcessRunner())  # unrelated day
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        first = run_daily(
+            config,
+            source=Down(config.source.fixtures_dir),
+            runner=InProcessRunner(),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day="2026-01-03",
+            commit=True,
+        ).to_dict()
+        self.assertGreater(first["counts"]["records_deferred"], 0)
+        self.assertEqual(first["counts"]["records_quarantined"], 0)
+        before = _state_snapshot(config.state_dir)
+        preview = self.dry_pass(
+            config, state=state, day="2026-01-04", source=Down(config.source.fixtures_dir)
+        ).to_dict()
+        self.assertEqual(preview["counts"]["records_deferred"], 0)
+        self.assertGreater(
+            preview["counts"]["records_quarantined"],
+            0,
+            "attempt two of a cap of two is a quarantine, in the preview as in the commit",
+        )
+        self.assertEqual(_state_snapshot(config.state_dir), before, "and the streak did not move")
+        self.assertEqual({state.deferred_attempts(i) for i in state.deferred_ids()}, {1})
+
+    def test_the_raw_export_write_is_withheld_too(self):
+        # The source holds the same store as its raw-export sink, which is why
+        # run_daily sets the mode on the shared object instead of on a copy.
+        state = StateStore(self.base / "state", clock=frozen_clock(), dry_run=True)
+        state.ensure()
+        path = state.write_raw("t-1", "verbatim private transcript")
+        self.assertFalse(path.exists())
+        self.assertEqual(state.withheld_writes, [str(path.relative_to(state.root))])
+
+    def test_promotion_refuses_a_store_that_withholds_writes(self):
+        state = StateStore(self.base / "state", clock=frozen_clock(), dry_run=True)
+        state.ensure()
+        with self.assertRaises(SafetyRefusal):
+            state.write_action_receipt("apply", "CAND-2026-01-02-01-tdd", {})
+        with self.assertRaises(SafetyRefusal):
+            state.backup_dir_for("CAND-2026-01-02-01-tdd", "stamp")
+        self.assertEqual(
+            _state_snapshot(state.root), {"README.txt": sha256_file(state.root / "README.txt")}
+        )
+
+
+OPERATIONS_DOC = Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md"
+
+
+def documented_count_keys(text: str) -> list[str]:
+    """The keys named in the fenced ``counts`` block of OPERATIONS.md.
+
+    The block is the first fenced block after the ``**`counts`**`` heading. A key
+    line starts at column zero with an identifier followed by at least two
+    spaces; continuation lines are indented and prose outside the fence is never
+    looked at.
+    """
+    marker = "**`counts`**"
+    start = text.index(marker)
+    open_fence = text.index("```", start)
+    close_fence = text.index("```", open_fence + 3)
+    keys: list[str] = []
+    for line in text[open_fence + 3 : close_fence].splitlines():
+        head = line.split("  ", 1)[0]
+        if line[:1].isalpha() and head.replace("_", "").isalnum() and head == head.lower():
+            keys.append(head)
+    return keys
+
+
+class ReceiptCountsAreDocumentedTests(DailyHarness):
+    """The ``counts`` block in OPERATIONS.md is the operator's legend for the
+    receipt. Measured before this class existed, five emitted keys were missing
+    from it. The legend and the receipt are compared in both directions."""
+
+    def test_every_emitted_count_is_documented_and_every_documented_count_is_emitted(self):
+        receipt, _, _ = self.run_pass(self.env())
+        emitted = set(receipt.to_dict()["counts"])
+        documented = documented_count_keys(OPERATIONS_DOC.read_text(encoding="utf-8"))
+        self.assertEqual(len(documented), len(set(documented)), "a key is documented twice")
+        self.assertEqual(
+            sorted(emitted - set(documented)), [], "emitted by a run but absent from the legend"
+        )
+        self.assertEqual(
+            sorted(set(documented) - emitted), [], "in the legend but emitted by no run"
+        )
+        self.assertGreaterEqual(len(emitted), 15, "the comparison must not be vacuous")
+
+    def test_the_legend_extractor_finds_keys_and_skips_prose_and_continuations(self):
+        sample = (
+            "Intro prose with a_snake_word  that is outside the fence.\n\n"
+            "**`counts`** -- the honest arithmetic:\n\n"
+            "```\n"
+            "alpha_count                   first key\n"
+            "beta                          second key, whose explanation\n"
+            "                              continues on an indented line\n"
+            "GAMMA_UPPER                   not a key: receipts never emit upper case\n"
+            "```\n\n"
+            "After the fence: delta_count  is prose, not a key.\n"
+        )
+        self.assertEqual(documented_count_keys(sample), ["alpha_count", "beta"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

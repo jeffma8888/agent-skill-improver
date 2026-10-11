@@ -7,7 +7,7 @@ Command surface, and which of them can change anything on disk:
     rubrics             read-only.
     discover            read-only. Lists thread ids the source would ingest.
     daily               writes only under the gitignored state directory.
-                        DRY RUN BY DEFAULT; --commit persists candidates and the checkpoint.
+                        DRY RUN BY DEFAULT: nothing under state/ is written; --commit persists.
     candidates          read-only.
     review              read-only. Prints the argument, the diff, and the approval token.
     apply               THE ONLY command that writes a skill file. Human-gated.
@@ -382,7 +382,12 @@ def cmd_daily(args: argparse.Namespace) -> int:
         sys.stdout.write(receipt.summary_line() + "\n")
         for note in receipt.notes:
             sys.stdout.write(f"note: {note}\n")
-        sys.stdout.write(f"receipt: {state.receipt_path(receipt.day, dry_run=receipt.dry_run)}\n")
+        if receipt.dry_run:
+            sys.stdout.write(
+                "receipt: not written (dry run); --json prints it, --commit persists it\n"
+            )
+        else:
+            sys.stdout.write(f"receipt: {state.receipt_path(receipt.day, dry_run=False)}\n")
     return exit_code_for(receipt.status)
 
 

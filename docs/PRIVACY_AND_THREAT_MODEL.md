@@ -20,8 +20,8 @@ neglected:
 
 | Asset | Where it lives | Exposure |
 | --- | --- | --- |
-| Raw conversation exports | `state/raw/` | Local only. The whole `state/` tree is gitignored, the directories are `0700` and the files are `0600`. |
-| Normalized transcripts, scorecards | `state/records/` | Local only, same modes. |
+| Raw conversation exports | `state/raw/` | Local only. The whole `state/` tree is gitignored, the directories are `0700` and the files are `0600`. Written only by a committed run: `asi daily` without `--commit` withholds every artifact write, so a preview against a private source leaves no transcript on disk. |
+| Normalized transcripts, scorecards, failure cases | `state/conversations/`, `state/scorecards/`, `state/failures/` | Local only, same modes, same dry-run rule. |
 | Prompt text handed to a model role | in flight, on a pipe to a child process | For a **private** source the child is confined with no network and no writes outside a per-call temp directory, so this does not leave the machine. For the **synthetic** fixture corpus there is nothing private in it. |
 | Skill files | your configured roots | Written only by `apply`, only `SKILL.md`, only after human approval. |
 | Rubrics | `rubrics/` | Read-only to the loop. Protected unconditionally. |

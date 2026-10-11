@@ -119,8 +119,10 @@ def _defer(
     "Consecutive" is literal on both paths: a completed score, or a completed
     propose-and-validate, clears the streak.
     """
+    # Count before writing, so a dry run (which withholds the write) reaches the
+    # same verdict a committed run would.
+    attempts = state.deferred_attempts(record_id) + 1
     state.defer(record_id, stage=stage, reason=reason)
-    attempts = state.deferred_attempts(record_id)
     cap = config.caps.max_defer_attempts
     if attempts < cap:
         receipt.record(record_id, status="deferred", stage=stage, reason=reason, kind=kind)
@@ -189,6 +191,10 @@ def run_daily(
     run_day = day or day_key(started)
     run_seed = seed or config.seed or run_day
     dry_run = config.dry_run if commit is None else not commit
+    # Set on the shared store rather than on a copy: the source may hold this same
+    # object as its raw-export store, and a dry run must withhold that write too.
+    state.dry_run = dry_run
+    state.withheld_writes.clear()
 
     state.ensure()
     receipt = RunReceipt(
@@ -672,8 +678,9 @@ def _propose_and_validate(
                 f"dry run: candidate {candidate.id} was NOT written to the candidate queue, so it "
                 "cannot be reviewed or applied. Re-run with --commit to persist it."
             )
-        else:
-            state.write_candidate(candidate)
+        # The store withholds this in a dry run and counts it among the writes a
+        # committed run would have made.
+        state.write_candidate(candidate)
         produced.append(entry)
     return produced
 
@@ -769,26 +776,37 @@ def _finish(
     receipt.counts["state_refusal_files"] = state.count("refusals")
     receipt.counts["state_deferred_files"] = state.count("deferred")
     receipt.counts["open_candidates_after"] = len(state.open_candidates())
+    # Taken before the receipt and the day checkpoint are handed to the store, so
+    # those two withheld writes are not in this count; the receipt says so.
+    receipt.counts["artifacts_withheld_dry_run"] = len(state.withheld_writes)
+    if dry_run:
+        receipt.note(
+            f"dry run: {len(state.withheld_writes)} state write(s) were withheld (conversations, "
+            "scorecards, failure cases, quarantine/refusal/deferral records and their removals, "
+            "candidates), and the receipt and day checkpoint that follow are withheld too. "
+            "Nothing under state/ changed. Re-run with --commit."
+        )
     receipt.finalize(finished_at=iso(clock.now()), mutation_detected=mutation_detected)
 
     # Receipt first. If the checkpoint update fails the run still fails, but the
     # account of what it did is already on disk; the reverse order can leave a
     # checkpoint claiming the day completed with no receipt behind it. The receipt
     # path is per day, so the next commit run of the same day overwrites it.
+    # Both writes go through the store, which withholds them in a dry run; the
+    # single gate is the store, not a flag check at each call site.
     state.write_receipt(run_day, receipt.to_dict(), dry_run=dry_run)
-    if not dry_run:
-        checkpoint = state.read_checkpoint(run_day)
-        checkpoint["runs"] = int(checkpoint.get("runs", 0)) + 1
-        records = dict(checkpoint.get("records", {}))
-        records.update(receipt.records)
-        checkpoint["records"] = records
-        skills = dict(checkpoint.get("skills", {}))
-        skills.update(receipt.skills)
-        checkpoint["skills"] = skills
-        checkpoint["candidates"] = sorted(
-            set(checkpoint.get("candidates", [])) | {c["candidate_id"] for c in candidates}
-        )
-        checkpoint["completed"] = receipt.status != STATUS_STOOD_DOWN
-        checkpoint["last_receipt"] = str(state.receipt_path(run_day, dry_run=False))
-        state.write_checkpoint(run_day, checkpoint)
+    checkpoint = state.read_checkpoint(run_day)
+    checkpoint["runs"] = int(checkpoint.get("runs", 0)) + 1
+    records = dict(checkpoint.get("records", {}))
+    records.update(receipt.records)
+    checkpoint["records"] = records
+    skills = dict(checkpoint.get("skills", {}))
+    skills.update(receipt.skills)
+    checkpoint["skills"] = skills
+    checkpoint["candidates"] = sorted(
+        set(checkpoint.get("candidates", [])) | {c["candidate_id"] for c in candidates}
+    )
+    checkpoint["completed"] = receipt.status != STATUS_STOOD_DOWN
+    checkpoint["last_receipt"] = str(state.receipt_path(run_day, dry_run=False))
+    state.write_checkpoint(run_day, checkpoint)
     return receipt

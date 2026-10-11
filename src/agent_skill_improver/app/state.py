@@ -48,7 +48,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ..clock import Clock, iso
 from ..domain.candidate import (
@@ -137,11 +137,32 @@ class RecordStatus:
 
 
 class StateStore:
-    """Owns the state directory layout. Every write is atomic."""
+    """Owns the state directory layout. Every write is atomic.
 
-    def __init__(self, root: Path, *, clock: Clock | None = None) -> None:
+    With ``dry_run`` set, every artifact write is *withheld*: the method computes
+    the path it would have written, records it in ``withheld_writes`` and returns
+    without touching the disk. Reads are unaffected. The daily pass switches this
+    on for a run without ``--commit``, so "a dry run persists nothing" is a
+    property of the store rather than a discipline every call site has to keep.
+    The layout itself (owner-only directories and the README) is still created,
+    and the run lock is still taken, because neither carries private content and
+    a dry run must not interleave with a committed one.
+    """
+
+    def __init__(self, root: Path, *, clock: Clock | None = None, dry_run: bool = False) -> None:
         self.root = Path(root)
         self._clock = clock
+        self.dry_run = dry_run
+        #: Paths (relative to the root) a committed run would have written.
+        self.withheld_writes: list[str] = []
+
+    def _persist(self, path: Path, write: Callable[[], object]) -> Path:
+        """Perform ``write`` unless writes are withheld; return the artifact path."""
+        if self.dry_run:
+            self.withheld_writes.append(str(path.relative_to(self.root)))
+            return path
+        write()
+        return path
 
     # -- layout ----------------------------------------------------------
     def ensure(self) -> None:
@@ -285,8 +306,7 @@ class StateStore:
     # -- conversations / scorecards / failures ---------------------------
     def write_conversation(self, conversation_id: str, payload: dict[str, Any]) -> Path:
         path = self.dir("conversations") / f"{keyed_name(conversation_id)}.json"
-        write_json(path, payload)
-        return path
+        return self._persist(path, lambda: write_json(path, payload))
 
     def read_conversation(self, conversation_id: str) -> dict[str, Any] | None:
         path = self.dir("conversations") / f"{keyed_name(conversation_id)}.json"
@@ -297,22 +317,21 @@ class StateStore:
     ) -> Path:
         name = f"{keyed_name(conversation_id)}--{keyed_name(rubric_id)}.json"
         path = self.dir("scorecards") / name
-        write_json(path, payload)
-        return path
+        return self._persist(path, lambda: write_json(path, payload))
 
     def write_failures(
         self, conversation_id: str, rubric_id: str, payload: list[dict[str, Any]]
     ) -> Path:
         name = f"{keyed_name(conversation_id)}--{keyed_name(rubric_id)}.json"
         path = self.dir("failures") / name
-        write_json(path, {"schema": "asi.failures.v1", "cases": payload})
-        return path
+        return self._persist(
+            path, lambda: write_json(path, {"schema": "asi.failures.v1", "cases": payload})
+        )
 
     def write_raw(self, conversation_id: str, text: str) -> Path:
         """Persist a raw export. The most sensitive artifact this tool writes."""
         path = self.dir("raw") / f"{keyed_name(conversation_id)}.json"
-        write_text_atomic(path, text)
-        return path
+        return self._persist(path, lambda: write_text_atomic(path, text))
 
     # -- candidates ------------------------------------------------------
     def candidate_path(self, candidate_id: str) -> Path:
@@ -324,8 +343,7 @@ class StateStore:
 
     def write_candidate(self, candidate: Candidate) -> Path:
         path = self.candidate_path(candidate.id)
-        write_json(path, candidate.to_dict())
-        return path
+        return self._persist(path, lambda: write_json(path, candidate.to_dict()))
 
     def read_candidate(self, candidate_id: str) -> Candidate:
         """Load one candidate by id, failing closed on anything unexpected.
@@ -378,18 +396,15 @@ class StateStore:
     # -- quarantine / defer ---------------------------------------------
     def quarantine(self, record_id: str, *, stage: str, reason: str, detail: Any = None) -> Path:
         path = self.dir("quarantine") / f"{keyed_name(record_id)}--{keyed_name(stage)}.json"
-        write_json(
-            path,
-            {
-                "schema": "asi.quarantine.v1",
-                "record_id": record_id,
-                "stage": stage,
-                "reason": reason,
-                "detail": detail,
-                "at": self._now(),
-            },
-        )
-        return path
+        payload = {
+            "schema": "asi.quarantine.v1",
+            "record_id": record_id,
+            "stage": stage,
+            "reason": reason,
+            "detail": detail,
+            "at": self._now(),
+        }
+        return self._persist(path, lambda: write_json(path, payload))
 
     def refuse(self, record_id: str, *, stage: str, reason: str) -> Path:
         """Record a deliberate policy refusal, kept separate from quarantine.
@@ -400,18 +415,15 @@ class StateStore:
         uninformative in exactly the situation you would want to consult it.
         """
         path = self.dir("refusals") / f"{keyed_name(record_id)}--{keyed_name(stage)}.json"
-        write_json(
-            path,
-            {
-                "schema": "asi.refusal.v1",
-                "record_id": record_id,
-                "stage": stage,
-                "reason": reason,
-                "expected": True,
-                "at": self._now(),
-            },
-        )
-        return path
+        payload = {
+            "schema": "asi.refusal.v1",
+            "record_id": record_id,
+            "stage": stage,
+            "reason": reason,
+            "expected": True,
+            "at": self._now(),
+        }
+        return self._persist(path, lambda: write_json(path, payload))
 
     def defer(self, record_id: str, *, stage: str, reason: str) -> Path:
         path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
@@ -421,18 +433,15 @@ class StateStore:
                 attempts = int(_read_state_json(path).get("attempts", 0)) + 1
             except (ValueError, KeyError, TypeError):
                 attempts = 1
-        write_json(
-            path,
-            {
-                "schema": "asi.deferred.v1",
-                "record_id": record_id,
-                "stage": stage,
-                "reason": reason,
-                "attempts": attempts,
-                "at": self._now(),
-            },
-        )
-        return path
+        payload = {
+            "schema": "asi.deferred.v1",
+            "record_id": record_id,
+            "stage": stage,
+            "reason": reason,
+            "attempts": attempts,
+            "at": self._now(),
+        }
+        return self._persist(path, lambda: write_json(path, payload))
 
     def deferred_attempts(self, record_id: str) -> int:
         """How many consecutive runs have deferred this record; 0 when none has."""
@@ -447,7 +456,7 @@ class StateStore:
     def clear_deferred(self, record_id: str) -> None:
         path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
         if path.is_file():
-            path.unlink()
+            self._persist(path, path.unlink)
 
     def deferred_ids(self) -> list[str]:
         out: list[str] = []
@@ -486,8 +495,7 @@ class StateStore:
 
     def write_checkpoint(self, day: str, payload: dict[str, Any]) -> Path:
         path = self.checkpoint_path(day)
-        write_json(path, payload)
-        return path
+        return self._persist(path, lambda: write_json(path, payload))
 
     def processed_record_ids(self, day: str) -> set[str]:
         """Records this day already reached a terminal per-record state for.
@@ -509,10 +517,19 @@ class StateStore:
 
     def write_receipt(self, day: str, payload: dict[str, Any], *, dry_run: bool) -> Path:
         path = self.receipt_path(day, dry_run=dry_run)
-        write_json(path, payload)
-        return path
+        return self._persist(path, lambda: write_json(path, payload))
+
+    def _refuse_promotion_when_withholding(self, what: str) -> None:
+        # Promotion is never a preview. A store that withholds writes would keep
+        # the skill edit and drop the receipt and backup that account for it.
+        if self.dry_run:
+            raise SafetyRefusal(
+                f"refusing to write a {what} through a store that withholds writes (dry run); "
+                "promotion needs a committed state store"
+            )
 
     def write_action_receipt(self, action: str, candidate_id: str, payload: dict[str, Any]) -> Path:
+        self._refuse_promotion_when_withholding("promotion receipt")
         if action not in ("apply", "rollback"):
             raise SafetyRefusal(f"unknown candidate receipt action {action!r}")
         path = self.dir("receipts") / f"{action}--{validate_candidate_id(candidate_id)}.json"
@@ -528,6 +545,7 @@ class StateStore:
         land outside the state tree, so the entry is proven to be a real direct
         child before either happens.
         """
+        self._refuse_promotion_when_withholding("backup")
         return _ensure_child_dir(
             self.dir("backups"),
             f"{validate_candidate_id(candidate_id)}--{safe_name(stamp)}",

@@ -52,13 +52,21 @@ A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
 ## The daily pass
 
 ```bash
-asi daily                       # DRY RUN. Reports what it would do, persists nothing
+asi daily                       # DRY RUN. Does the work, prints the receipt, writes NOTHING to state/
 asi daily --commit              # persists to state/ ; still cannot touch a skill file
 asi daily --commit --day 2026-01-02 --seed t1   # pinned day and seed: reproducible
 ```
 
 Dry run is the default deliberately. `--commit` changes only whether `state/` is
-written; it does not unlock any write to a skill file, and no flag does.
+written; it does not unlock any write to a skill file, and no flag does. "Written"
+is meant literally and is tested on the whole tree: a dry run ingests, scores,
+proposes and validates exactly as a committed run does, but the store withholds
+every artifact (normalized conversations, raw exports, scorecards, failure cases,
+quarantine, refusal and deferral records, candidates, checkpoint and receipt), so
+the only things it leaves behind are the owner-only directory layout and the run
+lock. The receipt still reports how many files it withheld
+(`artifacts_withheld_dry_run`) and `--json` prints it. For a private source this is
+the difference between a preview and a copy of the transcripts on disk.
 
 ## Reading a receipt
 
@@ -86,12 +94,22 @@ skills_quarantined            a proposal target that is defective (implicated bu
 skills_deferred               a proposal that could not be made, e.g. the improver timed out
 failure_cases                 FAIL verdicts with resolvable evidence
 failure_cases_unattributed    real failures NOT tied to a skill (abstention, not absence)
+skills_implicated             distinct skills cited by at least one attributed failure
+skills_selected_for_proposal  of those, how many were handed to the improver this run, after
+                              the open-candidate filter and the smaller of
+                              caps.max_skills_per_run and caps.max_candidates_per_run
 candidates_proposed           proposals written
 candidates_gate_passed        proposals with no-regression evidence
 candidates_gate_failed        kept, with reasons, for a human to read
 proposals_refused_by_policy   targets declined by a guard rule (includes the next line)
 skills_with_open_candidate    implicated skills skipped because a candidate of theirs awaits review
 open_candidates_after         the review backlog
+state_quarantine_files        files under state/quarantine/ after the run, ALL days, so this
+state_refusal_files           and the two beside it are cumulative backlog rather than
+state_deferred_files          this run's work; in a dry run they reflect earlier commits only
+artifacts_withheld_dry_run    state writes (and deferral-record removals) a committed run would
+                              have made and this dry run withheld; 0 on a committed run. Taken
+                              before the receipt and the day checkpoint, which are withheld too
 ```
 
 `records_scored` will be lower than `conversations_ingested` whenever anything was

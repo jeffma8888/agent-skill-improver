@@ -15,8 +15,9 @@
 [run]
 # Everything the loop reads or writes lands here. Gitignored, local only.
 state_dir = "state"
-# DRY RUN IS THE DEFAULT. `asi daily` reports what it would do and persists
-# nothing until `--commit`. Even with --commit it never writes a skill file.
+# DRY RUN IS THE DEFAULT. `asi daily` does the whole pass and prints the receipt
+# but writes nothing under state/ until `--commit`. Even with --commit it never
+# writes a skill file.
 dry_run = true
 # Fixing the seed makes nonces and blind A/B assignment reproducible, so two
 # runs over the same inputs produce byte-identical artifacts.

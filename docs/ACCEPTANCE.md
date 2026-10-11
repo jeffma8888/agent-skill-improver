@@ -206,7 +206,10 @@ of cooperation; they do not remove the capability, so they are not counted here.
 | --- | --- | --- | --- |
 | Prove it structurally, not by inspection | An AST test asserts `app/daily.py` does not import the promotion module and never calls the write method | `app/daily.py` | `test_the_daily_module_does_not_import_the_promotion_module`, `test_the_daily_module_never_calls_the_write_method` |
 | Prove it observationally too | A full pass leaves the skill tree digest unchanged and no file content altered | `app/daily.py` | `test_the_skill_tree_digest_is_unchanged_by_a_full_pass`, `test_no_skill_file_content_changes_on_disk` |
-| A dry run must persist nothing | `daily` without `--commit` writes no state | `cli.py`, `app/daily.py` | `test_04_a_dry_run_persists_nothing` |
+| A dry run must persist nothing | `daily` without `--commit` writes no artifact under `state/`: the store withholds every write in dry-run mode and records what it withheld, measured on the whole tree rather than one directory (an earlier version checked only the candidate directory while conversations, scorecards and quarantine records were being written) | `app/state.py`, `app/daily.py`, `cli.py` | `test_04_a_dry_run_persists_nothing`, `test_a_dry_run_from_an_empty_state_writes_no_artifact`, `test_a_dry_run_leaves_existing_state_byte_identical`, `test_the_raw_export_write_is_withheld_too` |
+| A dry run must preview the verdict a commit would reach | Deferral attempts are counted before the write, so the cap decision is identical whether or not the write lands | `app/daily.py` | `test_a_dry_run_reaches_the_defer_verdict_a_commit_would` |
+| Promotion must never run through a withholding store | A store in dry-run mode refuses to write a promotion receipt or create a backup directory, so an apply cannot keep the edit and drop its own accounting | `app/state.py` | `test_promotion_refuses_a_store_that_withholds_writes` |
+| The receipt legend may drift from the receipt | Every count key a run emits must be in the `counts` block of `docs/OPERATIONS.md` and vice versa, with an extractor control | `docs/OPERATIONS.md`, `app/receipt.py` | `test_every_emitted_count_is_documented_and_every_documented_count_is_emitted`, `test_the_legend_extractor_finds_keys_and_skips_prose_and_continuations` |
 
 ## Repeat runs, locks and determinism
 
