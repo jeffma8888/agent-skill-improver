@@ -433,6 +433,16 @@ class StateStore:
         )
         return path
 
+    def deferred_attempts(self, record_id: str) -> int:
+        """How many consecutive runs have deferred this record; 0 when none has."""
+        path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
+        if not path.is_file():
+            return 0
+        try:
+            return int(_read_state_json(path).get("attempts", 0))
+        except (ValueError, KeyError, TypeError):
+            return 0
+
     def clear_deferred(self, record_id: str) -> None:
         path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
         if path.is_file():

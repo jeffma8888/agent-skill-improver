@@ -105,6 +105,12 @@ max_open_candidates = 8
 max_failures_per_candidate = 6
 max_skills_per_run = 3
 max_extra_holdout_conversations = 3
+# A deferred record is retried first next run. After this many consecutive
+# misses it is quarantined instead (stage "<stage>:defer-exhausted"), so a
+# failure that never clears cannot hold selection slots for ever. A completed
+# score (or, for a skill id, a completed propose-and-validate) resets the streak.
+# Minimum 1, which means quarantine on the first miss.
+max_defer_attempts = 3
 
 [prompt]
 # Budget per model call. When the budget binds, transcript blocks are dropped

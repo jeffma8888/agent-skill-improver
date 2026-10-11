@@ -123,6 +123,7 @@ def build_env(
     fairness_dimension: str = "workspace",
     max_open_candidates: int = 12,
     max_candidates_per_run: int = 3,
+    max_defer_attempts: int = 3,
     min_holdout_cases: int = 1,
     min_fixes: int = 1,
     require_judge: bool = True,
@@ -181,6 +182,7 @@ max_candidates_per_run = {max_candidates_per_run}
 max_skills_per_run = 3
 max_failures_per_candidate = 6
 max_extra_holdout_conversations = 3
+max_defer_attempts = {max_defer_attempts}
 
 [prompt]
 max_transcript_chars = 24000

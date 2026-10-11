@@ -371,7 +371,11 @@ which is gitignored in its entirety:
     raw/          verbatim exports (PRIVATE conversation content)
     records/      normalized conversations and scorecards
     quarantine/   one file per record that could not be processed, with the reason
-    deferred/     one file per record to retry, e.g. a source that was unreachable
+    deferred/     one file per record to retry first next run, e.g. a source that was
+                  unreachable (a skill id deferred at propose/validate lands here too, but
+                  holds no selection slot); quarantined after caps.max_defer_attempts
+                  misses in a row, where a completed score (or a completed
+                  propose-and-validate) resets the streak
     refusals/     one file per action refused by policy, with the rule that refused it
     candidates/   proposals awaiting review
     backups/      pre-apply copies, used by rollback

@@ -90,6 +90,58 @@ def _runner_isolation(runner: Any) -> Mapping[str, Any]:
     return {"mode": "unknown", "verified": False, "env_allowlist": []}
 
 
+DEFER_EXHAUSTED = "defer-exhausted"
+
+
+def _defer(
+    state: StateStore,
+    receipt: RunReceipt,
+    config: Config,
+    record_id: str,
+    *,
+    stage: str,
+    reason: str,
+) -> None:
+    """Defer a record, or quarantine it once deferral has stopped being a retry.
+
+    A deferred record is selected first next time, which is right for a blip and
+    a ratchet for anything else: enough records that never stop deferring hold
+    every selection slot every run, and fresh conversations starve. After
+    ``caps.max_defer_attempts`` consecutive misses the record moves to quarantine
+    under ``<stage>:defer-exhausted``, stops claiming priority, and the receipt
+    says why. Quarantine is the right bucket because a failure that recurs every
+    day is, by definition, not transient; the operator's job is to look at it.
+
+    The same counter covers a skill id deferred at propose or validate (a model
+    that keeps timing out on one skill). Skill ids hold no selection slot, so
+    there the cap only turns an endless silent retry into a visible entry.
+    "Consecutive" is literal on both paths: a completed score, or a completed
+    propose-and-validate, clears the streak.
+    """
+    state.defer(record_id, stage=stage, reason=reason)
+    attempts = state.deferred_attempts(record_id)
+    cap = config.caps.max_defer_attempts
+    if attempts < cap:
+        receipt.record(record_id, status="deferred", stage=stage, reason=reason)
+        return
+    escalated = f"{stage}:{DEFER_EXHAUSTED}"
+    why = (
+        f"deferred {attempts} run(s) in a row (cap {cap}); the failure is not transient. "
+        f"Last reason: {reason}"
+    )
+    # Quarantine first, then drop the deferral: a crash between the two leaves the
+    # record in both buckets rather than in neither.
+    state.quarantine(
+        record_id,
+        stage=escalated,
+        reason=why,
+        detail={"attempts": attempts, "last_reason": reason, "last_stage": stage},
+    )
+    state.clear_deferred(record_id)
+    receipt.record(record_id, status="quarantined", stage=escalated, reason=why)
+    receipt.note(f"{record_id!r} quarantined after {attempts} consecutive deferrals at {stage!r}")
+
+
 def _bucket_of(dimension: str, *, agent_title_markers: Sequence[str] = ()) -> Callable[[Any], str]:
     """The fairness dimension, computed from discovery metadata only.
 
@@ -245,8 +297,7 @@ def run_daily(
                 receipt.record(record_id, status="quarantined", stage=STAGE_INGEST, reason=str(exc))
                 continue
             except TransientFailure as exc:
-                state.defer(record_id, stage=STAGE_INGEST, reason=str(exc))
-                receipt.record(record_id, status="deferred", stage=STAGE_INGEST, reason=str(exc))
+                _defer(state, receipt, config, record_id, stage=STAGE_INGEST, reason=str(exc))
                 continue
             state.write_conversation(record_id, conversation.to_dict())
             conversations[record_id] = conversation
@@ -286,10 +337,11 @@ def run_daily(
                     record_failed = True
                     break
                 except TransientFailure as exc:
-                    state.defer(record_id, stage=f"{STAGE_SCORE}:{rubric.id}", reason=str(exc))
-                    receipt.record(
+                    _defer(
+                        state,
+                        receipt,
+                        config,
                         record_id,
-                        status="deferred",
                         stage=f"{STAGE_SCORE}:{rubric.id}",
                         reason=str(exc),
                     )
@@ -508,8 +560,7 @@ def _propose_and_validate(
             receipt.record(skill_id, status="quarantined", stage=STAGE_PROPOSE, reason=str(exc))
             continue
         except TransientFailure as exc:
-            state.defer(skill_id, stage=STAGE_PROPOSE, reason=str(exc))
-            receipt.record(skill_id, status="deferred", stage=STAGE_PROPOSE, reason=str(exc))
+            _defer(state, receipt, config, skill_id, stage=STAGE_PROPOSE, reason=str(exc))
             continue
 
         base_text = skill_store.read_text(candidate.target.canonical_path)
@@ -530,9 +581,10 @@ def _propose_and_validate(
                 known_skill_ids=known_skill_ids,
             )
         except AsiError as exc:
-            state.defer(skill_id, stage=STAGE_VALIDATE, reason=str(exc))
-            receipt.record(skill_id, status="deferred", stage=STAGE_VALIDATE, reason=str(exc))
+            _defer(state, receipt, config, skill_id, stage=STAGE_VALIDATE, reason=str(exc))
             continue
+        # Propose and validate both completed: the skill's deferral streak is over.
+        state.clear_deferred(skill_id)
 
         candidate = replace(
             candidate,

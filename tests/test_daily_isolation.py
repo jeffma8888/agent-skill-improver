@@ -26,7 +26,7 @@ from agent_skill_improver.app.receipt import STATUS_STOOD_DOWN
 from agent_skill_improver.app.state import StateStore, safe_name
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.config import load_config
-from agent_skill_improver.errors import LockHeld, SafetyRefusal
+from agent_skill_improver.errors import LockHeld, SafetyRefusal, SourceUnavailable
 from agent_skill_improver.hashing import sha256_file
 
 from tests.support import FIXTURE_EXPORTS, FIXTURE_MALFORMED, InProcessRunner, build_env
@@ -315,6 +315,159 @@ class PerRecordFailureTests(DailyHarness):
             "temporarily unavailable is not malformed; collapsing them loses the "
             "difference between a retry and a bug",
         )
+
+    def test_a_record_that_defers_persistently_is_quarantined_not_retried_for_ever(self):
+        """Deferred records are retried first. That is right for a blip and a
+        ratchet for anything else: enough records that never stop deferring hold
+        every selection slot every day and fresh conversations starve. The
+        attempt counter already on disk is what ends it.
+        """
+
+        class Unreachable(FixtureConversationSource):
+            def fetch(self, thread_id):
+                raise SourceUnavailable("network is down")
+
+        config = self.env(max_defer_attempts=2)
+        self.assertEqual(config.caps.max_defer_attempts, 2)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str) -> dict:
+            return run_daily(
+                config,
+                source=Unreachable(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        first = run("2026-01-02")
+        self.assertGreater(first["counts"]["records_deferred"], 0)
+        self.assertEqual(first["counts"]["records_quarantined"], 0, "one miss is a retry")
+        self.assertTrue(state.deferred_ids(), "the first miss keeps retry-first priority")
+
+        second = run("2026-01-03")
+        self.assertEqual(
+            second["counts"]["records_deferred"],
+            0,
+            "the cap binds on the second miss: nothing is left as a retry",
+        )
+        self.assertGreater(second["counts"]["records_quarantined"], 0)
+        self.assertEqual(
+            state.deferred_ids(),
+            [],
+            "an exhausted deferral stops claiming a selection slot ahead of fresh work",
+        )
+        entries = [
+            json.loads(p.read_text()) for p in (config.state_dir / "quarantine").glob("*.json")
+        ]
+        self.assertTrue(entries)
+        for entry in entries:
+            self.assertTrue(
+                entry["stage"].endswith(":defer-exhausted"),
+                f"the quarantine names the escalation, got {entry['stage']!r}",
+            )
+            self.assertEqual(entry["detail"]["attempts"], 2)
+            self.assertIn("network is down", entry["detail"]["last_reason"])
+        for info in second["records"].values():
+            self.assertEqual(info["status"], "quarantined")
+            self.assertIn("not transient", info["reason"])
+
+    def test_a_success_between_misses_resets_the_deferral_streak(self):
+        """The cap counts misses in a row, not misses in total. Miss, miss,
+        success, miss under a cap of 3 must end with a live deferral at attempt
+        one and nothing in quarantine.
+        """
+
+        class Flaky(FixtureConversationSource):
+            down = True
+
+            def fetch(self, thread_id):
+                if Flaky.down:
+                    raise SourceUnavailable("network is down")
+                return super().fetch(thread_id)
+
+        config = self.env(max_defer_attempts=3)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str, *, down: bool) -> dict:
+            Flaky.down = down
+            return run_daily(
+                config,
+                source=Flaky(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        run("2026-01-02", down=True)
+        run("2026-01-03", down=True)
+        self.assertEqual({state.deferred_attempts(i) for i in state.deferred_ids()}, {2})
+        up = run("2026-01-04", down=False)
+        self.assertGreater(up["counts"]["records_scored"], 0)
+        self.assertEqual(state.deferred_ids(), [], "a completed score clears the streak")
+        again = run("2026-01-05", down=True)
+        self.assertEqual(again["counts"]["records_quarantined"], 0)
+        self.assertEqual(
+            {state.deferred_attempts(i) for i in state.deferred_ids()},
+            {1},
+            "after a success the streak restarts at one",
+        )
+
+    def test_a_completed_proposal_resets_a_skills_deferral_streak(self):
+        """A skill id deferred at propose shares the counter. A run where the
+        improver answers must clear it, or a lifetime total is mislabelled as
+        a streak and a validated candidate gets quarantined on the next blip.
+        """
+        config = self.env(max_defer_attempts=3)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str, *, fail_roles=()) -> dict:
+            return run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=InProcessRunner(fail_roles=fail_roles),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        run("2026-01-02", fail_roles=("improver",))
+        run("2026-01-03", fail_roles=("improver",))
+        skills_deferred = set(state.deferred_ids())
+        self.assertTrue(skills_deferred, "an improver that times out defers the skill")
+        self.assertEqual({state.deferred_attempts(i) for i in skills_deferred}, {2})
+        healthy = run("2026-01-04")
+        self.assertGreater(healthy["counts"]["candidates_proposed"], 0)
+        self.assertEqual(state.deferred_ids(), [], "propose plus validate completed")
+        third = run("2026-01-05", fail_roles=("improver",))
+        self.assertEqual(third["counts"]["records_quarantined"], 0)
+        self.assertEqual({state.deferred_attempts(i) for i in state.deferred_ids()}, {1})
+
+    def test_max_defer_attempts_defaults_to_three_and_rejects_zero(self):
+        from agent_skill_improver.config import CapsConfig, ConfigError
+
+        self.assertEqual(CapsConfig().max_defer_attempts, 3)
+        self.assertEqual(self.env().caps.max_defer_attempts, 3)
+        config_path = build_env(self.base / "zero", max_defer_attempts=0)
+        with self.assertRaises(ConfigError):
+            load_config(config_path)
 
     def test_a_model_that_returns_garbage_quarantines_only_that_record(self):
         config = self.env()

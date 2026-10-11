@@ -182,9 +182,19 @@ decided the queue can carry more. Do not remove the guard.
 defect. A repeating shape defect usually means the source changed its export
 format, which is a normalizer fix, not a data problem.
 
-**The same record defers every day.** Deferral is for transient failures. If a
-record defers persistently, the failure is not transient — look at the reason
-rather than waiting for the retry to work.
+**The same record defers every day.** Deferral is for transient failures, and a
+deferred record is retried first on the next run. That priority is a ratchet if
+the failure never clears: enough such records hold every selection slot, every
+day, and fresh conversations starve. So after `[caps].max_defer_attempts`
+consecutive misses (default 3; `1` means quarantine on the first miss, never
+retry) the record is quarantined under `<stage>:defer-exhausted` instead, with
+the attempt count and last reason in the quarantine entry, and it stops claiming
+priority. A completed score resets the streak. The same cap covers a skill whose
+proposal or validation keeps deferring (a model that times out on that one
+skill); a completed propose-and-validate resets that streak too. A persistent
+miss is not transient; read the reason rather than waiting for the retry to work.
+The quarantine *file name* flattens `:` to `_`, so match on the `stage` field
+inside the JSON, not on the name.
 
 **A skill tree mutation was detected.** Do not re-run. Find out what wrote to the
 tree. The candidate evidence gathered during that run described a file state that
