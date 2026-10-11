@@ -584,5 +584,62 @@ class DocumentedStateTreeIsComplete(unittest.TestCase):
         self.assertNotIn("records", found, "the directory that never existed")
 
 
+class ExitCodesTests(unittest.TestCase):
+    """Exit codes are the scheduler's only view of a run, so each one must mean
+    one thing.
+
+    Measured before this class existed, an exception no command anticipated
+    (a ``PermissionError`` on the state tree, a bug) left ``main`` with a Python
+    traceback and exit status 1, which the exit-code table defines as "the
+    command ran and the answer is negative". A scheduler reading 1 as "doctor
+    said not ready" would file a crash under the wrong heading.
+    """
+
+    OPERATIONS = REPO / "docs" / "OPERATIONS.md"
+    ROW = re.compile(r"^\| (\d+) \| ", re.MULTILINE)
+
+    def declared_codes(self) -> dict[str, int]:
+        return {name: getattr(cli, name) for name in dir(cli) if name.startswith("RC_")}
+
+    def test_every_declared_code_is_distinct(self):
+        codes = self.declared_codes()
+        self.assertEqual(len(set(codes.values())), len(codes), codes)
+
+    def test_the_exit_code_table_documents_every_declared_code_and_argparse(self):
+        table = self.OPERATIONS.read_text(encoding="utf-8").split("## Exit codes", 1)[1]
+        table = table.split("\n## ", 1)[0]
+        documented = {int(m) for m in self.ROW.findall(table)}
+        self.assertEqual(documented, set(self.declared_codes().values()) | {2})
+
+    def test_an_unanticipated_exception_is_not_reported_as_a_negative_answer(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        err = io.StringIO()
+        with mock.patch.object(cli, "cmd_doctor", side_effect=RuntimeError("boom")):
+            with contextlib.redirect_stderr(err):
+                rc = cli.main(["doctor"])
+        self.assertEqual(rc, cli.RC_INTERNAL_ERROR)
+        self.assertNotEqual(rc, cli.RC_NEGATIVE)
+        self.assertIn("internal error:", err.getvalue(), "the line a scheduler log will show")
+        self.assertIn("RuntimeError: boom", err.getvalue(), "the cause must still be visible")
+        self.assertIn("Traceback", err.getvalue(), "the traceback is the bug report")
+
+    def test_the_control_a_refusal_still_exits_3_without_a_traceback(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from agent_skill_improver.errors import SafetyRefusal
+
+        err = io.StringIO()
+        with mock.patch.object(cli, "cmd_doctor", side_effect=SafetyRefusal("declined")):
+            with contextlib.redirect_stderr(err):
+                rc = cli.main(["doctor"])
+        self.assertEqual(rc, cli.RC_REFUSED)
+        self.assertEqual(err.getvalue(), "SafetyRefusal: declined\n")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

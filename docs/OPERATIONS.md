@@ -45,9 +45,11 @@ changed. A repair that cannot take effect is a refusal, not a warning.
 | 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, `ConfigError`, ...) |
 | 4 | a required file was missing |
 | 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree |
+| 70 | an exception no command anticipated, with its traceback on stderr. A bug report, never a negative answer; 70 is `EX_SOFTWARE` from `sysexits.h` |
 
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
-"the tool declined and told you why".
+"the tool declined and told you why", and 70 as "file a bug": no crash inside a
+command borrows 1, so a negative answer from `doctor` or `selftest` stays unambiguous.
 
 ## The daily pass
 

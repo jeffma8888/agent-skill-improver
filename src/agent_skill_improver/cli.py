@@ -27,6 +27,7 @@ import ast
 import os
 import shlex
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -58,6 +59,10 @@ RC_MISSING_FILE = 4
 #: and not a refusal: an invariant may be broken, and a scheduler must not treat
 #: it as "try again tomorrow".
 RC_BLOCKED = 5
+#: An exception no command anticipated. Kept apart from 1 so a scheduler cannot
+#: read a crash as a negative answer; the traceback stays on stderr. The value
+#: is sysexits.h EX_SOFTWARE.
+RC_INTERNAL_ERROR = 70
 
 BENIGN_RUN_STATUSES = ("ok", "stood-down", "partial")
 
@@ -1018,6 +1023,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return RC_MISSING_FILE
     except BrokenPipeError:  # pragma: no cover - piping into head/less
         return RC_OK
+    except Exception:
+        # Last resort. KeyboardInterrupt and SystemExit are not Exceptions and
+        # keep their own exit statuses. Naming the failure and keeping the
+        # traceback is what makes this a bug report rather than a silent 1.
+        sys.stderr.write("internal error: this is a bug in asi, not a negative answer\n")
+        traceback.print_exc()
+        return RC_INTERNAL_ERROR
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -78,6 +78,11 @@ available, so the run declined **before** reading any conversation. Fix the host
 (install `bwrap` on Linux; `sandbox-exec` ships with macOS) rather than looking
 for a flag, because there isn't one.
 
+A crash is neither. An exception no command anticipated exits 70 with its
+traceback on stderr; no crash inside a command exits 1, so a 1 in a scheduler
+log is a negative answer the tool actually gave (a broken install that fails
+before the command starts is the Python interpreter's 1, with its own traceback).
+
 Exit 5 is the one to page on. It means `blocked`: the skill tree's digest changed
 while the run was in flight, so something wrote to a live skill during the pass.
 The daily loop never does, so either another process edited a skill file or an
