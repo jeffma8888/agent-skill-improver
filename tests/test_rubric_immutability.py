@@ -7,6 +7,7 @@ structural: derived in code, hashed on every artifact, and not configurable.
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -235,6 +236,67 @@ class ProtectedPathTests(unittest.TestCase):
         config_path.write_text(text, encoding="utf-8")
         with self.assertRaises(ConfigError):
             load_config(config_path)
+
+
+class ADefinitionFileThatCannotBeReadIsAConfigErrorTests(unittest.TestCase):
+    """``is_file`` passing does not mean the bytes can be read, or that they are
+    UTF-8. Measured before: a config file at mode 000 ended ``doctor`` with a
+    PermissionError traceback and exit 70, the code reserved for a bug.
+    """
+
+    def setUp(self) -> None:
+        from tests.support import build_env
+
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name).resolve()
+        self.config_path = Path(build_env(self.base, rubric_ids=("instruction-compliance",)))
+        self.rubric_path = self.base / "rubrics" / "instruction-compliance.toml"
+
+    def _unreadable(self, path: Path) -> None:
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o644)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_config_file_this_process_cannot_read_is_named_not_a_traceback(self):
+        self._unreadable(self.config_path)
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        self.assertEqual(
+            str(ctx.exception),
+            f"config file {self.config_path} cannot be read (Permission denied)",
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_an_enabled_rubric_this_process_cannot_read_is_named_not_a_traceback(self):
+        self._unreadable(self.rubric_path)
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        self.assertEqual(
+            str(ctx.exception),
+            f"rubric 'instruction-compliance' {self.rubric_path} cannot be read (Permission denied)",
+        )
+
+    def test_a_config_file_that_is_not_utf8_is_named_with_the_byte_offset(self):
+        self.config_path.write_bytes(b"[run]\n" + bytes([0xFF]) + b"\n")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        message = str(ctx.exception)
+        self.assertTrue(message.startswith(f"config file {self.config_path} is not UTF-8 text ("))
+        self.assertIn("at byte 6", message)
+
+    def test_a_rubric_that_is_not_utf8_is_named_with_the_byte_offset(self):
+        self.rubric_path.write_bytes(bytes([0xFF]) + b"\n")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        message = str(ctx.exception)
+        self.assertTrue(
+            message.startswith(
+                f"rubric 'instruction-compliance' {self.rubric_path} is not UTF-8 text ("
+            ),
+            message,
+        )
+        self.assertIn("at byte 0", message)
 
 
 if __name__ == "__main__":  # pragma: no cover

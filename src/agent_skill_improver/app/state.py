@@ -61,7 +61,7 @@ from ..domain.candidate import (
     Candidate,
     validate_candidate_id,
 )
-from ..errors import SafetyRefusal, StateUnreadable
+from ..errors import ConfigError, SafetyRefusal, StateUnreadable
 from ..jsonio import FILE_MODE, loads_untrusted, write_json, write_text_atomic
 
 #: Owner-only on the state root and every directory beneath it.
@@ -230,14 +230,14 @@ class StateStore:
         # worth reporting; one created just now is not, whatever the umask did.
         repaired: list[str] = []
         existed = self.root.exists()
-        self.root.mkdir(parents=True, exist_ok=True)
+        _mkdir_or_refuse(self.root, self.root, parents=True)
         if _chmod_to(self.root, DIR_MODE) and existed:
             repaired.append(".")
         for name in SUBDIRS:
             path = self.root / name
             _refuse_unless_real_dir(path, self.root)
             existed = path.exists()
-            path.mkdir(exist_ok=True)
+            _mkdir_or_refuse(path, self.root)
             if _chmod_to(path, DIR_MODE) and existed:
                 repaired.append(name)
         readme = self.root / "README.txt"
@@ -392,8 +392,8 @@ class StateStore:
         root_existed = self.root.is_dir()
         existed = path.is_dir()
         if not existed:
-            self.root.mkdir(parents=True, exist_ok=True)
-            path.mkdir(exist_ok=True)
+            _mkdir_or_refuse(self.root, self.root, parents=True)
+            _mkdir_or_refuse(path, self.root)
         # Both levels, every time: the root used to be re-moded only when the
         # subdirectory was being created, so a command that read an existing
         # subdirectory left a world-readable root as it found it. A directory
@@ -1013,6 +1013,31 @@ def _layout_reason(path: Path, root: Path) -> str | None:
     return None
 
 
+def _mkdir_or_refuse(path: Path, root: Path, *, parents: bool = False) -> None:
+    """Create ``path`` under the state root, or say why it cannot be created.
+
+    The failure is named as a configuration problem because that is where the
+    fix lives: ``[run].state_dir`` points somewhere this process cannot create
+    (a read-only parent, a mount that refuses); a parent that is a file
+    or a link is a layout refusal, judged before this runs. Measured
+    before this helper: a state directory under a mode 555 parent ended
+    ``doctor``, ``daily`` and ``candidates`` as internal errors with a
+    traceback from the first ``mkdir``.
+    """
+    try:
+        path.mkdir(parents=parents, exist_ok=True)
+    except OSError as exc:
+        where = (
+            f"the state directory {root}"
+            if path == root
+            else f"{path} under the state directory {root}"
+        )
+        raise ConfigError(
+            f"{where} cannot be created ({exc.strerror or exc}); "
+            "check [run].state_dir and the permissions of its parent"
+        ) from exc
+
+
 def _refuse_unless_real_dir(path: Path, root: Path) -> None:
     """Refuse before following: mkdir and chmod both chase a symlink."""
     reason = _layout_reason(path, root)
@@ -1040,7 +1065,7 @@ def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
         )
     path = parent / name
     _refuse_unless_real_dir(path, root)
-    path.mkdir(exist_ok=True)
+    _mkdir_or_refuse(path, root)
     _chmod_to(path, DIR_MODE)
     if path.is_symlink() or not path.is_dir() or path.parent.resolve() != parent.resolve():
         raise SafetyRefusal(

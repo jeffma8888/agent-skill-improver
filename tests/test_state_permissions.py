@@ -47,7 +47,7 @@ from agent_skill_improver.app.state import (
     keyed_name,
 )
 from agent_skill_improver.clock import FrozenClock
-from agent_skill_improver.errors import SafetyRefusal, StateUnreadable
+from agent_skill_improver.errors import ConfigError, SafetyRefusal, StateUnreadable
 from agent_skill_improver.jsonio import FILE_MODE, write_json, write_text_atomic
 
 from tests.support import build_env, run_cli
@@ -1220,6 +1220,44 @@ class LockFileTests(StateTreeHarness):
         os.chmod(path, 0o666)
         with RunLock(path):
             self.assertEqual(oct(mode_of(path)), oct(0o600))
+
+
+class AStateDirectoryThatCannotBeCreatedIsNamedTests(StateTreeHarness):
+    """Measured before: ``[run].state_dir`` under a mode-555 parent ended
+    ``doctor``, ``daily`` and ``candidates`` with a PermissionError traceback
+    from the first ``mkdir`` and exit 70. The fix lives in the config or the
+    parent's permissions, so the refusal names both.
+    """
+
+    def _lock(self, path: Path, mode: int) -> None:
+        os.chmod(path, mode)
+        self.addCleanup(os.chmod, path, 0o700)
+
+    @unittest.skipIf(os.geteuid() == 0, "root creates directories under a mode-555 parent")
+    def test_a_root_that_cannot_be_created_names_itself_and_the_config_key(self):
+        self._lock(self.root.parent, 0o555)
+        store = self.store()
+        for attempt in (lambda: store.dir("sandbox"), store.ensure):
+            with self.assertRaises(ConfigError) as ctx:
+                attempt()
+            self.assertEqual(
+                str(ctx.exception),
+                f"the state directory {self.root} cannot be created (Permission denied); "
+                "check [run].state_dir and the permissions of its parent",
+            )
+        self.assertFalse(self.root.exists(), "nothing was created")
+
+    @unittest.skipIf(os.geteuid() == 0, "root creates directories under a mode-500 root")
+    def test_a_subdirectory_that_cannot_be_created_names_itself_under_the_root(self):
+        self.root.mkdir()
+        self._lock(self.root, 0o500)
+        with self.assertRaises(ConfigError) as ctx:
+            self.store().dir("sandbox")
+        self.assertEqual(
+            str(ctx.exception),
+            f"{self.root / 'sandbox'} under the state directory {self.root} cannot be created "
+            "(Permission denied); check [run].state_dir and the permissions of its parent",
+        )
 
 
 class ConfigPathsFailClosedTests(unittest.TestCase):

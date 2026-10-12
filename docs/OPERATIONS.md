@@ -97,7 +97,14 @@ executable bit is what is missing; a wrong binary format is only seen when the
 start itself fails, and is the same 3. A model role command that cannot be
 started is reported the same way: `doctor` lists it as a `PROBLEM`, `daily`
 refuses with `ConfigError` before any model call, and a start that fails
-mid-run is a transient failure of that role, never an internal error.
+mid-run is a transient failure of that role, never an internal error. The
+definition files and the state directory are held to the same rule: a config
+file or an enabled rubric that exists but cannot be read, or is not UTF-8, is a
+`ConfigError` naming the file and the reason, and a `[run].state_dir` that
+cannot be created (a read-only parent, a mount that refuses) is a
+`ConfigError` naming the directory and the config key; `doctor` lists the
+uncreatable state directory as a `PROBLEM` and still produces the rest of its
+report, `daily` and `candidates` refuse with exit 3.
 
 ## The daily pass
 

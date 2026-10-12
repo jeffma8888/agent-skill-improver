@@ -398,13 +398,32 @@ def _base_dir_for(config_path: Path, run_table: Mapping[str, Any]) -> Path:
     return parent.resolve()
 
 
+def _read_utf8_or_refuse(path: Path, *, what: str) -> str:
+    """Read a definition file as UTF-8 text, or say why it cannot be read.
+
+    ``is_file`` has already passed when this runs, so the file exists; what can
+    still fail is the read itself (a mode the process cannot open, a directory
+    that lost its execute bit on the way) or the decode. Measured before this
+    helper: a config file at mode 000 ended ``doctor`` as an internal error with
+    a traceback, the one exit code that is meant to signal a bug in this tool.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"{what} {path} is not UTF-8 text ({exc.reason} at byte {exc.start})"
+        ) from exc
+    except OSError as exc:
+        raise ConfigError(f"{what} {path} cannot be read ({exc.strerror or exc})") from exc
+
+
 def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None) -> Config:
     """Load and validate a config file. Raises :class:`ConfigError`."""
     config_path = Path(path).expanduser().resolve()
     if not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
     try:
-        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        raw = tomllib.loads(_read_utf8_or_refuse(config_path, what="config file"))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{config_path}: invalid TOML: {exc}") from exc
 
@@ -776,10 +795,11 @@ def _load_rubrics(
         raise ConfigError("[rubrics].enabled must be a non-empty list of rubric ids")
     rubrics: list[Rubric] = []
     for rubric_id in enabled:
-        path = directory / f"{rubric_id}.toml"
+        # Resolved so a message about it names one real path, not `config/../rubrics`.
+        path = (directory / f"{rubric_id}.toml").resolve()
         if not path.is_file():
             raise ConfigError(f"rubric {rubric_id!r} not found at {path}")
-        text = path.read_text(encoding="utf-8")
+        text = _read_utf8_or_refuse(path, what=f"rubric {rubric_id!r}")
         try:
             parsed = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:

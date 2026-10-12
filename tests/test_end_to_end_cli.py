@@ -1127,6 +1127,57 @@ class ARoleCommandThatCannotStartIsAConfigProblemTests(unittest.TestCase):
         )
 
 
+class AStateDirectoryThatCannotBeCreatedIsAConfigProblemTests(unittest.TestCase):
+    """Measured before: with ``[run].state_dir`` under a mode-555 parent,
+    ``doctor``, ``daily`` and ``candidates`` all exited 70 with a
+    PermissionError traceback from the first ``mkdir``.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        config_path = build_env(self.base, seed="uncreatable-state")
+        self.locked = self.base / "locked"
+        self.locked.mkdir()
+        self.state_dir = self.locked / "state"
+        text = config_path.read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.startswith("state_dir = ")]
+        assert len(lines) == 1, lines
+        config_path.write_text(
+            text.replace(lines[0], f"state_dir = {json.dumps(str(self.state_dir))}"),
+            encoding="utf-8",
+        )
+        self.cfg = ["--config", str(config_path)]
+        os.chmod(self.locked, 0o555)
+        self.addCleanup(os.chmod, self.locked, 0o755)
+        self.expected = (
+            f"the state directory {self.state_dir} cannot be created (Permission denied); "
+            "check [run].state_dir and the permissions of its parent"
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root creates directories under a mode-555 parent")
+    def test_doctor_reports_the_problem_and_the_other_commands_refuse_by_name(self):
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        report = json.loads(doctor.stdout)
+        self.assertIn(self.expected, report["problems"])
+        # The rest of the report was still produced: the finding did not
+        # pre-empt the verdict.
+        self.assertIn("skill_roots", report)
+        self.assertNotIn("Traceback", doctor.stderr)
+        for command in (["daily", "--commit", "--day", "2026-01-01"], ["candidates"]):
+            with self.subTest(command=command[0]):
+                proc = run_cli([*self.cfg, "--json", *command])
+                self.assertEqual(proc.returncode, RC_REFUSED, proc.stderr)
+                self.assertIn(f"ConfigError: {self.expected}", proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(self.state_dir.exists(), "nothing was created")
+        os.chmod(self.locked, 0o755)
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertNotIn(self.expected, json.loads(doctor.stdout)["problems"])
+
+
 class ADirectoryThePayloadInventoryCannotListIsReportedTests(unittest.TestCase):
     """Measured before: ``scripts/`` at mode 000 beside ``tdd/SKILL.md`` gave
     ``skills`` a document with no payload warning and ``doctor`` a report of

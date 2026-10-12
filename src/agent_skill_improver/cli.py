@@ -393,7 +393,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # The isolation decision comes BEFORE anything touches the source, so
     # `doctor` on a host with no sandbox mechanism reports the refusal rather
     # than a preflight result that implies the run could proceed.
-    runner = build_runner(config, None if layout_problems else state)
+    # A state directory that cannot be created is a finding for this report
+    # too, not a refusal that pre-empts it: the runner is built without a
+    # scratch root and the rest of the checks still run.
+    try:
+        runner = build_runner(config, None if layout_problems else state)
+    except ConfigError as exc:
+        problems.append(str(exc))
+        runner = build_runner(config, None)
     isolation = decide_isolation(
         source_kind=config.source.kind,
         runner_isolation=runner.isolation(),
