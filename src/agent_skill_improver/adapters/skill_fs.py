@@ -194,7 +194,25 @@ class FilesystemSkillStore:
             for skill_file in self._iter_skill_files(
                 base, root_id=root.id, passed_over=passed_over
             ):
-                found.append(self._snapshot(root, base, skill_file))
+                # The bytes are taken here so that a document the walk saw but
+                # this process cannot read (mode 000, or gone between the
+                # listing and the read) is passed over with its reason, like a
+                # fifo or a dangling link. This covers the discovery read; the
+                # propose stage reads the canonical copy again later. Measured
+                # before: one unreadable SKILL.md ended `doctor` and `daily`
+                # alike with exit 70 and a PermissionError traceback from here.
+                try:
+                    raw = skill_file.read_bytes()
+                except OSError as exc:
+                    passed_over.append(
+                        PassedOverDocument(
+                            root.id,
+                            skill_file,
+                            f"a document this process cannot read ({exc.strerror or exc})",
+                        )
+                    )
+                    continue
+                found.append(self._snapshot(root, base, skill_file, raw))
         found.sort(key=lambda s: (s.skill_id, s.root_id))
         self._snapshot_cache = found
         self._passed_over = passed_over
@@ -909,8 +927,7 @@ class FilesystemSkillStore:
                 continue
         return tuple(found)
 
-    def _snapshot(self, root: SkillRoot, base: Path, skill_file: Path) -> SkillSnapshot:
-        raw = skill_file.read_bytes()
+    def _snapshot(self, root: SkillRoot, base: Path, skill_file: Path, raw: bytes) -> SkillSnapshot:
         undecodable: list[str] = []
         try:
             text = raw.decode("utf-8")

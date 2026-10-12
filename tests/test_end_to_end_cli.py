@@ -779,6 +779,38 @@ class PassedOverDocumentsReachTheOperatorTests(unittest.TestCase):
         self.assertNotIn("alias", [ln.split("  ")[0] for ln in lines], "the link was not taken")
 
 
+@unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+class AnUnreadableSkillDocumentDoesNotEndTheRunTests(unittest.TestCase):
+    """Measured before: one ``SKILL.md`` at mode 000 ended ``doctor`` and
+    ``daily --commit`` alike with exit 70 and a ``PermissionError`` traceback
+    from inside discovery. It is passed over with its reason now, like a fifo.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, seed="unreadable-skill"))]
+        self.target = self.base / "skills-canonical" / "code-review" / "SKILL.md"
+        os.chmod(self.target, 0o000)
+        self.addCleanup(os.chmod, self.target, 0o644)  # runs before the directory goes
+
+    def test_doctor_warns_and_daily_completes(self):
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual(
+            {d["path"]: d["reason"] for d in payload["skill_documents_passed_over"]},
+            {str(self.target): "a document this process cannot read (Permission denied)"},
+        )
+        self.assertEqual(payload["skills_discovered"], 3)
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        self.assertNotIn("Traceback", daily.stderr)
+        self.assertIn(json.loads(daily.stdout)["status"], ("ok", "partial"))
+        self.assertEqual(os.stat(self.target).st_mode & 0o777, 0, "untouched")
+
+
 class AnUnreadableCandidateRecordIsNamedNotDroppedTests(unittest.TestCase):
     """One validated candidate, then its record is truncated on disk.
 

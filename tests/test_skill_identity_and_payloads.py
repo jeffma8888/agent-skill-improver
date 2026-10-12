@@ -700,6 +700,27 @@ class PassedOverDocumentsAreReportedTests(Harness):
         self.assertEqual([d.root_id for d in store.passed_over()], ["canonical"])
         self.assertNotIn("gone", {s.skill_id for s in store.snapshots()})
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_document_this_process_cannot_read_is_passed_over_not_fatal(self):
+        # Measured before: PermissionError out of discovery, so `doctor` and
+        # `daily` both ended with exit 70 and a traceback for one such file.
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        os.chmod(target, 0o000)
+        try:
+            store = self.store()
+            self.assertEqual(
+                self.passed_over(store),
+                {"shared/SKILL.md": "a document this process cannot read (Permission denied)"},
+            )
+            self.assertEqual(
+                sorted(s.skill_id for s in store.snapshots()),
+                ["broken", "mirror-only", "shared"],
+                "the mirror copy of shared is still inventoried",
+            )
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0, "the mode is not ours to change")
+        finally:
+            os.chmod(target, 0o644)
+
     def test_a_dangling_link_is_enumerated_whatever_the_glob_implementation_does(self):
         """On Python 3.11 ``Path.rglob("SKILL.md")`` drops an entry whose
         ``exists()`` is false, so the dangling link was never seen at all; the
