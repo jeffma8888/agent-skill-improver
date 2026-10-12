@@ -345,7 +345,12 @@ The interlock is structural, not a flag:
   the write (a temp file created and renamed relative to that handle) and the
   verifying re-read all concern the directory that was checked, and a directory
   swapped for a link after the walk is simply not what the handle refers to.
-  `rollback` restores through the same handle. Two limits, stated rather than
+  `rollback` restores through the same handle. Every other read of the document
+  (the base `review` and `apply` hash, the base the improver and the validation
+  see) goes through the store's `read_text`, which opens the leaf `O_NOFOLLOW`
+  and `O_NONBLOCK` and refuses a link or a non-regular file on the handle, so a
+  token is never shown for a target the write would refuse and a fifo at the
+  document is a refusal rather than a wait. Two limits, stated rather than
   hidden: the write is pinned but the *recorded path* is not, so after such a
   swap the manifest names what is now a link and `rollback` refuses it (the
   moved real file is intact; restoring it is a manual `cp`); and the root is

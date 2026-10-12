@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..config import ROLE_IMPROVER, ROLE_SCORER, PromptConfig
 from ..domain.redaction import credential_labels
@@ -178,8 +178,14 @@ def propose_candidate(
     created_at: str,
     protected_skill_ids: Sequence[str] = (),
     max_cases: int = 6,
+    read_text: Callable[[Path], str] | None = None,
 ) -> Candidate:
-    """Ask the improver for a replacement and wrap it in a reviewable candidate."""
+    """Ask the improver for a replacement and wrap it in a reviewable candidate.
+
+    ``read_text`` is the skill store's read when the caller has one, so the
+    base the improver sees is read with the same refusals (a link, a fifo) as
+    the base ``review`` and ``apply`` check against later.
+    """
     if group.canonical is None:
         raise RecordDefect(
             f"skill {group.skill_id!r} has no canonical editable copy ({group.canonical_reason}); "
@@ -192,7 +198,11 @@ def propose_candidate(
             "a proposal target"
         )
     canonical = group.canonical
-    base_text = Path(canonical.path).read_text(encoding="utf-8")
+    base_text = (
+        read_text(Path(canonical.path))
+        if read_text is not None
+        else Path(canonical.path).read_text(encoding="utf-8")
+    )
     found = credential_labels(base_text)
     if found:
         # The transcript is redacted before any model sees it; the skill text

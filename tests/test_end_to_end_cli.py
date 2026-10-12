@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -344,6 +345,71 @@ def _tree_snapshot(*roots: Path) -> dict[str, str]:
             body = "dir" if p.is_dir() else f"{sha256_file(p)} {st.st_mtime_ns}"
             out[key] = f"{body} {mode}"
     return out
+
+
+class ReviewRefusesWhatApplyWouldRefuseTests(unittest.TestCase):
+    """One validated candidate, then its target is replaced under it.
+
+    Measured before the store judged its own reads: with the document swapped
+    for a link to an identical copy, ``review`` exited 0 and printed a token,
+    and ``apply`` with that token exited 3 (``LinkedTargetRefused``); with a
+    fifo at the document, ``review`` never returned. A token for an apply that
+    will be refused is a broken promise, and a command that never returns is
+    worse, so both are now the same refusal ``apply`` would give, before any
+    token is shown.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name).resolve()
+        cls.cfg = ["--config", str(build_env(cls.base, dry_run=False, seed="swap-seed"))]
+        proc = run_cli([*cls.cfg, "--json", "daily", "--commit", "--day", "2026-04-01"])
+        assert proc.returncode == RC_OK, proc.stderr
+        payload = json.loads(proc.stdout)
+        validated = [c["candidate_id"] for c in payload["candidates"] if c["status"] == "validated"]
+        assert validated, payload.get("notes")
+        cls.candidate_id = validated[0]
+        cls.skill = cls.base / "skills-canonical" / "tdd" / "SKILL.md"
+        cls.original = cls.skill.read_text(encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def setUp(self) -> None:
+        if self.skill.is_symlink() or not self.skill.is_file():
+            self.skill.unlink()
+            self.skill.write_text(self.original, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.setUp()
+
+    def test_a_document_swapped_for_a_link_gets_no_token_at_review(self):
+        aside = self.base / "identical-copy.md"
+        aside.write_text(self.original, encoding="utf-8")
+        self.skill.unlink()
+        self.skill.symlink_to(aside)
+        proc = run_cli([*self.cfg, "--json", "review", self.candidate_id])
+        self.assertEqual(proc.returncode, RC_REFUSED, proc.stderr)
+        self.assertIn("LinkedTargetRefused", proc.stderr)
+        self.assertNotIn("approval_token", proc.stdout)
+        self.assertEqual(aside.read_text(encoding="utf-8"), self.original)
+
+    def test_a_fifo_at_the_document_is_a_prompt_refusal_not_a_hang(self):
+        self.skill.unlink()
+        os.mkfifo(self.skill)
+        started = time.monotonic()
+        proc = run_cli([*self.cfg, "--json", "review", self.candidate_id])
+        self.assertLess(time.monotonic() - started, 60.0)
+        self.assertEqual(proc.returncode, RC_REFUSED, proc.stderr)
+        self.assertIn("BaseHashMismatch", proc.stderr)
+        self.assertNotIn("approval_token", proc.stdout)
+
+    def test_the_control_the_restored_document_reviews_with_a_token(self):
+        proc = run_cli([*self.cfg, "--json", "review", self.candidate_id])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        self.assertTrue(json.loads(proc.stdout)["approval_token"])
 
 
 class ReadOnlyCommandsTests(unittest.TestCase):

@@ -587,7 +587,12 @@ def _propose_and_validate(
                 created_at=iso(_now(state)),
                 protected_skill_ids=config.protected_skill_ids,
                 max_cases=config.caps.max_failures_per_candidate,
+                read_text=skill_store.read_text,
             )
+            # The base the validation replays against, read through the store
+            # so that a link or a fifo at the target is the same deliberate
+            # refusal here as it is at review and apply, not an aborted run.
+            base_text = skill_store.read_text(candidate.target.canonical_path)
         except SafetyRefusal as exc:
             # A deliberate policy refusal is NOT a defect, and it must not land in
             # the quarantine count. A counter that sums "this record is broken" with
@@ -621,7 +626,6 @@ def _propose_and_validate(
             )
             continue
 
-        base_text = skill_store.read_text(candidate.target.canonical_path)
         targets = {(r.conversation_id, r.criterion_id) for r in candidate.rubric_failures}
         holdouts = [p for p in dict.fromkeys(holdout_pairs) if p not in targets]
         try:

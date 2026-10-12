@@ -206,7 +206,54 @@ class FilesystemSkillStore:
         return f"{snapshot.skill_id}/{snapshot.path.name}"
 
     def read_text(self, path: Path) -> str:
-        return Path(path).read_text(encoding="utf-8")
+        """The document's text, judged the way the write path judges it.
+
+        This read decides whether ``review`` shows a token and whether ``apply``
+        accepts the base, so it must not accept what the write will refuse.
+        Measured before this method opened the file itself: a target replaced by
+        a link to an identical copy made ``review`` print a token for an apply
+        that then refused the link, and a fifo at the target parked ``review``
+        for good. The leaf is opened ``O_NOFOLLOW`` (a link is a refusal, not a
+        read of its target) and ``O_NONBLOCK`` (a fifo opens instead of
+        waiting for a writer), then judged on the open handle: anything but a
+        regular file is refused. A file that is simply missing stays an
+        ``OSError`` for the caller to name. Line endings are folded to ``\n``
+        as the text-mode read before it did, so a CRLF document still reviews
+        as the lines that changed rather than as every line.
+        """
+        target = Path(path)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if not nofollow and target.is_symlink():
+            raise LinkedTargetRefused(
+                f"refusing to read {target}: the document is a symbolic link, which the write "
+                f"path would refuse to replace, so nothing may be shown or approved against it."
+            )
+        flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(str(target), flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise LinkedTargetRefused(
+                    f"refusing to read {target}: the document is a symbolic link, which the "
+                    f"write path would refuse to replace, so nothing may be shown or approved "
+                    f"against it."
+                ) from exc
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BaseHashMismatch(
+                    f"refusing to read {target}: the document is not a regular file, so there "
+                    f"is no base text to show or to verify against. Nothing was touched."
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+        return normalize_text(b"".join(chunks).decode("utf-8"))
 
     # -- write path ------------------------------------------------------
     def write_canonical(
@@ -629,7 +676,9 @@ class FilesystemSkillStore:
         whatever it points to.
         """
         try:
-            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            fd = os.open(
+                leaf, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd
+            )
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise LinkedTargetRefused(
@@ -699,6 +748,10 @@ class FilesystemSkillStore:
             if len(rel.parts) > self._max_depth:
                 continue
             if candidate.is_symlink() and not self._follow_symlinks:
+                continue
+            # A fifo or a device named like a document is not one: reading it
+            # would wait forever or read nonsense. Judged by stat, not by open.
+            if not candidate.is_file():
                 continue
             found.append(candidate)
         return found

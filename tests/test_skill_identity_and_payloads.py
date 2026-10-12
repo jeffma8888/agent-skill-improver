@@ -12,8 +12,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -538,6 +541,84 @@ class WritesArePinnedToTheDirectoryHandleTests(Harness):
         self.assertEqual(oct(mode), oct(0o640))
         leftovers = [p.name for p in target.parent.iterdir() if p.name.startswith(".tmp-")]
         self.assertEqual(leftovers, [], "no temp file survives the rename")
+
+
+@contextmanager
+def deadline(seconds: float) -> Iterator[None]:
+    """Fail, rather than hang the suite, if the body blocks in a syscall.
+
+    A fifo with no writer blocks ``open`` for good, and no thread can interrupt
+    that; an interval timer on the main thread can. Measured: without this
+    guard the two fifo tests below hung the whole suite against the code they
+    were written to catch.
+    """
+    if not hasattr(signal, "setitimer"):  # pragma: no cover - POSIX only
+        yield
+        return
+
+    def expired(signum: int, frame: object) -> None:
+        raise AssertionError(f"blocked for more than {seconds}s; a fifo is being waited on")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+class BaseReadsAreJudgedLikeWritesTests(Harness):
+    """``read_text`` is the read that decides whether ``review`` prints a token
+    and whether ``apply`` accepts the base, so it must refuse what the write
+    path refuses. Measured before it opened the file itself: a document replaced
+    by a link to an identical copy made ``review`` print a token for an apply
+    that then refused the link, and a fifo at the document parked ``review``
+    indefinitely. Discovery is covered too: a fifo named like a document is
+    not a document and is not inventoried, so ``daily`` and ``doctor`` do not
+    wait on it either.
+    """
+
+    def test_a_linked_document_is_refused_on_read_as_it_would_be_on_write(self):
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        aside = self.base / "identical-copy.md"
+        aside.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        target.unlink()
+        target.symlink_to(aside)
+        with self.assertRaises(LinkedTargetRefused) as ctx:
+            self.store().read_text(target)
+        self.assertIn("symbolic link", str(ctx.exception))
+        self.assertEqual(aside.read_text(encoding="utf-8"), GOOD, "the target was not touched")
+
+    def test_a_fifo_at_the_document_is_refused_on_read_rather_than_waited_on(self):
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        target.unlink()
+        os.mkfifo(target)
+        with deadline(5.0), self.assertRaises(BaseHashMismatch) as ctx:
+            self.store().read_text(target)
+        self.assertIn("not a regular file", str(ctx.exception))
+
+    def test_a_fifo_named_like_a_document_is_not_discovered(self):
+        fifo_dir = self.canonical_dir / "fifo-skill"
+        fifo_dir.mkdir()
+        os.mkfifo(fifo_dir / SKILL_FILENAME)
+        with deadline(5.0):
+            ids = self.store().known_skill_ids()
+        self.assertNotIn("fifo-skill", ids)
+        self.assertIn("shared", ids, "regular documents are still discovered")
+
+    def test_a_crlf_document_still_reads_with_folded_line_endings(self):
+        """The text-mode read this replaces folded ``\r\n``; so does this one,
+        or a Windows-authored skill would review as every line changed."""
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        target.write_bytes(GOOD.replace("\n", "\r\n").encode("utf-8"))
+        self.assertEqual(self.store().read_text(target), GOOD)
+
+    def test_the_controls_a_regular_document_reads_whole_and_a_missing_one_is_an_os_error(self):
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        self.assertEqual(self.store().read_text(target), GOOD)
+        with self.assertRaises(FileNotFoundError):
+            self.store().read_text(self.canonical_dir / "absent" / SKILL_FILENAME)
 
 
 class BackupWriteSafetyTests(Harness):
