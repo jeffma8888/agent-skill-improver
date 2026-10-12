@@ -45,10 +45,11 @@ from agent_skill_improver.app.state import (
     UnreadableRecord,
 )
 from agent_skill_improver.clock import FrozenClock
-from agent_skill_improver.errors import SafetyRefusal
+from agent_skill_improver.errors import SafetyRefusal, StateUnreadable
 from agent_skill_improver.jsonio import FILE_MODE, write_json, write_text_atomic
 
 from tests.support import build_env, run_cli
+from tests.test_candidate_integrity import build_candidate
 
 
 def mode_of(path: Path) -> int:
@@ -699,6 +700,28 @@ class UnreadableCandidateRecordsAreNamedTests(StateTreeHarness):
         scan = store.scan_candidates()
         self.assertEqual((scan.readable, scan.unreadable), ((), ()))
         self.assertEqual(store.foreign_entries(), ["candidates/planted.json is a symlink"])
+
+    def test_a_record_whose_filename_is_not_derived_from_its_id_is_unreadable_by_the_same_rule_as_read(
+        self,
+    ):
+        store = self.store()
+        store.ensure()
+        folder = store.dir("candidates")
+        candidate = build_candidate(candidate_id="CAND-2026-01-01-01-tdd")
+        write_json(folder / "CAND-2026-01-01-01-tdd.json", candidate.to_dict())
+        write_json(folder / "CAND-2026-01-01-09-tdd.json", candidate.to_dict())
+        scan = store.scan_candidates()
+        self.assertEqual([c.id for c in scan.readable], ["CAND-2026-01-01-01-tdd"])
+        self.assertEqual([u.path.name for u in scan.unreadable], ["CAND-2026-01-01-09-tdd.json"])
+        reason = scan.unreadable[0].reason
+        self.assertIn("declares id 'CAND-2026-01-01-01-tdd'", reason)
+        self.assertIn("does not derive this filename", reason)
+        with self.assertRaises(StateUnreadable) as refused:
+            store.read_candidate("CAND-2026-01-01-09-tdd")
+        self.assertIn("declares id 'CAND-2026-01-01-01-tdd'", str(refused.exception))
+        self.assertEqual(
+            store.read_candidate("CAND-2026-01-01-01-tdd").id, "CAND-2026-01-01-01-tdd"
+        )
 
     def test_the_control_an_empty_queue_scans_to_nothing_on_either_side(self):
         store = self.store()

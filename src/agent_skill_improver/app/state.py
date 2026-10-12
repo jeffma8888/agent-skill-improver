@@ -448,9 +448,11 @@ class StateStore:
         The id is the only thing the operator typed, and the record is a plain
         file: the file the id resolves to must therefore also *claim* that id, or
         a promotion would be reviewed under one name and applied to another. The
-        binding is checked in both directions -- the record's own id, and the
-        filename derived from it -- because ``safe_name`` is lossy, so two ids can
-        share one path.
+        path is ``<id>.json`` exactly (``candidate_path`` validates the id and
+        applies no lossy renaming), so a record whose declared id matches the
+        requested one is by construction the file its own name derives; the
+        listing applies the same binding from the other side, in
+        ``scan_candidates``.
 
         A record that cannot be parsed is a refusal with a reason rather than a
         ``KeyError`` or a ``JSONDecodeError`` from the middle of a promotion.
@@ -464,11 +466,6 @@ class StateStore:
                 f"refusing to use {path} as candidate {candidate_id!r}: the record it holds "
                 f"declares id {candidate.id!r}. A candidate is reviewed and approved by id, so "
                 "a record that does not claim the id it was looked up by cannot be acted on."
-            )
-        if path.name != f"{candidate.id}.json":
-            raise StateUnreadable(
-                f"refusing to use {path} as candidate {candidate_id!r}: the record's id "
-                f"{candidate.id!r} does not derive this filename."
             )
         return candidate
 
@@ -492,9 +489,27 @@ class StateStore:
             if path.is_symlink() or not path.is_file():
                 continue
             try:
-                readable.append(_candidate_from_file(path))
+                candidate = _candidate_from_file(path)
             except StateUnreadable as exc:
                 unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
+                continue
+            # The same binding ``read_candidate`` enforces: a record is looked up
+            # by the id it declares, so one whose filename is not derived from
+            # that id can be listed but never opened. Measured before: such a
+            # record was listed as a validated candidate, ``review`` of the
+            # listed id answered "no candidate", ``review`` of the filename was
+            # refused, ``doctor`` was clean, and the skill stayed capped by an
+            # open candidate nobody could reach.
+            misnamed = _name_binding_problem(path, candidate)
+            if misnamed:
+                unreadable.append(
+                    UnreadableRecord(
+                        path=path,
+                        reason=f"refusing to count the candidate record {path}: {misnamed}",
+                    )
+                )
+                continue
+            readable.append(candidate)
         return CandidateScan(readable=tuple(readable), unreadable=tuple(unreadable))
 
     def list_candidates(self) -> list[Candidate]:
@@ -762,6 +777,24 @@ def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise StateUnreadable(f"refusing to use the {what} record {path}: it is not a JSON object.")
     return raw
+
+
+def _name_binding_problem(path: Path, candidate: Candidate) -> str | None:
+    """Why ``path`` may not stand for ``candidate``, or None when its name derives from the id.
+
+    The listing's side of the binding ``read_candidate`` enforces from the id:
+    there, the path is built from the requested id and the record must claim
+    it; here, the record is found first and its name must be the one that id
+    would build.
+    """
+    if path.name == f"{candidate.id}.json":
+        return None
+    return (
+        f"the record declares id {candidate.id!r}, which does not derive this filename. A "
+        "candidate is reviewed, counted and approved by id, so a record that cannot be found "
+        "by the id it claims is neither reviewable nor countable; rename it to "
+        f"{candidate.id}.json if it is genuine, or move it out of the state tree."
+    )
 
 
 def _candidate_from_file(path: Path) -> Candidate:

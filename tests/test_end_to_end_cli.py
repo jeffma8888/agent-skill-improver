@@ -856,6 +856,78 @@ class AnUnreadableCandidateRecordIsNamedNotDroppedTests(unittest.TestCase):
         self.assertEqual(receipt["candidates"], [], "no competitor for tdd")
 
 
+class AMisnamedCandidateRecordIsUnreachableAndSaysSoTests(unittest.TestCase):
+    """A validated record copied under a filename its id does not derive.
+
+    Measured before: ``candidates`` listed it as ``validated gate=pass`` under
+    the id it declares, ``review`` of that id exited 4 (``no candidate``),
+    ``review`` of the filename's id was refused, ``doctor`` was clean, and
+    every later ``daily`` counted it as the one open ``tdd`` candidate, so the
+    skill was capped by a record nobody could open. The listing now applies the
+    rule ``review`` applies, and the record is named with the remedy.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name).resolve()
+        cls.cfg = ["--config", str(build_env(cls.base, dry_run=False, seed="misnamed"))]
+        proc = run_cli([*cls.cfg, "--json", "daily", "--commit", "--day", "2026-06-01"])
+        assert proc.returncode == RC_OK, proc.stderr
+        validated = [c for c in json.loads(proc.stdout)["candidates"] if c["status"] == "validated"]
+        assert validated and validated[0]["skill_id"] == "tdd", proc.stdout
+        cls.declared_id = validated[0]["candidate_id"]
+        genuine = cls.base / "state" / "candidates" / f"{cls.declared_id}.json"
+        cls.misnamed = genuine.with_name("CAND-2026-06-01-09-tdd.json")
+        genuine.rename(cls.misnamed)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_the_listing_names_the_record_with_both_names_and_lists_no_candidate(self):
+        payload = json.loads(run_cli([*self.cfg, "--json", "candidates", "--all"]).stdout)
+        self.assertEqual(payload["candidates"], [])
+        self.assertEqual([u["path"] for u in payload["unreadable"]], [str(self.misnamed)])
+        reason = payload["unreadable"][0]["reason"]
+        self.assertIn(f"declares id '{self.declared_id}'", reason)
+        self.assertIn(f"rename it to {self.declared_id}.json", reason)
+        text = run_cli([*self.cfg, "candidates", "--all"]).stdout
+        self.assertIn(f"UNREADABLE  {self.misnamed.name}  ", text)
+        self.assertNotIn(f"{self.declared_id}  validated", text)
+
+    def test_review_by_either_name_is_a_refusal_the_listing_already_predicted(self):
+        by_declared = run_cli([*self.cfg, "review", self.declared_id])
+        self.assertEqual(by_declared.returncode, RC_MISSING_FILE, by_declared.stderr)
+        by_filename = run_cli([*self.cfg, "review", "CAND-2026-06-01-09-tdd"])
+        self.assertEqual(by_filename.returncode, RC_REFUSED, by_filename.stderr)
+        self.assertIn(f"declares id '{self.declared_id}'", by_filename.stderr)
+        self.assertNotIn("approval_token", by_declared.stdout + by_filename.stdout)
+
+    def test_doctor_and_daily_treat_it_as_the_unreadable_record_it_is(self):
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, 1, doctor.stderr)
+        self.assertEqual(
+            [u["path"] for u in json.loads(doctor.stdout)["candidate_records_unreadable"]],
+            [str(self.misnamed)],
+        )
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-06-02"])
+        receipt = json.loads(daily.stdout)
+        self.assertEqual(receipt["status"], "stood-down", receipt)
+        self.assertIn(self.misnamed.name, receipt["stand_down_reason"])
+        self.assertEqual(receipt["counts"]["candidate_records_unreadable"], 1)
+        self.assertTrue(self.misnamed.is_file(), "left where it was")
+
+    def test_zz_the_control_renamed_back_it_is_the_one_open_candidate_again(self):
+        genuine = self.misnamed.with_name(f"{self.declared_id}.json")
+        self.misnamed.rename(genuine)
+        payload = json.loads(run_cli([*self.cfg, "--json", "candidates"]).stdout)
+        self.assertEqual([c["id"] for c in payload["candidates"]], [self.declared_id])
+        self.assertEqual(payload["unreadable"], [])
+        review = run_cli([*self.cfg, "--json", "review", self.declared_id])
+        self.assertEqual(review.returncode, RC_OK, review.stderr)
+
+
 class ReadOnlyCommandsTests(unittest.TestCase):
     """README's command table says `skills`, `rubrics`, `discover`, `candidates`,
     `review` and `scheduler-template` write nothing. Measured through the real
