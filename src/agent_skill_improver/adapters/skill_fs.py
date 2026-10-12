@@ -114,6 +114,44 @@ def _write_pinned(parent_fd: int, leaf: str, data: bytes, *, mode: int) -> None:
         raise
 
 
+def _entry_kind(path: Path) -> str:
+    """What a non-regular entry is, by stat, for a report line."""
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return "unreadable"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a fifo"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+        return "a device"
+    return "neither a file nor a directory"
+
+
+@dataclass(frozen=True)
+class PassedOverDocument:
+    """A ``SKILL.md`` discovery saw and did not take, with the reason.
+
+    Discovery steps over a link (unless the store follows links), a link that
+    resolves outside its root, a document deeper than ``max_depth`` and
+    anything that is not a regular file (a dangling link, a fifo, a device).
+    Each is the right refusal, and each used to be silent: ``doctor`` said
+    ``ready`` and ``skills`` listed nothing for a tree whose only ``SKILL.md``
+    was a dangling link, so the operator could not tell a skipped skill from
+    an absent one.
+    """
+
+    root_id: str
+    path: Path
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"root_id": self.root_id, "path": str(self.path), "reason": self.reason}
+
+
 class FilesystemSkillStore:
     """Discovers and (only when explicitly writable) edits skill files."""
 
@@ -132,6 +170,7 @@ class FilesystemSkillStore:
         self._max_depth = max_depth
         self._follow_symlinks = follow_symlinks
         self._snapshot_cache: list[SkillSnapshot] | None = None
+        self._passed_over: list[PassedOverDocument] = []
 
     # -- discovery -------------------------------------------------------
     def roots(self) -> Sequence[SkillRoot]:
@@ -147,15 +186,25 @@ class FilesystemSkillStore:
         if self._snapshot_cache is not None and not refresh:
             return list(self._snapshot_cache)
         found: list[SkillSnapshot] = []
+        passed_over: list[PassedOverDocument] = []
         for root in self._roots:
             if not root.path.is_dir():
                 continue
             base = root.path.resolve()
-            for skill_file in self._iter_skill_files(base):
+            for skill_file in self._iter_skill_files(
+                base, root_id=root.id, passed_over=passed_over
+            ):
                 found.append(self._snapshot(root, base, skill_file))
         found.sort(key=lambda s: (s.skill_id, s.root_id))
         self._snapshot_cache = found
+        self._passed_over = passed_over
         return list(found)
+
+    def passed_over(self, *, refresh: bool = False) -> list[PassedOverDocument]:
+        """Every ``SKILL.md`` the last discovery saw and did not take."""
+        if self._snapshot_cache is None or refresh:
+            self.snapshots(refresh=refresh)
+        return list(self._passed_over)
 
     def groups(self, *, refresh: bool = False) -> list[SkillGroup]:
         return resolve_groups(self.snapshots(refresh=refresh), self._roots)
@@ -748,23 +797,75 @@ class FilesystemSkillStore:
                 "target is refused rather than assumed safe."
             )
 
-    def _iter_skill_files(self, base: Path) -> list[Path]:
+    @staticmethod
+    def _entries_named_like_a_document(
+        base: Path, *, unlistable: list[tuple[Path, str]] | None = None
+    ) -> list[Path]:
+        """Every entry below ``base`` named ``SKILL.md``, whatever it is.
+
+        ``os.walk`` rather than ``rglob``: on Python 3.11 a glob with a literal
+        last component drops any entry whose ``exists()`` is false, so a
+        dangling link named ``SKILL.md`` was never seen, and what is never seen
+        cannot be reported. Links to directories are not descended (the same
+        as ``rglob``), but a link or a directory that carries the document's
+        name is still an entry here, so it can be judged and named. A
+        directory the walk cannot list is appended to ``unlistable`` with the
+        error, instead of being stepped over in silence one level up.
+        """
         found: list[Path] = []
-        for candidate in sorted(base.rglob(SKILL_FILENAME)):
+
+        def could_not_list(error: OSError) -> None:
+            if unlistable is not None:
+                where = Path(error.filename) if error.filename else base
+                unlistable.append((where, error.strerror or type(error).__name__))
+
+        for dirpath, dirnames, filenames in os.walk(
+            base, followlinks=False, onerror=could_not_list
+        ):
+            for name in (*dirnames, *filenames):
+                if name == SKILL_FILENAME:
+                    found.append(Path(dirpath) / name)
+        return sorted(found)
+
+    def _iter_skill_files(
+        self,
+        base: Path,
+        *,
+        root_id: str,
+        passed_over: list[PassedOverDocument],
+    ) -> list[Path]:
+        found: list[Path] = []
+
+        def skip(candidate: Path, reason: str) -> None:
+            passed_over.append(PassedOverDocument(root_id=root_id, path=candidate, reason=reason))
+
+        unlistable: list[tuple[Path, str]] = []
+        entries = self._entries_named_like_a_document(base, unlistable=unlistable)
+        for directory, error in unlistable:
+            skip(directory, f"a directory that could not be listed ({error})")
+        for candidate in entries:
+            is_link = candidate.is_symlink()
+            if is_link and not candidate.exists():
+                skip(candidate, "a symlink whose target does not exist or cannot be reached")
+                continue
             try:
                 rel = candidate.resolve().relative_to(base)
             except ValueError:
                 # Symlink escaping the root. Skipped unless explicitly allowed.
                 if not self._follow_symlinks:
+                    skip(candidate, "a symlink that resolves outside its root")
                     continue
                 rel = Path(candidate.name)
             if len(rel.parts) > self._max_depth:
+                skip(candidate, f"deeper than max_depth={self._max_depth} below the root")
                 continue
-            if candidate.is_symlink() and not self._follow_symlinks:
+            if is_link and not self._follow_symlinks:
+                skip(candidate, "a symlink; this store does not follow links")
                 continue
             # A fifo or a device named like a document is not one: reading it
             # would wait forever or read nonsense. Judged by stat, not by open.
             if not candidate.is_file():
+                skip(candidate, f"not a regular file ({_entry_kind(candidate)})")
                 continue
             found.append(candidate)
         return found

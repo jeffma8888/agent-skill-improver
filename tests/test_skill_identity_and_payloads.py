@@ -667,6 +667,124 @@ class UndecodableDocumentsAreOneDefectNotAFatalityTests(Harness):
         self.assertEqual(self.store().read_text(snapshot.path), GOOD)
 
 
+class PassedOverDocumentsAreReportedTests(Harness):
+    """What discovery steps over is listed with its reason, never silent.
+
+    Measured before: a tree holding a dangling ``SKILL.md`` link, a fifo named
+    ``SKILL.md``, a link to a real document (links not followed) and a document
+    below ``max_depth`` discovered exactly the same skills as the tree without
+    them, ``doctor`` said ``ready`` and ``skills`` listed nothing about any of
+    the four. A skipped skill read as an absent one.
+    """
+
+    def passed_over(self, store: FilesystemSkillStore) -> dict[str, str]:
+        root = self.canonical_dir.resolve()
+        return {d.path.relative_to(root).as_posix(): d.reason for d in store.passed_over()}
+
+    def test_the_control_a_clean_tree_passes_nothing_over(self):
+        store = self.store()
+        self.assertEqual(store.passed_over(), [])
+        self.assertEqual(
+            sorted(s.skill_id for s in store.snapshots()),
+            ["broken", "mirror-only", "shared", "shared"],
+        )
+
+    def test_a_dangling_link_is_named_as_one(self):
+        (self.canonical_dir / "gone").mkdir()
+        (self.canonical_dir / "gone" / SKILL_FILENAME).symlink_to(self.canonical_dir / "nowhere.md")
+        store = self.store()
+        self.assertEqual(
+            self.passed_over(store),
+            {"gone/SKILL.md": "a symlink whose target does not exist or cannot be reached"},
+        )
+        self.assertEqual([d.root_id for d in store.passed_over()], ["canonical"])
+        self.assertNotIn("gone", {s.skill_id for s in store.snapshots()})
+
+    def test_a_dangling_link_is_enumerated_whatever_the_glob_implementation_does(self):
+        """On Python 3.11 ``Path.rglob("SKILL.md")`` drops an entry whose
+        ``exists()`` is false, so the dangling link was never seen at all; the
+        store walks the tree itself so the entry reaches the judgement."""
+        gone = self.canonical_dir / "gone" / SKILL_FILENAME
+        gone.parent.mkdir()
+        gone.symlink_to(self.canonical_dir / "nowhere.md")
+        entries = FilesystemSkillStore._entries_named_like_a_document(self.canonical_dir.resolve())
+        self.assertIn(self.canonical_dir.resolve() / "gone" / SKILL_FILENAME, entries)
+
+    def test_a_directory_carrying_the_documents_name_is_named_as_one(self):
+        (self.canonical_dir / "odd" / SKILL_FILENAME).mkdir(parents=True)
+        self.assertEqual(
+            self.passed_over(self.store()), {"odd/SKILL.md": "not a regular file (a directory)"}
+        )
+
+    def test_a_directory_that_cannot_be_listed_is_named_with_its_error(self):
+        if os.geteuid() == 0:
+            self.skipTest("root lists every directory")
+        sealed = self.canonical_dir / "sealed"
+        write(sealed / SKILL_FILENAME, GOOD)
+        os.chmod(sealed, 0)
+        try:
+            reasons = self.passed_over(self.store())
+        finally:
+            os.chmod(sealed, 0o755)
+        self.assertEqual(list(reasons), ["sealed"])
+        self.assertTrue(
+            reasons["sealed"].startswith("a directory that could not be listed ("), reasons
+        )
+        self.assertIn("ermission", reasons["sealed"])
+
+    def test_a_fifo_is_named_without_being_opened(self):
+        (self.canonical_dir / "pipe").mkdir()
+        os.mkfifo(self.canonical_dir / "pipe" / SKILL_FILENAME)
+        with deadline(20):
+            store = self.store()
+            reasons = self.passed_over(store)
+        self.assertEqual(reasons, {"pipe/SKILL.md": "not a regular file (a fifo)"})
+
+    def test_a_link_to_a_real_document_is_passed_over_only_while_links_are_not_followed(self):
+        (self.canonical_dir / "alias").mkdir()
+        (self.canonical_dir / "alias" / SKILL_FILENAME).symlink_to(
+            self.canonical_dir / "shared" / SKILL_FILENAME
+        )
+        self.assertEqual(
+            self.passed_over(self.store()),
+            {"alias/SKILL.md": "a symlink; this store does not follow links"},
+        )
+        following = FilesystemSkillStore(self.roots, follow_symlinks=True)
+        self.assertEqual(following.passed_over(), [])
+        taken = [s.path for s in following.snapshots()]
+        self.assertIn(self.canonical_dir.resolve() / "alias" / SKILL_FILENAME, taken)
+
+    def test_a_link_that_leaves_its_root_is_named_as_one(self):
+        outside = self.base / "elsewhere" / SKILL_FILENAME
+        write(outside, GOOD)
+        (self.canonical_dir / "escape").mkdir()
+        (self.canonical_dir / "escape" / SKILL_FILENAME).symlink_to(outside)
+        self.assertEqual(
+            self.passed_over(self.store()),
+            {"escape/SKILL.md": "a symlink that resolves outside its root"},
+        )
+
+    def test_a_document_below_max_depth_names_the_limit(self):
+        write(self.canonical_dir / "a" / "b" / "c" / "d" / SKILL_FILENAME, GOOD)
+        store = FilesystemSkillStore(self.roots, max_depth=4)
+        self.assertEqual(
+            self.passed_over(store), {"a/b/c/d/SKILL.md": "deeper than max_depth=4 below the root"}
+        )
+        self.assertEqual(FilesystemSkillStore(self.roots, max_depth=5).passed_over(), [])
+
+    def test_a_refresh_forgets_a_document_that_was_repaired(self):
+        link = self.canonical_dir / "gone" / SKILL_FILENAME
+        link.parent.mkdir()
+        link.symlink_to(self.canonical_dir / "nowhere.md")
+        store = self.store()
+        self.assertEqual(len(store.passed_over()), 1)
+        link.unlink()
+        write(link, GOOD)
+        self.assertEqual(len(store.passed_over()), 1, "cached until asked to refresh")
+        self.assertEqual(store.passed_over(refresh=True), [])
+        self.assertIn("gone", {s.skill_id for s in store.snapshots()})
+
+
 class BackupWriteSafetyTests(Harness):
     """The backup is the only copy of the original; it must land where it says."""
 

@@ -289,6 +289,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         warnings.append("no skill root is marked canonical+editable; proposals will be refused")
     snapshots = store.snapshots()
     broken = [s for s in snapshots if not s.loads]
+    # A document discovery saw and stepped over is a finding, not a silence:
+    # a tree whose only SKILL.md is a dangling link otherwise reads as a tree
+    # with no skills, and this report said "ready" over it.
+    passed_over = store.passed_over()
+    for document in passed_over:
+        warnings.append(
+            f"skill document passed over in root {document.root_id}: {document.path} is "
+            f"{document.reason}"
+        )
     state = build_state(config)
 
     # The layout is judged before anything touches the state tree, the runner's
@@ -395,6 +404,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "skill_roots": [{**r.to_dict(), "exists": r.path.is_dir()} for r in config.skill_roots],
         "skills_discovered": len(store.known_skill_ids()),
         "skills_that_do_not_load": [{"skill_id": s.skill_id, "path": str(s.path)} for s in broken],
+        "skill_documents_passed_over": [d.to_dict() for d in passed_over],
         "skills_with_executable_payloads": [
             {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
             for s in snapshots
@@ -425,7 +435,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"roles        {', '.join(sorted(config.model_roles)) or '<none configured>'}",
         f"skill roots  {len(config.skill_roots)} configured, {len(store.existing_roots())} present",
         f"skills       {len(store.known_skill_ids())} discovered, {len(broken)} do not load, "
-        f"{sum(1 for s in snapshots if s.payload_files)} carry executable payloads",
+        f"{sum(1 for s in snapshots if s.payload_files)} carry executable payloads, "
+        f"{len(passed_over)} passed over",
         f"selection    bounded by {config.selection.fairness_dimension!r}, "
         f"max {config.selection.max_conversations_per_run}/run, round-robin (never a sorted prefix)",
         f"judge        {'independent of the improver' if independence['judge_independent'] else 'NOT independent of the improver'}",
@@ -445,7 +456,11 @@ def cmd_skills(args: argparse.Namespace) -> int:
     config = _load(args)
     store = build_skill_store(config)
     groups = store.groups()
-    payload = {"groups": [g.to_dict() for g in groups]}
+    passed_over = store.passed_over()
+    payload = {
+        "groups": [g.to_dict() for g in groups],
+        "passed_over": [d.to_dict() for d in passed_over],
+    }
     lines = []
     for group in groups:
         canonical = group.canonical
@@ -467,10 +482,15 @@ def cmd_skills(args: argparse.Namespace) -> int:
             label = "" if snapshot is canonical else f" ({snapshot.root_id})"
             for warning in snapshot.warnings:
                 lines.append(f"    warning{label}: {warning}")
+    # A SKILL.md discovery stepped over is listed too, with its reason, so a
+    # skipped skill never reads as an absent one.
+    for document in passed_over:
+        lines.append(f"passed over ({document.root_id}): {document.path} is {document.reason}")
     lines.append(
         f"{len(groups)} logical skill(s); "
         f"{sum(1 for g in groups if g.is_mirrored)} mirrored; "
-        f"{sum(1 for g in groups if g.divergent_mirrors)} with divergent mirrors"
+        f"{sum(1 for g in groups if g.divergent_mirrors)} with divergent mirrors; "
+        f"{len(passed_over)} document(s) passed over"
     )
     _emit(payload, as_json=args.json, lines=lines)
     return 0

@@ -476,7 +476,7 @@ class SkillsListingShowsWhatDiscoveryNoticedTests(unittest.TestCase):
             self.assertEqual(sorted(shown), sorted(expected), proc.stdout)
             head = next(i for i, ln in enumerate(text_lines) if ln.startswith("tdd "))
             self.assertIn("executable payload", text_lines[head + 1], "shown under its own skill")
-            self.assertTrue(text_lines[-1].endswith("with divergent mirrors"), "summary stays last")
+            self.assertTrue(text_lines[-1].startswith("4 logical skill(s);"), "summary stays last")
 
     def test_a_payload_name_with_a_line_break_cannot_forge_a_listing_line(self):
         """Measured with the warning lines first added: an executable named
@@ -697,6 +697,84 @@ class ReviewDiffHeaderCannotBeForgedByAPathTests(unittest.TestCase):
             self.assertTrue(all("\\nDIFF\\n" in ln for ln in carrying), carrying)
             self.assertTrue(any(ln.startswith("--- a/") for ln in carrying), carrying)
             self.assertTrue(any(ln.startswith("+++ b/") for ln in carrying), carrying)
+
+
+class PassedOverDocumentsReachTheOperatorTests(unittest.TestCase):
+    """``doctor`` and ``skills`` name every ``SKILL.md`` discovery stepped over.
+
+    Measured before: with a dangling link, a fifo, an unfollowed link and a
+    too-deep document all named ``SKILL.md`` in the canonical root, ``doctor``
+    printed ``skills 4 discovered`` and ``verdict: ready``, its JSON had no
+    field for them, and ``skills`` listed the same four skills as a clean tree.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name).resolve()
+        cls.cfg = ["--config", str(build_env(cls.base, dry_run=True, seed="passed-over"))]
+        root = cls.base / "skills-canonical"
+        (root / "dangling").mkdir()
+        (root / "dangling" / "SKILL.md").symlink_to(root / "nowhere.md")
+        (root / "pipe").mkdir()
+        os.mkfifo(root / "pipe" / "SKILL.md")
+        (root / "alias").mkdir()
+        (root / "alias" / "SKILL.md").symlink_to(root / "tdd" / "SKILL.md")
+        deep = root / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        (deep / "SKILL.md").write_text("---\nname: deep\n---\n# deep\n", encoding="utf-8")
+        cls.expected = {
+            str(
+                root / "a" / "b" / "c" / "d" / "SKILL.md"
+            ): "deeper than max_depth=3 below the root",
+            str(
+                root / "dangling" / "SKILL.md"
+            ): "a symlink whose target does not exist or cannot be reached",
+            str(root / "pipe" / "SKILL.md"): "not a regular file (a fifo)",
+            str(root / "alias" / "SKILL.md"): "a symlink; this store does not follow links",
+        }
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_doctor_names_each_passed_over_document_in_json_and_text(self):
+        started = time.monotonic()
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        as_text = run_cli([*self.cfg, "doctor"])
+        self.assertLess(time.monotonic() - started, 120.0, "a fifo must not be opened")
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        reported = {d["path"]: d["reason"] for d in payload["skill_documents_passed_over"]}
+        self.assertEqual(reported, self.expected)
+        self.assertTrue(
+            all(d["root_id"] == "canonical" for d in payload["skill_documents_passed_over"])
+        )
+        self.assertEqual(payload["skills_discovered"], 4, "the same four skills as a clean tree")
+        lines = as_text.stdout.split("\n")
+        warned = [ln for ln in lines if ln.startswith("WARN  skill document passed over")]
+        self.assertEqual(len(warned), 4, as_text.stdout)
+        for path, reason in self.expected.items():
+            self.assertIn(
+                f"WARN  skill document passed over in root canonical: {path} is {reason}", lines
+            )
+        self.assertTrue(
+            any(ln.startswith("skills ") and ln.endswith("4 passed over") for ln in lines),
+            as_text.stdout,
+        )
+
+    def test_skills_lists_each_passed_over_document_in_json_and_text(self):
+        as_json = run_cli([*self.cfg, "--json", "skills"])
+        as_text = run_cli([*self.cfg, "skills"])
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual({d["path"]: d["reason"] for d in payload["passed_over"]}, self.expected)
+        lines = as_text.stdout.split("\n")
+        for path, reason in self.expected.items():
+            self.assertIn(f"passed over (canonical): {path} is {reason}", lines)
+        self.assertEqual(sum(1 for ln in lines if ln.startswith("passed over (")), 4)
+        self.assertTrue(lines[-2].endswith("4 document(s) passed over"), as_text.stdout)
+        self.assertNotIn("alias", [ln.split("  ")[0] for ln in lines], "the link was not taken")
 
 
 class ReadOnlyCommandsTests(unittest.TestCase):
