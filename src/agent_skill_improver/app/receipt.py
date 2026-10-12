@@ -18,9 +18,10 @@ Three rules the receipt has to keep, because they are the ones that go wrong.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from .. import SCHEMA_RECEIPT
+from ..domain.skills import CONTENT_SEEN_TO_CHANGE, TreeChange, summarize_tree_changes
 
 STATUS_OK = "ok"
 STATUS_PARTIAL = "partial"
@@ -97,7 +98,9 @@ class RunReceipt:
             str(info.get("authorship_class", "")) for info in self.classes.values()
         )
 
-    def finalize(self, *, finished_at: str, mutation_detected: bool) -> "RunReceipt":
+    def finalize(
+        self, *, finished_at: str, tree_changes: Sequence[TreeChange] = ()
+    ) -> "RunReceipt":
         self.finished_at = finished_at
         quarantined = self.count_of("quarantined")
         deferred = self.count_of("deferred")
@@ -119,13 +122,25 @@ class RunReceipt:
                 ),
             }
         )
-        if mutation_detected:
+        if tree_changes:
             self.status = STATUS_BLOCKED
+            seen = [c for c in tree_changes if c.kind in CONTENT_SEEN_TO_CHANGE]
+            if seen:
+                what = (
+                    "another process edited a skill file while the run was in flight, "
+                    "or an invariant of this tool is broken"
+                )
+            else:
+                what = (
+                    "another process changed the tree while the run was in flight; no "
+                    "document's content was seen to change, and one that became unreadable, "
+                    "appeared or vanished could not be compared"
+                )
             self.note(
-                "LIVE SKILL MUTATION DETECTED: the skill tree digest changed during this run. "
-                "The daily loop never writes skills, so either another process edited a skill "
-                "file while the run was in flight, or an invariant of this tool is broken. "
-                "Investigate before trusting any candidate from this run."
+                "LIVE SKILL MUTATION DETECTED: the skill tree changed during this run "
+                f"({summarize_tree_changes(tree_changes)}). The daily loop never writes or "
+                f"touches skills, so {what}. Investigate before trusting any candidate from "
+                "this run."
             )
         elif self.status == STATUS_STOOD_DOWN:
             pass

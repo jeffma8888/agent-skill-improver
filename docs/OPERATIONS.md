@@ -114,10 +114,23 @@ reading first, in order:
 means at least one record or skill was quarantined or deferred while the rest
 completed. `blocked` means the skill tree changed during the run; see below.
 
-**`skill_tree.digest_before` / `digest_after`** — must be equal after any daily
-run. If they differ, something changed a skill file during the run, from *any*
-source. `mutation_detected` states it directly. This is the single most important
-line in the receipt.
+**`skill_tree.mutation_detected`** — must be false after any daily run. It is
+true when any skill document's tree entry differed between the run's first and
+last reading, from *any* source; `digest_before` / `digest_after` (over the
+readable documents) then usually differ too, but not always, so read
+`mutation_detected` and `changes`, not the digests. This is the single most
+important line in the receipt.
+
+**`skill_tree.changes`** — when `mutation_detected` is true, one entry per document
+whose tree entry differed between the run's first and last reading, as
+`{"key": "root:skill/SKILL.md", "kind": ...}`. The kind says what was seen:
+`content-changed` is an edit (the hash moved); `added`, `removed`,
+`became-unreadable`, `became-readable` and `added-unreadable` are changes to the
+tree the run could not compare content across, and the note says so instead of
+calling them an edit. Any kind blocks the run: something other than this tool was
+in the tree while candidates were being judged against it. A document that is
+unreadable for the whole run is in neither reading's digest and is not a change;
+it is in `skill_documents_passed_over`.
 
 **`skill_tree.skill_documents_passed_over`** — every `SKILL.md` discovery saw and
 did not take this run, with its root and reason (a link, a fifo, a document too
@@ -352,8 +365,9 @@ There is no dashboard, and one would be misleading. Two questions cover it:
 
 1. Is the newest receipt recent? If not, the schedule is not firing, whatever the
    scheduler says about the job existing.
-2. In the last few receipts, are `digest_before` and `digest_after` equal? If ever
-   not, stop and investigate.
+2. In the last few receipts, is `skill_tree.mutation_detected` false? If ever not,
+   stop, read `skill_tree.changes` for which documents and what was seen, and
+   investigate.
 3. Does every receipt for a private source name a confinement mode? A missing one
    cannot happen through this code path, so its absence means somebody edited a
    receipt or ran an older build.

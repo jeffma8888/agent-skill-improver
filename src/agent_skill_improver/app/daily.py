@@ -60,7 +60,12 @@ from ..domain.failure import FailureCase
 from ..domain.isolation import decide as decide_isolation
 from ..domain.rubric import Rubric
 from ..domain.selection import bucket_coverage, select_fair
-from ..domain.skills import SkillGroup, group_for
+from ..domain.skills import (
+    SkillGroup,
+    describe_tree_change,
+    group_for,
+    tree_digest_of,
+)
 from ..errors import AsiError, RecordDefect, SafetyRefusal, TransientFailure
 from ..ports import ModelRunner
 from .lock import RunLock
@@ -212,7 +217,8 @@ def run_daily(
     receipt.isolation = isolation.to_dict()
 
     with RunLock(state.lock_path()), AutomationMarker():
-        digest_before = skill_store.tree_digest()
+        entries_before = skill_store.tree_entries()
+        digest_before = tree_digest_of(entries_before)
         rubrics: dict[str, Rubric] = {r.id: r for r in config.rubrics}
         known_skill_ids = skill_store.known_skill_ids()
         groups = skill_store.groups()
@@ -258,7 +264,7 @@ def run_daily(
                 "repair the record(s) and the next run resumes; nothing was changed."
             )
             return _finish(
-                receipt, state, skill_store, digest_before, clock, dry_run, run_day, {}, []
+                receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
             )
         open_candidates = [c for c in scan.readable if c.status in OPEN_STATUSES]
         if len(open_candidates) >= config.caps.max_open_candidates:
@@ -268,7 +274,7 @@ def run_daily(
                 "close the queue and the next run resumes."
             )
             return _finish(
-                receipt, state, skill_store, digest_before, clock, dry_run, run_day, {}, []
+                receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
             )
 
         threads = _discover(config, source, receipt)
@@ -278,7 +284,7 @@ def run_daily(
                 f"(since={config.source.since!r})"
             )
             return _finish(
-                receipt, state, skill_store, digest_before, clock, dry_run, run_day, {}, []
+                receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
             )
 
         already = state.processed_record_ids(run_day)
@@ -312,7 +318,7 @@ def run_daily(
         if not selected:
             receipt.stand_down("every discovered conversation was already processed for this day")
             return _finish(
-                receipt, state, skill_store, digest_before, clock, dry_run, run_day, {}, []
+                receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
             )
 
         conversations: dict[str, NormalizedConversation] = {}
@@ -407,7 +413,7 @@ def run_daily(
             receipt,
             state,
             skill_store,
-            digest_before,
+            entries_before,
             clock,
             dry_run,
             run_day,
@@ -787,20 +793,27 @@ def _finish(
     receipt: RunReceipt,
     state: StateStore,
     skill_store: Any,
-    digest_before: str,
+    entries_before: Mapping[str, str],
     clock: Clock,
     dry_run: bool,
     run_day: str,
     conversations: Mapping[str, NormalizedConversation],
     candidates: Sequence[dict[str, Any]],
 ) -> RunReceipt:
-    digest_after = skill_store.tree_digest()
-    mutation_detected = digest_after != digest_before
+    # The tree is compared entry by entry, not digest to digest, so the receipt
+    # can name each document that differs and say what was seen: a content hash
+    # that moved is an edit; a copy that became unreadable, appeared or vanished
+    # is a change the run could not compare content across, and is reported as
+    # exactly that. Any of them blocks the run: a foreign actor was in the tree.
+    entries_after = skill_store.tree_entries()
+    changes = describe_tree_change(entries_before, entries_after)
+    mutation_detected = bool(changes)
     receipt.candidates = [dict(c) for c in candidates]
     if mutation_detected:
         _downgrade_candidates_of_blocked_run(receipt, state, dry_run=dry_run)
-    receipt.skill_tree["digest_after"] = digest_after
+    receipt.skill_tree["digest_after"] = tree_digest_of(entries_after)
     receipt.skill_tree["mutation_detected"] = mutation_detected
+    receipt.skill_tree["changes"] = [c.to_dict() for c in changes]
     receipt.counts["conversations_ingested"] = len(conversations)
     receipt.counts["state_quarantine_files"] = state.count("quarantine")
     receipt.counts["state_refusal_files"] = state.count("refusals")
@@ -827,7 +840,7 @@ def _finish(
             "the only change a dry run makes to existing state is to reset a drifted mode "
             "to owner-only. Re-run with --commit."
         )
-    receipt.finalize(finished_at=iso(clock.now()), mutation_detected=mutation_detected)
+    receipt.finalize(finished_at=iso(clock.now()), tree_changes=changes)
 
     # Receipt first. If the checkpoint update fails the run still fails, but the
     # account of what it did is already on disk; the reverse order can leave a

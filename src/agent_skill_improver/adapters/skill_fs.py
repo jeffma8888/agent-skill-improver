@@ -29,6 +29,7 @@ from typing import Any, Iterable, Sequence
 
 from ..domain.skills import (
     SKILL_FILENAME,
+    UNREADABLE_ENTRY,
     SkillGroup,
     SkillRoot,
     SkillSnapshot,
@@ -36,6 +37,7 @@ from ..domain.skills import (
     is_payload_name,
     parse_frontmatter,
     resolve_groups,
+    tree_digest_of,
 )
 from ..errors import (
     BackupUnusable,
@@ -47,7 +49,7 @@ from ..errors import (
     SelfMutationRefused,
     UndecodableDocument,
 )
-from ..hashing import normalize_text, sha256_bytes, sha256_file, sha256_text, tree_digest
+from ..hashing import normalize_text, sha256_bytes, sha256_file, sha256_text
 from ..jsonio import write_bytes_atomic, write_json
 
 #: Backups live under the owner-only state tree, so they are owner-only too.
@@ -269,28 +271,50 @@ class FilesystemSkillStore:
 
         A file appearing, disappearing, changing content, or moving between roots
         all still change the digest, because content and ``root_id`` are both in
-        the key.
+        the key. The digest is over readable documents only; ``tree_entries``
+        is the mapping the daily driver compares, and it also carries the copies
+        discovery saw and could not read.
+        """
+        return tree_digest_of(self.tree_entries())
+
+    def tree_entries(self) -> dict[str, str]:
+        """Every skill document discovery saw, keyed like the digest, re-read now.
+
+        A readable document maps to its content hash. A copy of a skill that
+        discovery passed over because it could not read it maps to
+        ``UNREADABLE_ENTRY``, so that a document another process makes
+        unreadable mid-run is a named change on the receipt ("became
+        unreadable: ...") rather than an entry that silently vanished from the
+        digest and was then reported as an edit. Passed-over entries that are
+        not a copy of any skill (a document too deep, an unlistable directory)
+        are not in the tree and not here.
         """
         entries: dict[str, str] = {}
         for snapshot in self.snapshots(refresh=True):
-            entries[f"{snapshot.root_id}:{self._relative_key(snapshot)}"] = snapshot.sha256
-        return tree_digest(entries)
+            key = self._relative_key(snapshot.root_id, snapshot.path, snapshot.skill_id)
+            entries[f"{snapshot.root_id}:{key}"] = snapshot.sha256
+        for document in self._passed_over:
+            if document.skill_id is None:
+                continue
+            key = self._relative_key(document.root_id, document.path, document.skill_id)
+            entries.setdefault(f"{document.root_id}:{key}", UNREADABLE_ENTRY)
+        return entries
 
-    def _relative_key(self, snapshot: SkillSnapshot) -> str:
-        """The snapshot's path relative to its own root, as posix text."""
+    def _relative_key(self, root_id: str, path: Path, skill_id: str) -> str:
+        """The document's path relative to its own root, as posix text."""
         for root in self._roots:
-            if root.id != snapshot.root_id:
+            if root.id != root_id:
                 continue
             try:
-                return snapshot.path.relative_to(Path(root.path).resolve()).as_posix()
+                return path.relative_to(Path(root.path).resolve()).as_posix()
             except ValueError:
                 try:
-                    return snapshot.path.relative_to(Path(root.path)).as_posix()
+                    return path.relative_to(Path(root.path)).as_posix()
                 except ValueError:
                     break
         # Unresolvable against any root: fall back to the skill id plus filename,
         # which is stable, rather than to the absolute path, which is not.
-        return f"{snapshot.skill_id}/{snapshot.path.name}"
+        return f"{skill_id}/{path.name}"
 
     def read_text(self, path: Path) -> str:
         """The document's text, judged the way the write path judges it.

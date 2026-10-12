@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -142,6 +143,14 @@ class NoLiveMutationTests(DailyHarness):
             any("LIVE SKILL MUTATION DETECTED" in n for n in payload["notes"]),
             payload["notes"],
         )
+        self.assertEqual(
+            payload["skill_tree"]["changes"],
+            [{"key": "canonical:tdd/SKILL.md", "kind": "content-changed"}],
+            "the receipt names the document and that its content moved",
+        )
+        note = next(n for n in payload["notes"] if n.startswith("LIVE SKILL MUTATION DETECTED"))
+        self.assertIn("content-changed: canonical:tdd/SKILL.md", note)
+        self.assertIn("edited a skill file", note)
         self.assertEqual(exit_code_for(STATUS_BLOCKED), RC_BLOCKED)
         self.assertEqual(RC_BLOCKED, 5, "the documented exit code for a blocked run")
         self.assertNotIn(RC_BLOCKED, (RC_OK, RC_NEGATIVE, 3, 4))
@@ -435,6 +444,111 @@ class NoLiveMutationTests(DailyHarness):
             "what makes that happen",
         )
         self.assertFalse(automation_active(), "the marker must be cleared afterwards")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_document_made_unreadable_mid_run_blocks_the_run_and_is_named_not_called_an_edit(
+        self,
+    ):
+        # Measured before: a chmod 000 on ANOTHER skill's document mid-run, content
+        # untouched, earned blocked with the note "another process edited a skill
+        # file", and nothing in the receipt said which document or what happened to
+        # it (the passed-over list is the discovery-time reading, so it was empty).
+        from agent_skill_improver.app.receipt import STATUS_BLOCKED
+
+        config = self.env()
+        other = self.base / "skills-canonical" / "code-review" / "SKILL.md"
+        content = other.read_bytes()
+
+        class SomethingChmodsAnotherDocument(FilesystemSkillStore):
+            def read_text(self, path: Path) -> str:
+                os.chmod(other, 0o000)
+                return super().read_text(path)
+
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        try:
+            receipt = run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=SomethingChmodsAnotherDocument(
+                    config.skill_roots, read_only=True, protected_paths=config.protected_paths
+                ),
+                state=state,
+                clock=frozen_clock(),
+                day=DAY,
+                commit=True,
+            )
+        finally:
+            os.chmod(other, 0o644)  # before tearDown removes the tree
+        payload = receipt.to_dict()
+        self.assertEqual(other.read_bytes(), content, "content never changed")
+        self.assertEqual(receipt.status, STATUS_BLOCKED, "a foreign actor was in the tree")
+        self.assertTrue(payload["skill_tree"]["mutation_detected"])
+        self.assertEqual(
+            payload["skill_tree"]["changes"],
+            [{"key": "canonical:code-review/SKILL.md", "kind": "became-unreadable"}],
+        )
+        self.assertEqual(
+            [c["status"] for c in payload["candidates"]],
+            ["blocked-run"],
+            "the gate verdict was computed against a tree that then moved",
+        )
+        note = next(n for n in payload["notes"] if n.startswith("LIVE SKILL MUTATION DETECTED"))
+        self.assertIn("became-unreadable: canonical:code-review/SKILL.md", note)
+        self.assertIn("no document's content was seen to change", note)
+        self.assertNotIn("edited", note, "an edit is claimed only for a hash that moved")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_an_unreadable_document_appearing_mid_run_blocks_the_run_though_the_digest_holds(
+        self,
+    ):
+        # The digest is over readable documents, so a new mode-000 document leaves
+        # it equal before and after. The entries still differ, and that, not the
+        # digest, is what blocks the run and downgrades its candidates.
+        from agent_skill_improver.app.receipt import STATUS_BLOCKED
+
+        config = self.env()
+        newcomer = self.base / "skills-canonical" / "newcomer" / "SKILL.md"
+
+        class SomethingAddsAnUnreadableDocument(FilesystemSkillStore):
+            def read_text(self, path: Path) -> str:
+                if not newcomer.exists():
+                    newcomer.parent.mkdir()
+                    newcomer.write_text("---\nname: newcomer\n---\n", encoding="utf-8")
+                    os.chmod(newcomer, 0o000)
+                return super().read_text(path)
+
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        try:
+            receipt = run_daily(
+                config,
+                source=FixtureConversationSource(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=SomethingAddsAnUnreadableDocument(
+                    config.skill_roots, read_only=True, protected_paths=config.protected_paths
+                ),
+                state=state,
+                clock=frozen_clock(),
+                day=DAY,
+                commit=True,
+            )
+        finally:
+            if newcomer.exists():
+                os.chmod(newcomer, 0o644)
+        payload = receipt.to_dict()
+        tree = payload["skill_tree"]
+        self.assertEqual(tree["digest_before"], tree["digest_after"], "readable documents only")
+        self.assertTrue(tree["mutation_detected"])
+        self.assertEqual(
+            tree["changes"], [{"key": "canonical:newcomer/SKILL.md", "kind": "added-unreadable"}]
+        )
+        self.assertEqual(receipt.status, STATUS_BLOCKED)
+        self.assertEqual([c["status"] for c in payload["candidates"]], ["blocked-run"])
+        self.assertEqual(
+            state.open_candidates(),
+            [],
+            "the persisted candidate was downgraded too, not only the receipt's copy",
+        )
 
 
 class PerRecordFailureTests(DailyHarness):
@@ -1100,6 +1214,10 @@ class ACanonicalDocumentUnreadableAtProposeTests(DailyHarness):
         )
         self.assertTrue(
             [n for n in payload["notes"] if n.startswith("LIVE SKILL MUTATION DETECTED")]
+        )
+        self.assertEqual(
+            payload["skill_tree"]["changes"],
+            [{"key": "canonical:tdd/SKILL.md", "kind": "removed"}],
         )
 
     def test_a_document_denied_only_after_the_improver_ran_is_quarantined_the_same_way(self):

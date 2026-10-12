@@ -22,13 +22,24 @@ from tempfile import TemporaryDirectory
 
 from agent_skill_improver.adapters.skill_fs import FilesystemSkillStore
 from agent_skill_improver.domain.skills import (
+    CHANGE_ADDED,
+    CHANGE_ADDED_UNREADABLE,
+    CHANGE_BECAME_READABLE,
+    CHANGE_BECAME_UNREADABLE,
+    CHANGE_CONTENT,
+    CHANGE_REMOVED,
     PAYLOAD_EXTENSIONS,
     SKILL_FILENAME,
+    UNREADABLE_ENTRY,
     SkillRoot,
+    TreeChange,
+    describe_tree_change,
     group_for,
     is_payload_name,
     parse_frontmatter,
     resolve_groups,
+    summarize_tree_changes,
+    tree_digest_of,
 )
 from agent_skill_improver.errors import (
     BackupUnusable,
@@ -1067,6 +1078,60 @@ class RollbackSafetyTests(Harness):
         self.assertTrue(target.parent.is_symlink(), "the link itself is left in place")
 
 
+class TreeChangeTests(unittest.TestCase):
+    """Two readings of the tree, compared entry by entry and named by kind."""
+
+    def test_an_unchanged_tree_has_no_changes(self):
+        entries = {"canonical:a/SKILL.md": "aa", "canonical:b/SKILL.md": UNREADABLE_ENTRY}
+        self.assertEqual(describe_tree_change(entries, dict(entries)), ())
+
+    def test_each_kind_of_difference_is_named_and_only_a_moved_hash_is_an_edit(self):
+        before = {
+            "r:edited/SKILL.md": "aa",
+            "r:removed/SKILL.md": "bb",
+            "r:unreadable-now/SKILL.md": "cc",
+            "r:readable-now/SKILL.md": UNREADABLE_ENTRY,
+            "r:gone-unreadable/SKILL.md": UNREADABLE_ENTRY,
+            "r:same/SKILL.md": "dd",
+        }
+        after = {
+            "r:edited/SKILL.md": "a2",
+            "r:unreadable-now/SKILL.md": UNREADABLE_ENTRY,
+            "r:readable-now/SKILL.md": "ee",
+            "r:same/SKILL.md": "dd",
+            "r:new/SKILL.md": "ff",
+            "r:new-unreadable/SKILL.md": UNREADABLE_ENTRY,
+        }
+        self.assertEqual(
+            describe_tree_change(before, after),
+            (
+                TreeChange("r:edited/SKILL.md", CHANGE_CONTENT),
+                TreeChange("r:gone-unreadable/SKILL.md", CHANGE_REMOVED),
+                TreeChange("r:new-unreadable/SKILL.md", CHANGE_ADDED_UNREADABLE),
+                TreeChange("r:new/SKILL.md", CHANGE_ADDED),
+                TreeChange("r:readable-now/SKILL.md", CHANGE_BECAME_READABLE),
+                TreeChange("r:removed/SKILL.md", CHANGE_REMOVED),
+                TreeChange("r:unreadable-now/SKILL.md", CHANGE_BECAME_UNREADABLE),
+            ),
+        )
+
+    def test_the_digest_is_over_readable_entries_only(self):
+        readable = {"r:a/SKILL.md": "aa"}
+        with_unreadable = {"r:a/SKILL.md": "aa", "r:b/SKILL.md": UNREADABLE_ENTRY}
+        self.assertEqual(tree_digest_of(readable), tree_digest_of(with_unreadable))
+        self.assertNotEqual(tree_digest_of(readable), tree_digest_of({"r:a/SKILL.md": "a2"}))
+
+    def test_the_summary_names_documents_under_their_kind_and_caps_the_list(self):
+        changes = [TreeChange(f"r:s{i}/SKILL.md", CHANGE_CONTENT) for i in range(7)]
+        changes.append(TreeChange("r:x/SKILL.md", CHANGE_BECAME_UNREADABLE))
+        summary = summarize_tree_changes(changes, limit=5)
+        self.assertEqual(
+            summary,
+            "content-changed: r:s0/SKILL.md, r:s1/SKILL.md, r:s2/SKILL.md, r:s3/SKILL.md, "
+            "r:s4/SKILL.md, +2 more; became-unreadable: r:x/SKILL.md",
+        )
+
+
 class CanonicalResolutionTests(Harness):
     def test_a_skill_in_both_roots_resolves_to_the_canonical_copy(self):
         group = group_for(self.store().groups(refresh=True), "shared")
@@ -1236,6 +1301,70 @@ class CanonicalResolutionTests(Harness):
 
     def test_the_tree_digest_is_stable_for_an_unchanged_tree(self):
         self.assertEqual(self.store().tree_digest(), self.store().tree_digest())
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_tree_entries_name_an_unreadable_copy_and_the_digest_leaves_it_out(self):
+        # Measured before: the digest was the only reading of the tree, and a copy
+        # that could not be read was simply absent from it, so a document made
+        # unreadable mid-run read exactly like one that had been edited away.
+        readable = self.store().tree_entries()
+        self.assertEqual(readable["canonical:shared/SKILL.md"], sha256_text(GOOD))
+        self.assertNotIn(UNREADABLE_ENTRY, readable.values())
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        os.chmod(target, 0o000)
+        try:
+            store = self.store()
+            entries = store.tree_entries()
+            self.assertEqual(entries["canonical:shared/SKILL.md"], UNREADABLE_ENTRY)
+            self.assertEqual(
+                {k: v for k, v in entries.items() if k != "canonical:shared/SKILL.md"},
+                {k: v for k, v in readable.items() if k != "canonical:shared/SKILL.md"},
+                "every other entry is untouched",
+            )
+            self.assertEqual(store.tree_digest(), tree_digest_of(entries))
+            self.assertNotIn(
+                "canonical:shared/SKILL.md",
+                {k for k, v in entries.items() if v != UNREADABLE_ENTRY},
+                "the digest is over readable documents only",
+            )
+            self.assertEqual(
+                describe_tree_change(readable, entries),
+                (TreeChange("canonical:shared/SKILL.md", CHANGE_BECAME_UNREADABLE),),
+            )
+        finally:
+            os.chmod(target, 0o644)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_nested_copy_keeps_one_key_across_readable_and_unreadable(self):
+        # A nested skill is where the relative key and the skill-id fallback differ;
+        # if the readable and the passed-over reading keyed the same document
+        # differently, one chmod would read as removed plus added-unreadable.
+        nested = self.canonical_dir / "group" / "nested"
+        nested.mkdir(parents=True)
+        target = nested / SKILL_FILENAME
+        write(target, GOOD.replace("name: shared", "name: nested"))
+        before = self.store().tree_entries()
+        self.assertEqual(before["canonical:group/nested/SKILL.md"], sha256_file(target))
+        os.chmod(target, 0o000)
+        try:
+            after = self.store().tree_entries()
+            self.assertEqual(after["canonical:group/nested/SKILL.md"], UNREADABLE_ENTRY)
+            self.assertEqual(
+                describe_tree_change(before, after),
+                (TreeChange("canonical:group/nested/SKILL.md", CHANGE_BECAME_UNREADABLE),),
+            )
+        finally:
+            os.chmod(target, 0o644)
+
+    def test_a_document_that_is_not_a_copy_of_a_skill_is_not_a_tree_entry(self):
+        # Too deep for discovery, so not a copy of anything: it withholds no slot
+        # and its appearance or disappearance is not a tree change either.
+        deep = self.canonical_dir / "a" / "b" / "c" / "d" / "deep"
+        deep.mkdir(parents=True)
+        write(deep / SKILL_FILENAME, GOOD)
+        store = self.store()
+        self.assertTrue([d for d in store.passed_over() if d.skill_id is None])
+        self.assertFalse([k for k in store.tree_entries() if k.endswith("deep/SKILL.md")])
 
     def test_relocating_a_root_does_not_look_like_a_skill_mutation(self):
         """The digest is about skill CONTENT, not about filesystem layout.

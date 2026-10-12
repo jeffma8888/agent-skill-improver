@@ -93,6 +93,9 @@ class SkillStore(Protocol):
     def tree_digest(self) -> str:  # pragma: no cover - protocol
         ...
 
+    def tree_entries(self) -> dict[str, str]:  # pragma: no cover - protocol
+        ...
+
     def write_canonical(
         self, path: Path, text: str, *, expected_sha256: str, backup_dir: Path
     ) -> Any:  # pragma: no cover - protocol

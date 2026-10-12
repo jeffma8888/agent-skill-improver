@@ -26,7 +26,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
+
+from ..hashing import tree_digest
 
 SKILL_FILENAME = "SKILL.md"
 
@@ -285,6 +287,88 @@ def resolve_groups(
         mirrors = tuple(s for s in ordered if s is not canonical)
         groups.append(SkillGroup(skill_id, canonical, mirrors, reason))
     return groups
+
+
+#: The value a tree entry holds for a copy of a skill that discovery saw and
+#: could not read. A content hash is hex, so the two never collide.
+UNREADABLE_ENTRY = "unreadable"
+
+CHANGE_CONTENT = "content-changed"
+CHANGE_ADDED = "added"
+CHANGE_ADDED_UNREADABLE = "added-unreadable"
+CHANGE_REMOVED = "removed"
+CHANGE_BECAME_UNREADABLE = "became-unreadable"
+CHANGE_BECAME_READABLE = "became-readable"
+
+#: The kinds under which a document's content was SEEN to differ. The others
+#: are changes to the tree the run could not compare content across.
+CONTENT_SEEN_TO_CHANGE = frozenset({CHANGE_CONTENT})
+
+
+@dataclass(frozen=True)
+class TreeChange:
+    """One document whose tree entry differs between two readings of the tree."""
+
+    key: str
+    kind: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"key": self.key, "kind": self.kind}
+
+
+def tree_digest_of(entries: Mapping[str, str]) -> str:
+    """The tree digest over the readable entries of a ``tree_entries`` mapping.
+
+    Unreadable copies are left out on purpose: a document discovery could not
+    read is not in any snapshot, so it cannot be in the digest the run's
+    determinism guarantee is stated over. What it CAN do is appear or vanish
+    between the two readings, and ``describe_tree_change`` reports that.
+    """
+    return tree_digest({k: v for k, v in entries.items() if v != UNREADABLE_ENTRY})
+
+
+def describe_tree_change(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> tuple[TreeChange, ...]:
+    """Every entry that differs between two readings of the tree, by kind.
+
+    Measured before this existed: a skill document that another process made
+    unreadable mid-run (content untouched) flipped the digest, and the only
+    thing the receipt said was that a skill file had been "edited". The alarm
+    stays (a foreign actor was in the tree); what changes is that the receipt
+    now names the document and says what was seen, and an edit is claimed only
+    for an entry whose content hash differed.
+    """
+    changes: list[TreeChange] = []
+    for key in sorted(set(before) | set(after)):
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            continue
+        if old is None:
+            kind = CHANGE_ADDED_UNREADABLE if new == UNREADABLE_ENTRY else CHANGE_ADDED
+        elif new is None:
+            kind = CHANGE_REMOVED
+        elif new == UNREADABLE_ENTRY:
+            kind = CHANGE_BECAME_UNREADABLE
+        elif old == UNREADABLE_ENTRY:
+            kind = CHANGE_BECAME_READABLE
+        else:
+            kind = CHANGE_CONTENT
+        changes.append(TreeChange(key, kind))
+    return tuple(changes)
+
+
+def summarize_tree_changes(changes: Sequence[TreeChange], *, limit: int = 5) -> str:
+    """One clause per kind, documents named, for a receipt note."""
+    by_kind: dict[str, list[str]] = {}
+    for change in changes:
+        by_kind.setdefault(change.kind, []).append(change.key)
+    clauses = []
+    for kind, keys in by_kind.items():
+        shown = ", ".join(keys[:limit])
+        more = "" if len(keys) <= limit else f", +{len(keys) - limit} more"
+        clauses.append(f"{kind}: {shown}{more}")
+    return "; ".join(clauses)
 
 
 def group_for(groups: Sequence[SkillGroup], skill_id: str) -> SkillGroup | None:
