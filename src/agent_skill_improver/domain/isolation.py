@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ..errors import IsolationRequired
+from .redaction import credential_labels
 
 # -- source classification -------------------------------------------------
 #: A corpus this repository ships or generates. Contains no private content by
@@ -151,6 +152,21 @@ def denied_env_names(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(sorted(out))
 
 
+def credential_bearing_env_values(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """``(name, shape)`` for every value in ``env`` shaped like a credential.
+
+    The name denylist catches the convention (``*_API_KEY``); this catches the
+    rename. A key pasted under ``MODEL_FLAG`` is still a key in the child's
+    environment. Only the high-confidence shapes count, and the value itself is
+    never returned: the refusal names the variable and the shape.
+    """
+    out: list[tuple[str, str]] = []
+    for name in sorted(env):
+        for label in credential_labels(env[name]):
+            out.append((name, label))
+    return tuple(out)
+
+
 def minimal_env(
     parent: Mapping[str, str],
     *,
@@ -164,7 +180,8 @@ def minimal_env(
     on the machine; dropping it makes ordinary tools crash. Pointing it at a
     fresh empty directory does neither.
 
-    Raises :class:`IsolationRequired` when a denied name survives, which can
+    Raises :class:`IsolationRequired` when a denied name survives, or when a
+    configured value is shaped like a credential whatever its name. Both can
     only happen through ``extra`` (that is, through configuration).
     """
     env: dict[str, str] = {}
@@ -190,6 +207,15 @@ def minimal_env(
             "LOCAL and needs no credential, because the sandbox permits no egress; a "
             "credential in the child is an exfiltration channel with a config file in "
             "front of it. Remove it from [model.<role>].env."
+        )
+    bearing = credential_bearing_env_values(extra or {})
+    if bearing:
+        named = ", ".join(f"{name} ({shape})" for name, shape in bearing)
+        raise IsolationRequired(
+            "refusing to run a model role: a configured environment value is shaped like a "
+            f"credential whatever its name ({named}). A key under an innocuous name is still "
+            "a key in the child, and the sandbox permits no egress for a reason. Remove it "
+            "from [model.<role>].env."
         )
     return env
 

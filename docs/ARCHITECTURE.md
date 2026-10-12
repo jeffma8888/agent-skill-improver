@@ -120,7 +120,10 @@ The environment is scrubbed independently of the sandbox, because
 `--unshare-net` does nothing about a token that a child can write into its own
 output. `minimal_env()` builds an allowlist (`PATH`, locale, `TZ`) plus `HOME`
 and the temp variables pointed at the per-call directory, and drops everything
-whose name matches a credential/token/proxy pattern. The count of dropped
+whose name matches a credential/token/proxy pattern. A value a role's own
+configuration adds is refused if it is shaped like a credential, whatever it is
+named: the name check catches the convention, the value check catches the
+rename. The count of dropped
 variables and the resolved mode are recorded in every command id and every
 receipt, so a run's confinement is auditable after the fact rather than assumed.
 

@@ -475,6 +475,26 @@ class MinimalEnvironmentTests(unittest.TestCase):
             self._child_env(parent=dict(os.environ), role_env={"OPENAI_API_KEY": "x"})
         self.assertIn("OPENAI_API_KEY", str(ctx.exception))
 
+    def test_a_credential_shaped_value_in_role_env_is_refused_whatever_its_name(self):
+        """The name check catches the convention; this catches the rename. A key
+        pasted under ``MODEL_FLAG`` is still a key in the child's environment,
+        and the refusal names the variable and the shape, never the value."""
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        with self.assertRaises(IsolationRequired) as ctx:
+            self._child_env(parent=dict(os.environ), role_env={"MODEL_FLAG": planted})
+        message = str(ctx.exception)
+        self.assertIn("MODEL_FLAG", message)
+        self.assertIn("aws-access-key-id", message)
+        self.assertNotIn(planted, message)
+
+    def test_credential_bearing_values_are_named_by_variable_and_shape(self):
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        found = iso.credential_bearing_env_values(
+            {"MODEL_FLAG": planted, "MODEL_TEMPERATURE": "0", "PATH": "/usr/bin:/bin"}
+        )
+        self.assertEqual(found, (("MODEL_FLAG", "aws-access-key-id"),))
+        self.assertEqual(iso.credential_bearing_env_values({"A": "plain words"}), ())
+
     def test_the_control_shows_a_harmless_role_env_value_is_accepted(self):
         child = self._child_env(parent=dict(os.environ), role_env={"MODEL_TEMPERATURE": "0"})
         self.assertEqual(child["MODEL_TEMPERATURE"], "0")
