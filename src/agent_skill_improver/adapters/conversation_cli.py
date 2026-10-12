@@ -45,6 +45,7 @@ from typing import Any, Sequence
 from ..adapters.transcript_export import normalize_export
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import (
+    MAX_THREAD_ID_LENGTH,
     DiscoveredThread,
     DiscoveryPage,
     is_safe_thread_id,
@@ -65,6 +66,7 @@ __all__ = [
     "ConversationCliSource",
     "DiscoveredThread",
     "DiscoveryPage",
+    "parse_discovery",
     "parse_discovery_output",
     "render_argv",
 ]
@@ -90,7 +92,9 @@ DEFAULT_EXPORT_ARGV: tuple[str, ...] = (
 )
 
 _THREAD_LINE = re.compile(r"^\s*Thread:\s*(?P<id>[^\s(]+)")
-_HEADER_LINE = re.compile(r'^\s*\d+\.\s+"(?P<title>.*)"\s*\((?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)')
+_HEADER_LINE = re.compile(
+    r'^\s*(?P<number>\d+)\.\s+"(?P<title>.*)"\s*\((?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)'
+)
 _WORKSPACE_LINE = re.compile(r"^\s*Workspace:\s*(?P<path>.+?)\s*$")
 
 
@@ -114,20 +118,73 @@ def render_argv(template: Sequence[str], values: dict[str, str]) -> list[str]:
 
 
 def parse_discovery_output(text: str) -> list[DiscoveredThread]:
+    """The threads in a discovery listing; see :func:`parse_discovery`."""
+    return parse_discovery(text)[0]
+
+
+def _short(text: str, width: int) -> str:
+    """A repr of untrusted listing text, cut to ``width`` for a receipt line.
+
+    A cut repr keeps its closing quote, so the boundary between a title and
+    an id stays readable on the line.
+    """
+    shown = repr(text)
+    if len(shown) <= width:
+        return shown
+    return shown[: width - 4] + "..." + shown[-1]
+
+
+def _unsafe_id_reason(raw_id: str) -> str:
+    """Which rule of ``is_safe_thread_id`` the id failed, for the operator."""
+    if not raw_id:
+        return "is empty"
+    if len(raw_id) > MAX_THREAD_ID_LENGTH:
+        return f"is over-long ({len(raw_id)} characters; the limit is {MAX_THREAD_ID_LENGTH})"
+    if raw_id[0] == "-":
+        return "is option-shaped (it starts with a dash)"
+    return "carries whitespace or control characters"
+
+
+def _unsafe_id_entry(ordinal: str, raw_id: str, title: str) -> tuple[str, str]:
+    """A passed-over entry for a listed id that cannot be a thread.
+
+    The id is shown as a repr, cut short: it may carry the very control
+    characters or option shape that made it unsafe, and the receipt is read
+    in terminals and logs.
+    """
+    label = f"listing entry {ordinal} ({_short(title, 40)}) with id {_short(raw_id, 60)}"
+    return (
+        label,
+        f"names an id that {_unsafe_id_reason(raw_id)}, so it was not treated as a thread "
+        "and nothing was run for it",
+    )
+
+
+def parse_discovery(text: str) -> tuple[list[DiscoveredThread], list[tuple[str, str]]]:
     """Parse discovery output into thread records, per the documented grammar.
+
+    Returns the threads and, beside them, every listed id that was NOT taken
+    as a thread, with the reason. Measured before the second list existed: a
+    forged ``Thread: --output=...`` line was dropped (rightly) and the receipt
+    said nothing, so a listing under injection read exactly like a clean one
+    that was simply shorter.
 
     Written as a pure function so it is tested against captured fixtures with
     no subprocess involved.
     """
     found: list[DiscoveredThread] = []
+    passed_over: list[tuple[str, str]] = []
     title = ""
     date = ""
     workspace = ""
+    number = ""  # the listing's own printed number, the one an operator greps for
+    seen_thread_lines = 0
     for line in text.splitlines():
         header = _HEADER_LINE.match(line)
         if header:
             title = header.group("title")
             date = header.group("date")
+            number = header.group("number")
             workspace = ""
             continue
         ws = _WORKSPACE_LINE.match(line)
@@ -136,13 +193,18 @@ def parse_discovery_output(text: str) -> list[DiscoveredThread]:
             continue
         thread = _THREAD_LINE.match(line)
         if thread:
+            seen_thread_lines += 1
             if not is_safe_thread_id(thread.group("id")):
                 # An option-shaped or unprintable id is not a thread; it is text
                 # that reached the listing. Dropped here so it never becomes an
                 # argv element, and refused again in fetch() for ids that
-                # arrive by any other route.
+                # arrive by any other route. Named, so the receipt shows it,
+                # under the listing's printed number when a header gave one.
+                ordinal = number or f"#{seen_thread_lines}"
+                passed_over.append(_unsafe_id_entry(ordinal, thread.group("id"), title))
                 title = ""
                 date = ""
+                number = ""
                 workspace = ""
                 continue
             found.append(
@@ -155,6 +217,7 @@ def parse_discovery_output(text: str) -> list[DiscoveredThread]:
             )
             title = ""
             date = ""
+            number = ""
             workspace = ""
     # De-duplicate while preserving discovery order.
     seen: set[str] = set()
@@ -164,7 +227,7 @@ def parse_discovery_output(text: str) -> list[DiscoveredThread]:
             continue
         seen.add(item.thread_id)
         unique.append(item)
-    return unique
+    return unique, passed_over
 
 
 class ConversationCliSource:
@@ -234,13 +297,14 @@ class ConversationCliSource:
         when a loop is running continuously.
         """
         argv = self.build_discovery_argv(since=since, limit=limit, workspace=workspace, query=query)
-        threads = parse_discovery_output(self._run(argv))
+        threads, passed_over = parse_discovery(self._run(argv))
         return page_from_threads(
             threads,
             limit=limit,
             since=since,
             workspace=workspace or "",
             query=query or "",
+            passed_over=passed_over,
         )
 
     def discover(

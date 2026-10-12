@@ -199,11 +199,16 @@ a deferred skill is almost always a model problem. Either kind makes the run
 compute a rate over a page and call it a rate over the corpus.
 
 **`discovery.passed_over`** — every entry the source saw in its window and could
-not take as a thread, with the reason (for the fixtures source: an export this
+not take as a thread, with the reason. For the fixtures source: an export this
 process cannot read, one that is not UTF-8 or not JSON, a JSON value that is not
-an object, an object with no thread or a thread without an id). Each is in no
-count on the receipt, a note names them, and `doctor` lists the same entries as
-`WARN` lines under the source. `is_total` is unaffected: the window was read
+an object, an object with no thread or a thread without an id; `doctor` lists the
+same entries as `WARN` lines under the source. For the command-line source: a
+listed "Thread:" line whose id is option-shaped, empty, over-long or carries
+whitespace or control characters (shown as a cut-short repr, since a listing is
+derived from conversation content and can carry a forged line); such an id is
+never placed on a command line, and `doctor` cannot list these without running
+discovery, so the receipt is their only surface. Each is in no count on the
+receipt and a note names them. `is_total` is unaffected: the window was read
 whole; part of it did not parse.
 
 **`selection.bucket_coverage`** — fraction of buckets that contributed. A run that

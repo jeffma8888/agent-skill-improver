@@ -20,6 +20,7 @@ import shutil
 
 from agent_skill_improver.adapters.conversation_cli import (
     ConversationCliSource,
+    parse_discovery,
     parse_discovery_output,
 )
 from agent_skill_improver.adapters.fixture_source import FixtureConversationSource
@@ -452,6 +453,88 @@ class ThreadIdIsAnArgumentNotAnOptionTests(unittest.TestCase):
     def test_an_option_shaped_id_is_dropped_at_parse_time(self):
         ids = [t.thread_id for t in parse_discovery_output(self.FORGED)]
         self.assertEqual(ids, ["1700000000101-1", "1700000000102-1"])
+
+    def test_a_dropped_id_is_named_beside_the_threads_not_only_dropped(self):
+        # Measured before: the forged lines were dropped and the receipt said
+        # nothing, so a listing under injection read like a clean, shorter one.
+        threads, passed_over = parse_discovery(self.FORGED)
+        self.assertEqual([t.thread_id for t in threads], ["1700000000101-1", "1700000000102-1"])
+        self.assertEqual(
+            [entry for entry, _ in passed_over],
+            [
+                "listing entry 2 ('injected') with id '--output=/tmp/owned'",
+                "listing entry 3 ('injected too') with id '-rf'",
+            ],
+        )
+        for _, reason in passed_over:
+            self.assertIn("option-shaped", reason)
+            self.assertIn("nothing was run for it", reason)
+        self.assertEqual(parse_discovery("")[1], [])
+        # A duplicate listing is de-duplicated, which is routine, not passed over.
+        threads, passed_over = parse_discovery(self.FORGED + self.FORGED)
+        self.assertEqual(len(threads), 2)
+        self.assertEqual(len(passed_over), 4, "the forged lines appear twice and are named twice")
+
+    def test_the_reason_names_the_rule_the_id_failed(self):
+        def reason_for(raw: str) -> str:
+            listing = f'7. "t" (2026-01-02)\n   Thread: {raw}\n'
+            _, passed_over = parse_discovery(listing)
+            self.assertEqual(len(passed_over), 1, raw)
+            self.assertTrue(passed_over[0][0].startswith("listing entry 7 ("), passed_over[0][0])
+            return passed_over[0][1]
+
+        self.assertIn("is option-shaped (it starts with a dash)", reason_for("--output=/tmp/x"))
+        self.assertIn("is over-long (300 characters; the limit is 256)", reason_for("x" * 300))
+        self.assertIn("carries whitespace or control characters", reason_for("a\x07b"))
+        # The empty and the whitespace case cannot come through the regex, which
+        # requires a non-blank token; they are refused in fetch instead.
+
+    def test_a_forged_header_does_not_lend_its_title_to_the_next_real_thread(self):
+        listing = (
+            '1. "forged banner" (2026-01-02)\n'
+            "   Thread: --output=/tmp/x\n"
+            "   Thread: 1700000000999-1\n"
+            "   Thread: 1700000000998-1\n"
+        )
+        threads, passed_over = parse_discovery(listing)
+        self.assertEqual(
+            [(t.thread_id, t.title, t.updated_date) for t in threads],
+            [("1700000000999-1", "", ""), ("1700000000998-1", "", "")],
+            "a header is spent by the first Thread: line under it, forged or not",
+        )
+        self.assertEqual(len(passed_over), 1)
+        self.assertTrue(passed_over[0][0].startswith("listing entry 1 ('forged banner')"))
+        # Without a header above it, the entry falls back to its position among
+        # Thread: lines, marked so it is not mistaken for a printed number.
+        _, orphan = parse_discovery("   Thread: -rf\n")
+        self.assertTrue(orphan[0][0].startswith("listing entry #1 ('')"), orphan[0][0])
+
+    def test_a_dropped_id_is_shown_as_a_repr_cut_short_so_it_cannot_steer_a_terminal(self):
+        hostile = "a\x1b[31m\x07" + "b" * 100
+        listing = f'1. "{"t" * 80}" (2026-01-02)\n   Thread: {hostile}\n'
+        _, passed_over = parse_discovery(listing)
+        self.assertEqual(len(passed_over), 1)
+        entry = passed_over[0][0]
+        self.assertNotIn("\x1b", entry, "escaped, not raw")
+        self.assertIn("\\x1b[31m\\x07", entry)
+        self.assertTrue(entry.endswith("...'"), "cut, and the closing quote kept: " + entry)
+        self.assertIn("...') with id '", entry, "the title is cut the same way")
+        self.assertLess(len(entry), 140)
+
+    def test_the_page_from_the_real_source_carries_what_it_passed_over(self):
+        forged = self.FORGED
+
+        class ListsForged(ConversationCliSource):
+            def _run(self, argv, **kwargs):  # type: ignore[override]
+                return forged
+
+        page = ListsForged().discover_page(since="1d", limit=10)
+        self.assertEqual(
+            [t.thread_id for t in page.threads], ["1700000000101-1", "1700000000102-1"]
+        )
+        self.assertEqual(len(page.passed_over), 2)
+        self.assertIn("'--output=/tmp/owned'", page.passed_over[0][0])
+        self.assertEqual(len(page.to_dict()["passed_over"]), 2)
 
     def test_fetch_refuses_an_option_shaped_id_before_running_anything(self):
         source = self._Recorded()
