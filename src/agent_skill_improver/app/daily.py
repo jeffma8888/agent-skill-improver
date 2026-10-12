@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..clock import Clock, day_key, iso
@@ -63,7 +64,7 @@ from ..domain.skills import SkillGroup, group_for
 from ..errors import AsiError, RecordDefect, SafetyRefusal, TransientFailure
 from ..ports import ModelRunner
 from .lock import RunLock
-from .pipeline import propose_candidate, score_and_isolate
+from .pipeline import propose_candidate, read_canonical_text, score_and_isolate
 from .receipt import KIND_CONVERSATION, KIND_SKILL, STATUS_STOOD_DOWN, RunReceipt
 from .state import OPEN_STATUSES, StateStore, safe_name
 from .validate import validate_candidate
@@ -615,7 +616,9 @@ def _propose_and_validate(
             # The base the validation replays against, read through the store
             # so that a link or a fifo at the target is the same deliberate
             # refusal here as it is at review and apply, not an aborted run.
-            base_text = skill_store.read_text(candidate.target.canonical_path)
+            base_text = read_canonical_text(
+                skill_store.read_text, Path(candidate.target.canonical_path), skill_id=skill_id
+            )
         except SafetyRefusal as exc:
             # A deliberate policy refusal is NOT a defect, and it must not land in
             # the quarantine count. A counter that sums "this record is broken" with

@@ -166,6 +166,32 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
     return problems
 
 
+def read_canonical_text(
+    read_text: Callable[[Path], str] | None, path: Path, *, skill_id: str
+) -> str:
+    """Read the canonical document a proposal is built against.
+
+    The store's read raises its own named refusals (a link, a fifo, bad UTF-8)
+    and leaves a plain OSError for the caller to name. Any OSError this read
+    meets (permissions changed, the file removed mid-run, a filesystem fault)
+    is one skill's defect for this run, raised as a RecordDefect the loop
+    quarantines, not an exception that ends the run with no receipt. A
+    quarantine entry does not blacklist the skill, so a condition that clears
+    by itself is simply retried by the next run.
+    """
+    try:
+        if read_text is not None:
+            return read_text(path)
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RecordDefect(
+            f"skill {skill_id!r}: its canonical document {path} could not be read "
+            f"({exc.strerror or exc}); nothing is proposed against a document this run "
+            "cannot see",
+            record_id=skill_id,
+        ) from exc
+
+
 def propose_candidate(
     group: SkillGroup,
     cases: Sequence[FailureCase],
@@ -198,11 +224,7 @@ def propose_candidate(
             "a proposal target"
         )
     canonical = group.canonical
-    base_text = (
-        read_text(Path(canonical.path))
-        if read_text is not None
-        else Path(canonical.path).read_text(encoding="utf-8")
-    )
+    base_text = read_canonical_text(read_text, Path(canonical.path), skill_id=group.skill_id)
     found = credential_labels(base_text)
     if found:
         # The transcript is redacted before any model sees it; the skill text

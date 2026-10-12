@@ -22,11 +22,18 @@ from agent_skill_improver.adapters.fixture_source import FixtureConversationSour
 from agent_skill_improver.adapters.skill_fs import FilesystemSkillStore
 from agent_skill_improver.app.daily import run_daily
 from agent_skill_improver.app.lock import RunLock
+from agent_skill_improver.app.pipeline import read_canonical_text
 from agent_skill_improver.app.receipt import STATUS_STOOD_DOWN
 from agent_skill_improver.app.state import StateStore, safe_name
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.config import load_config
-from agent_skill_improver.errors import LockHeld, SafetyRefusal, SourceUnavailable
+from agent_skill_improver.errors import (
+    LinkedTargetRefused,
+    LockHeld,
+    RecordDefect,
+    SafetyRefusal,
+    SourceUnavailable,
+)
 from agent_skill_improver.hashing import sha256_file
 
 from tests.support import FIXTURE_EXPORTS, FIXTURE_MALFORMED, InProcessRunner, build_env
@@ -1000,6 +1007,160 @@ class CredentialBearingSkillTests(DailyHarness):
         )
         self.assertTrue(refused)
         self.assertIn("credential", refused[0]["reason"].lower())
+
+
+class ACanonicalDocumentUnreadableAtProposeTests(DailyHarness):
+    """A document discovery read but the propose stage cannot is one skill's defect.
+
+    Measured before: a store whose read raised ``PermissionError`` at propose
+    time ended ``run_daily`` with that traceback from inside the propose stage,
+    no receipt written and nothing in state saying which skill it was. Cycle
+    71 made the same document a passed-over entry when it is unreadable at
+    discovery; this covers the window between discovery and the proposal, when
+    permissions change or the file is removed mid-run.
+    """
+
+    def _store_failing_for(self, config, skill_id: str, failure):
+        class FailsAtPropose(FilesystemSkillStore):
+            def read_text(self, path: Path) -> str:
+                if Path(path).parent.name == skill_id:
+                    return failure(Path(path), super().read_text)
+                return super().read_text(path)
+
+        return FailsAtPropose(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+    def _run_with(self, config, store):
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        receipt = run_daily(
+            config,
+            source=FixtureConversationSource(config.source.fixtures_dir),
+            runner=InProcessRunner(),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day=DAY,
+            commit=True,
+        )
+        return receipt.to_dict(), state
+
+    def _assert_quarantined_by_name(self, payload, state, path: Path, *, what: str, status: str):
+        self.assertEqual(payload["status"], status)
+        counts = payload["counts"]
+        self.assertEqual(counts["records_scored"], 5, "scoring is untouched by a propose defect")
+        self.assertEqual(counts["records_quarantined"], 0, "a skill defect is not a record defect")
+        self.assertEqual(
+            counts["skills_selected_for_proposal"], 1, "tdd is the only skill selected"
+        )
+        self.assertEqual(counts["skills_quarantined"], 1)
+        self.assertEqual(counts["candidates_proposed"], 0)
+        self.assertEqual(set(payload["skills"]), {"tdd"})
+        row = payload["skills"]["tdd"]
+        self.assertEqual((row["status"], row["stage"]), ("quarantined", "propose"))
+        self.assertIn(str(path), row["reason"], "the reason names the document")
+        self.assertIn("could not be read", row["reason"])
+        self.assertIn(what, row["reason"])
+        self.assertNotIn("Traceback", row["reason"])
+        quarantine = list(state.dir("quarantine").glob("tdd--*--propose--*.json"))
+        self.assertEqual(len(quarantine), 1, "the defect is on disk for the operator")
+        receipts = list((state.root / "receipts").glob("*.json"))
+        self.assertEqual(len(receipts), 1, "the run completed and wrote its receipt")
+
+    def test_a_document_denied_at_propose_quarantines_the_skill_and_the_run_completes(self):
+        config = self.env()
+        target = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+
+        def denied(path, _read):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        payload, state = self._run_with(config, self._store_failing_for(config, "tdd", denied))
+        self._assert_quarantined_by_name(
+            payload, state, target, what="Permission denied", status="partial"
+        )
+        self.assertNotIn("MUTATION", " ".join(payload["notes"]), "nothing changed on disk")
+
+    def test_a_document_removed_between_discovery_and_propose_is_the_same_named_defect(self):
+        config = self.env()
+        target = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+
+        def removed_then_read(path, read):
+            path.unlink()
+            return read(path)
+
+        payload, state = self._run_with(
+            config, self._store_failing_for(config, "tdd", removed_then_read)
+        )
+        self.assertFalse(target.exists())
+        # Something else removed a skill file while the run was in flight: the
+        # skill is quarantined by name AND the tree-digest guard flags the run,
+        # both on one written receipt, instead of a traceback and no receipt.
+        self._assert_quarantined_by_name(
+            payload, state, target, what="No such file", status="blocked"
+        )
+        self.assertTrue(
+            [n for n in payload["notes"] if n.startswith("LIVE SKILL MUTATION DETECTED")]
+        )
+
+    def test_a_document_denied_only_after_the_improver_ran_is_quarantined_the_same_way(self):
+        # The improver read the base; the read the validation replays against
+        # came a moment later and was denied. That second read is a separate
+        # call site and must name the same defect, not end the run.
+        config = self.env()
+        target = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        calls: list[Path] = []
+
+        def denied_second_time(path, read):
+            calls.append(path)
+            if len(calls) == 1:
+                return read(path)
+            raise PermissionError(13, "Permission denied", str(path))
+
+        payload, state = self._run_with(
+            config, self._store_failing_for(config, "tdd", denied_second_time)
+        )
+        self.assertEqual(len(calls), 2, "the improver's read succeeded; the replay's did not")
+        self._assert_quarantined_by_name(
+            payload, state, target, what="Permission denied", status="partial"
+        )
+
+    def test_read_canonical_text_turns_an_os_error_into_one_skill_defect(self):
+        path = self.base / "nowhere" / "SKILL.md"
+        for failure in (
+            PermissionError(13, "Permission denied", str(path)),
+            FileNotFoundError(2, "No such file or directory", str(path)),
+            IsADirectoryError(21, "Is a directory", str(path)),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+
+                def read(_p: Path, failure=failure) -> str:
+                    raise failure
+
+                with self.assertRaises(RecordDefect) as caught:
+                    read_canonical_text(read, path, skill_id="tdd")
+                self.assertEqual(caught.exception.record_id, "tdd")
+                self.assertIn(str(path), str(caught.exception))
+                self.assertIn(failure.strerror, str(caught.exception))
+                self.assertIsInstance(caught.exception.__cause__, OSError)
+        with self.assertRaises(RecordDefect) as caught:
+            read_canonical_text(None, path, skill_id="tdd")
+        self.assertEqual(caught.exception.record_id, "tdd")
+
+    def test_read_canonical_text_lets_the_store_refusals_through_untouched(self):
+        # The store's own refusals (a link at the target, a fifo, bad UTF-8) are
+        # deliberate and already named; wrapping them as a defect would turn a
+        # policy refusal into a quarantine count.
+        self.env()
+        path = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+
+        def refuses(_p: Path) -> str:
+            raise LinkedTargetRefused("a link at the target")
+
+        with self.assertRaises(LinkedTargetRefused):
+            read_canonical_text(refuses, path, skill_id="tdd")
+        self.assertEqual(
+            read_canonical_text(None, path, skill_id="tdd"), path.read_text(encoding="utf-8")
+        )
 
 
 class OnePerSkillTests(DailyHarness):
