@@ -884,17 +884,35 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         self.assertNotIn("\x1b", err)
         self.assertNotIn("\x1b", out)
 
-    def test_json_output_is_left_to_the_json_encoder(self):
-        """``--json`` is for programs: the encoder escapes every C0 control
-        character itself, and a second pass would corrupt the payload. It does
-        NOT touch a bidi override, which is why the docs say that reading
-        ``--json`` output in a terminal is not the reviewed path."""
+    def test_json_output_is_safe_to_read_and_unchanged_to_parse(self):
+        """``--json`` is for programs, and an operator reads it in a terminal
+        anyway. The encoder escapes C0 controls but leaves a bidi override, a
+        tag character, a C1 control and a lone surrogate raw; the JSON choke
+        point writes each as the ``\\uXXXX`` escape it is, which every parser
+        reads back to the same object."""
         import json
 
-        text = cli.dumps({"note": "x\x1by\u202ez"})
-        self.assertNotIn("\x1b", text)
-        self.assertIn("\u202e", text, "the encoder leaves a bidi override in the payload")
-        self.assertEqual(json.loads(text), {"note": "x\x1by\u202ez"})
+        hostile = {"note": "x\x1by\u202ez\U000e0041\x85\udcff", "\u2066key": 1}
+        raw = cli.dumps(hostile)
+        self.assertIn("\u202e", raw, "the encoder alone leaves the bidi override in place")
+        text = cli.escape_json_for_terminal(raw)
+        for ch in ("\x1b", "\u202e", "\U000e0041", "\x85", "\udcff", "\u2066"):
+            self.assertNotIn(ch, text)
+        self.assertIn("\\u202e", text)
+        self.assertIn("\\udb40\\udc41", text, "an astral character is a surrogate pair escape")
+        self.assertEqual(json.loads(text), hostile)
+        text.encode("utf-8")  # a strict stream can encode it
+
+    def test_json_for_the_terminal_goes_through_its_choke_point(self):
+        import contextlib
+        import io
+        import json
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._say_json({"a": "\u202e"})
+        self.assertNotIn("\u202e", out.getvalue())
+        self.assertEqual(json.loads(out.getvalue()), {"a": "\u202e"})
 
     def test_argparse_messages_that_repeat_argv_are_escaped_too(self):
         """argparse writes its own errors; "unrecognized arguments" repeats
@@ -918,38 +936,26 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         """Every mention of a standard stream in ``source`` that is not one of
         the sanctioned forms, as ``scope:line text``.
 
-        Sanctioned: any use inside ``_say``, ``_err`` or the parser's
-        ``_print_message``; and the exact call ``sys.stdout.write(dumps(...))``
-        (JSON for programs). Everything else is an offender: a write with any
-        other argument, ``.buffer``, ``.writelines``, aliasing the stream into a
+        Sanctioned: any use inside ``_say``, ``_err``, ``_say_json`` or the
+        parser's ``_print_message``. Everything else is an offender: a write
+        anywhere else, ``.buffer``, ``.writelines``, aliasing the stream into a
         variable, a module-level reference, a ``print`` or a ``logging`` use.
         """
         import ast
 
         tree = ast.parse(source)
-        sanctioned_scopes = {"_say", "_err", "_print_message"}
+        sanctioned_scopes = {"_say", "_err", "_say_json", "_print_message"}
         scope_of: dict[int, str] = {}
         for func in ast.walk(tree):
             if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for node in ast.walk(func):
                     scope_of.setdefault(id(node), func.name)
-        json_writes: set[int] = set()
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and ast.unparse(node.func) == "sys.stdout.write"
-                and len(node.args) == 1
-                and not node.keywords
-                and isinstance(node.args[0], ast.Call)
-                and ast.unparse(node.args[0].func) == "dumps"
-            ):
-                json_writes.update(id(n) for n in ast.walk(node.func))
         offenders: list[str] = []
         for node in ast.walk(tree):
             text = ast.unparse(node) if isinstance(node, (ast.Attribute, ast.Name)) else ""
             scope = scope_of.get(id(node), "<module>")
             if isinstance(node, ast.Attribute) and text in self.STREAMS:
-                if scope in sanctioned_scopes or id(node) in json_writes:
+                if scope in sanctioned_scopes:
                     continue
                 offenders.append(f"{scope}:{node.lineno} {text}")
             elif isinstance(node, ast.Call) and ast.unparse(node.func) in self.PRINTERS:
@@ -962,9 +968,9 @@ class TerminalOutputIsEscaped(unittest.TestCase):
 
     def test_every_text_write_in_the_cli_goes_through_the_escape(self):
         """Static: the only places ``cli.py`` touches a standard stream are the
-        choke points (``_say``, ``_err``, the parser's ``_print_message``) and
-        the JSON branches, where the one argument is a ``dumps(...)`` call.
-        Any other mention of the stream, not only a ``.write`` call, fails."""
+        choke points (``_say``, ``_err``, ``_say_json``, the parser's
+        ``_print_message``). Any other mention of the stream, not only a
+        ``.write`` call, fails."""
         source = Path(cli.__file__).read_text(encoding="utf-8")
         self.assertEqual(self._stream_references(source), [])
 
@@ -984,6 +990,7 @@ class TerminalOutputIsEscaped(unittest.TestCase):
             "logging": "import logging\n",
             "json plus text": "def f():\n    sys.stdout.write(dumps(x) + 'y')\n",
             "json keyword": "def f():\n    sys.stdout.write(dumps(x), extra=1)\n",
+            "raw json write": "def f():\n    sys.stdout.write(dumps(x))\n",
         }
         for name, snippet in evasions.items():
             with self.subTest(evasion=name):
@@ -991,7 +998,7 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         sanctioned = (
             "def _say(t):\n    sys.stdout.write(t)\n"
             "def _err(t):\n    sys.stderr.write(t)\n"
-            "def g():\n    sys.stdout.write(dumps(payload))\n"
+            "def _say_json(p):\n    sys.stdout.write(escape_json_for_terminal(dumps(p)))\n"
             "class P:\n    def _print_message(self, m, file=None):\n"
             "        (file or sys.stderr).write(m)\n"
         )

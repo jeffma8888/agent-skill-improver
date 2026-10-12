@@ -192,9 +192,12 @@ The defences, in order of how much they matter:
    through one escape (`escape_for_terminal`), so a hostile byte quoted from a
    model's stderr, a file name or a configured path is shown as `\x1b` rather
    than obeyed, and the argument parser's own messages go through the same
-   escape. `--json` output is left to the JSON encoder: it escapes every C0
-   control character itself, but leaves a bidi override in the payload, so
-   `--json` is for programs and is not the reviewed path.
+   escape. `--json` output goes through its own choke point: the encoder
+   escapes the C0 controls itself, and what it leaves raw (a bidi override, an
+   invisible tag character, a line or paragraph separator, DEL, a C1 control, a
+   lone surrogate) is written as the
+   JSON `\uXXXX` escape it is, so a program parses the same object and a person
+   reading the output in a terminal sees the escape rather than the effect.
 
 The honest limitation: injection can waste a run, and it can push a record into
 quarantine. It cannot silently edit a skill.

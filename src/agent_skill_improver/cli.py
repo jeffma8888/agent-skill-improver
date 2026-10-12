@@ -151,9 +151,41 @@ def escape_for_terminal(text: str) -> str:
     return "".join(out)
 
 
+def escape_json_for_terminal(text: str) -> str:
+    """JSON text with every character a terminal would obey written as the JSON
+    escape it is, so the same bytes are safe to read and unchanged to parse.
+
+    The encoder already escapes the C0 controls, but with ``ensure_ascii`` off it
+    leaves a bidi override, an invisible tag character, a C1 control or a lone
+    surrogate raw, and an operator does read ``--json`` output in a terminal.
+    Such a character can only sit inside a JSON string, where ``\\uXXXX`` is the
+    one spelling every parser accepts, so ``json.loads`` of the result is the
+    same object. Newlines are the encoder's own indentation and stay.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch != "\n" and (
+            ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) in ("Cc", "Cs")
+        ):
+            code = ord(ch)
+            if code >= 0x10000:
+                code -= 0x10000
+                out.append(f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}")
+            else:
+                out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _say(text: str) -> None:
     """The one place text for a person reaches stdout."""
     sys.stdout.write(escape_for_terminal(text))
+
+
+def _say_json(payload: Any) -> None:
+    """The one place JSON reaches stdout: for programs, and safe for the eyes."""
+    sys.stdout.write(escape_json_for_terminal(dumps(payload)))
 
 
 def _err(text: str) -> None:
@@ -163,9 +195,7 @@ def _err(text: str) -> None:
 
 def _emit(payload: Any, *, as_json: bool, lines: Sequence[str] = ()) -> None:
     if as_json:
-        # JSON is for programs; the encoder escapes control characters itself,
-        # and a second pass would corrupt the payload.
-        sys.stdout.write(dumps(payload))
+        _say_json(payload)
     else:
         for line in lines:
             _say(line + "\n")
@@ -487,7 +517,7 @@ def cmd_daily(args: argparse.Namespace) -> int:
         seed=args.seed,
     )
     if args.json:
-        sys.stdout.write(dumps(receipt.to_dict()))
+        _say_json(receipt.to_dict())
     else:
         _say(receipt.summary_line() + "\n")
         for note in receipt.notes:
@@ -547,7 +577,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     rubrics = {r.id: r for r in config.rubrics}
     report = review_report(candidate, base_text=base_text, rubrics=rubrics)
     if args.json:
-        sys.stdout.write(dumps(report))
+        _say_json(report)
         return 0
     out = [
         f"candidate     {report['candidate_id']}  ({report['status']})",
@@ -630,7 +660,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         rubrics=rubrics,
     )
     if args.json:
-        sys.stdout.write(dumps(result))
+        _say_json(result)
     else:
         write = result["write"]
         _say(
@@ -658,7 +688,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     store = build_skill_store(config, writable=True)
     result = rollback_candidate(candidate, skill_store=store, state=state, clock=SystemClock())
     if args.json:
-        sys.stdout.write(dumps(result))
+        _say_json(result)
     else:
         _say(f"rolled back {result['candidate_id']}: {result['result']}\n")
     return 0
