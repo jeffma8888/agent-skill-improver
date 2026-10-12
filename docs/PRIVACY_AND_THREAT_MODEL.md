@@ -237,11 +237,14 @@ write succeeds, the tool reports success, and the file that is actually loaded
 never changes — or the change is silently reverted by the next sync.
 
 Handling: each root declares `precedence`, `canonical` and `editable`. Exactly one
-root should be canonical and editable. Writes go only there. A skill that exists
-only in a non-editable root is refused as a proposal target (`MirrorEditRefused`)
-rather than written somewhere ineffective. Divergence between a canonical file and
-its mirrors is reported (`skills_with_divergent_mirrors`) because divergence means
-somebody's edit already went to the wrong place.
+root should be canonical and editable. Writes go only there. Two editable roots of
+one kind at one precedence holding the same skill are refused as a tie, not
+settled by root id, so the written copy is never the alphabetically first one. A
+skill that exists only in a non-editable root is refused as a proposal target
+(`MirrorEditRefused`) rather than written somewhere ineffective. Divergence
+between a canonical file and its mirrors is reported
+(`skills_with_divergent_mirrors`) because divergence means somebody's edit already
+went to the wrong place.
 
 The related trap, which this repository does not pretend to solve: a mirroring
 script that reports success while copying a fraction of what it was given. If your

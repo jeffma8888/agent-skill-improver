@@ -1594,6 +1594,149 @@ class CanonicalResolutionTests(Harness):
         )
         self.assertIn(str(newcomer.resolve()), shared.canonical_reason)
 
+    def _root(self, root_id: str, path: Path, *, precedence: int, canonical: bool, editable=True):
+        return SkillRoot(
+            id=root_id,
+            path=path,
+            precedence=precedence,
+            canonical=canonical,
+            editable=editable,
+            kind="custom" if editable else "mirror",
+        )
+
+    def test_two_canonical_roots_tied_on_precedence_withhold_the_slot_and_name_both_roots(self):
+        # Measured before: with roots ``alpha`` and ``zeta`` both canonical and
+        # editable at precedence 10, ``alpha`` was proposed against and ``zeta``
+        # listed as its mirror, and nothing said the choice was alphabetical.
+        alpha = self.base / "alpha"
+        write(alpha / "shared" / SKILL_FILENAME, GOOD + "\n- alpha's own line\n")
+        roots = [
+            self._root("zeta", self.canonical_dir, precedence=10, canonical=True),
+            self._root("alpha", alpha, precedence=10, canonical=True),
+            self.roots[1],
+        ]
+        shared = group_for(FilesystemSkillStore(roots, read_only=True).groups(), "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertEqual(sorted(c.root_id for c in shared.ambiguous_copies), ["alpha", "zeta"])
+        self.assertEqual(len(shared.all_copies), 3, "both tied copies and the mirror")
+        self.assertIn(
+            "roots 'alpha', 'zeta' each hold a copy of this skill", shared.canonical_reason
+        )
+        self.assertIn("all canonical and editable at precedence 10", shared.canonical_reason)
+        self.assertIn("decided by root id alone", shared.canonical_reason)
+        self.assertIn("distinct precedences (the lower number wins)", shared.canonical_reason)
+        self.assertEqual(
+            sorted(shared.to_dict()["ambiguous_copy_paths"]),
+            sorted(
+                [
+                    str((alpha / "shared" / SKILL_FILENAME).resolve()),
+                    str((self.canonical_dir / "shared" / SKILL_FILENAME).resolve()),
+                ]
+            ),
+        )
+
+    def test_two_merely_editable_roots_tied_on_precedence_are_the_same_ambiguity(self):
+        alpha = self.base / "alpha"
+        write(alpha / "shared" / SKILL_FILENAME, GOOD)
+        roots = [
+            self._root("zeta", self.canonical_dir, precedence=40, canonical=False),
+            self._root("alpha", alpha, precedence=40, canonical=False),
+            self.roots[1],
+        ]
+        shared = group_for(FilesystemSkillStore(roots, read_only=True).groups(), "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertIn(
+            "all editable, and none of them is marked canonical at precedence 40",
+            shared.canonical_reason,
+        )
+        self.assertIn(
+            "one is marked canonical = true",
+            shared.canonical_reason,
+            "the remedy that works in this tier; canonical = false would change nothing",
+        )
+        self.assertNotIn("canonical = false", shared.canonical_reason)
+
+    def test_a_duplicate_inside_a_tied_root_is_named_in_the_same_reason(self):
+        alpha = self.base / "alpha"
+        write(alpha / "shared" / SKILL_FILENAME, GOOD)
+        nested = self.canonical_dir / "group" / "shared" / SKILL_FILENAME
+        write(nested, GOOD)
+        roots = [
+            self._root("zeta", self.canonical_dir, precedence=10, canonical=True),
+            self._root("alpha", alpha, precedence=10, canonical=True),
+            self.roots[1],
+        ]
+        shared = group_for(FilesystemSkillStore(roots, read_only=True).groups(), "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertEqual(len(shared.ambiguous_copies), 3)
+        self.assertTrue(shared.canonical_reason.startswith("roots 'alpha', 'zeta' each hold"))
+        self.assertIn("root 'zeta' also holds 2 copies of this skill", shared.canonical_reason)
+        self.assertIn(str(nested.resolve()), shared.canonical_reason)
+        self.assertIn("an ambiguity of its own once the tie is settled", shared.canonical_reason)
+
+    def test_a_tied_copy_is_refused_at_the_write_path_as_unsettled_not_as_a_mirror(self):
+        alpha = self.base / "alpha"
+        tied = write(alpha / "shared" / SKILL_FILENAME, GOOD)
+        roots = [
+            self._root("zeta", self.canonical_dir, precedence=10, canonical=True),
+            self._root("alpha", alpha, precedence=10, canonical=True),
+        ]
+        store = FilesystemSkillStore(roots, read_only=False)
+        for target in (tied, self.canonical_dir / "shared" / SKILL_FILENAME):
+            with self.assertRaises(MirrorEditRefused) as ctx:
+                store.write_canonical(
+                    target, "x", expected_sha256=sha256_file(target), backup_dir=self.base / "bak"
+                )
+            message = str(ctx.exception)
+            self.assertIn("skill 'shared' has no canonical copy (roots 'alpha', 'zeta'", message)
+            self.assertNotIn("mirror copy", message)
+            self.assertNotIn("unknown", message)
+        self.assertEqual(sha256_file(tied), sha256_file(alpha / "shared" / SKILL_FILENAME))
+
+    def test_the_control_distinct_precedences_pick_the_lower_number_whatever_the_ids(self):
+        alpha = self.base / "alpha"
+        write(alpha / "shared" / SKILL_FILENAME, GOOD)
+        roots = [
+            self._root("alpha", alpha, precedence=20, canonical=True),
+            self._root("zeta", self.canonical_dir, precedence=10, canonical=True),
+            self.roots[1],
+        ]
+        shared = group_for(FilesystemSkillStore(roots, read_only=True).groups(), "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "zeta", "precedence, not the alphabet")
+        self.assertEqual(shared.ambiguous_copies, ())
+        self.assertEqual(sorted(m.root_id for m in shared.mirrors), ["alpha", "mirror"])
+
+    def test_the_control_a_marked_canonical_root_outranks_an_unmarked_one_at_the_same_precedence(
+        self,
+    ):
+        alpha = self.base / "alpha"
+        write(alpha / "shared" / SKILL_FILENAME, GOOD)
+        roots = [
+            self._root("alpha", alpha, precedence=10, canonical=False),
+            self.roots[0],
+            self.roots[1],
+        ]
+        shared = group_for(FilesystemSkillStore(roots, read_only=True).groups(), "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "canonical")
+        self.assertEqual(shared.ambiguous_copies, (), "different tiers do not tie")
+
+    def test_the_control_a_read_only_root_at_the_same_precedence_does_not_tie(self):
+        # Marked canonical too: a root that cannot be written is in no tier,
+        # whatever else it is marked, so it cannot tie with the writable one.
+        roots = [
+            self.roots[0],
+            self._root("mirror", self.mirror_dir, precedence=10, canonical=True, editable=False),
+        ]
+        shared = group_for(FilesystemSkillStore(roots, read_only=True).groups(), "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "canonical")
+        self.assertEqual(shared.ambiguous_copies, ())
+
     def test_two_copies_in_a_root_that_is_not_editable_change_nothing(self):
         write(self.mirror_dir / "group" / "shared" / SKILL_FILENAME, GOOD)
         shared = group_for(self.store().groups(), "shared")

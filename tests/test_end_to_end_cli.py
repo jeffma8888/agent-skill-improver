@@ -1017,6 +1017,81 @@ class AMisnamedCandidateRecordIsUnreachableAndSaysSoTests(unittest.TestCase):
         self.assertEqual(review.returncode, RC_OK, review.stderr)
 
 
+class TwoRootsTiedOnPrecedenceAreRefusedNotPickedByIdTests(unittest.TestCase):
+    """Measured before: the harness mirror root renamed ``alpha`` and made
+    canonical and editable at the canonical root's precedence had its ``tdd``
+    proposed against, the real copy (root ``zeta``) was listed as its mirror,
+    and ``doctor`` had no warning: the pick was alphabetical and silent."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        config_path = build_env(self.base, seed="tied-roots")
+        text = config_path.read_text(encoding="utf-8")
+        for old, new in (
+            ('id = "canonical"\n', 'id = "zeta"\n'),
+            ('id = "mirror"\n', 'id = "alpha"\n'),
+            (
+                'kind = "mirror"\nprecedence = 90\ncanonical = false\neditable = false\n',
+                'kind = "custom"\nprecedence = 10\ncanonical = true\neditable = true\n',
+            ),
+        ):
+            assert text.count(old) == 1, (old, text)
+            text = text.replace(old, new)
+        config_path.write_text(text, encoding="utf-8")
+        self.cfg = ["--config", str(config_path)]
+        self.copies = [
+            self.base / "skills-canonical" / "tdd" / "SKILL.md",
+            self.base / "skills-mirror" / "tdd" / "SKILL.md",
+        ]
+        self.before = {p: sha256_file(p) for p in self.copies}
+
+    def test_skills_and_doctor_name_both_roots_and_daily_proposes_against_neither(self):
+        skills = run_cli([*self.cfg, "--json", "skills"])
+        self.assertEqual(skills.returncode, RC_OK, skills.stderr)
+        group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertIsNone(group["canonical"])
+        self.assertEqual(sorted(group["ambiguous_copy_paths"]), sorted(map(str, self.copies)))
+        text = run_cli([*self.cfg, "skills"])
+        self.assertIn(
+            "tdd  [NO CANONICAL EDITABLE COPY -- proposals refused]  ambiguous=alpha,zeta",
+            text.stdout,
+        )
+        self.assertIn("why: roots 'alpha', 'zeta' each hold a copy of this skill", text.stdout)
+
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, RC_OK, doctor.stderr)
+        warnings = [w for w in json.loads(doctor.stdout)["warnings"] if "'tdd'" in w]
+        self.assertEqual(len(warnings), 1, json.loads(doctor.stdout)["warnings"])
+        self.assertIn(
+            "has a copy in each of roots 'alpha', 'zeta', which tie on precedence", warnings[0]
+        )
+        self.assertIn("distinct precedences", warnings[0])
+
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.assertEqual(receipt["candidates"], [], "no proposal at either copy")
+        row = receipt["skills"]["tdd"]
+        self.assertEqual((row["status"], row["stage"]), ("quarantined", "propose"))
+        self.assertIn("decided by root id alone", row["reason"])
+        self.assertEqual({p: sha256_file(p) for p in self.copies}, self.before, "untouched")
+
+    def test_the_control_giving_one_root_a_lower_precedence_restores_the_skill(self):
+        config_path = Path(self.cfg[1])
+        text = config_path.read_text(encoding="utf-8")
+        assert text.count("precedence = 10\n") == 2, text
+        config_path.write_text(text.replace("precedence = 10\n", "precedence = 5\n", 1))
+        skills = run_cli([*self.cfg, "--json", "skills"])
+        self.assertEqual(skills.returncode, RC_OK, skills.stderr)
+        group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertEqual(group["canonical"]["root_id"], "zeta", "the first table is 'zeta'")
+        self.assertEqual(group["ambiguous_copy_paths"], [])
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual([w for w in json.loads(doctor.stdout)["warnings"] if "'tdd'" in w], [])
+
+
 class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
     """Measured before: a second ``SKILL.md`` for ``tdd`` nested elsewhere in
     the canonical root became the canonical copy by walk order, ``skills``

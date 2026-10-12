@@ -176,7 +176,10 @@ enabled = ["evidence-discipline", "instruction-following"]
 # canonical+editable; everything else is a mirror that is read but never written.
 # If no root is marked canonical, the highest-precedence editable root is treated
 # as the canonical one (`doctor` names it); with no editable root at all, every
-# proposal is refused.
+# proposal is refused. The lower `precedence` number wins. Two editable roots of
+# the same kind (both marked canonical, or neither) at the same precedence that
+# both hold a skill are a tie this tool refuses to break by root id: the skill
+# gets no canonical copy, `doctor` warns, and `daily` proposes nothing for it.
 # Roots must be disjoint: two roots naming one directory (through `.`, `..`, a
 # link, or a case variant of a directory that exists), or one root inside
 # another, are refused at load. So is a canonical+editable root inside this

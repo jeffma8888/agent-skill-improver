@@ -951,6 +951,14 @@ class FilesystemSkillStore:
         """
         resolved = Path(target).resolve()
         kind, group = classify_target(self.groups(refresh=True), resolved)
+        if kind == "mirror" and group is not None and group.canonical is None:
+            # Every copy of a skill with no canonical copy classifies as a
+            # mirror, but calling it one, of an unknown source, misdescribes
+            # it: the resolver's own reason says what is unsettled.
+            raise MirrorEditRefused(
+                f"refusing to write {target}: skill {group.skill_id!r} has no canonical copy "
+                f"({group.canonical_reason}); nothing is written until that is settled."
+            )
         if kind == "mirror":
             canonical = group.canonical.path if group and group.canonical else "<unknown>"
             raise MirrorEditRefused(

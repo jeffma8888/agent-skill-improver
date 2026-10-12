@@ -339,6 +339,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for group in store.groups():
         if group.ambiguous_copies:
             listed = ", ".join(str(c.path) for c in group.ambiguous_copies)
+            tied_roots = sorted({c.root_id for c in group.ambiguous_copies})
+            if len(tied_roots) > 1:
+                # Roots of one tier at one precedence: the resolver refuses to
+                # pick by root id, so the setting, not a file, is what to change.
+                names = ", ".join(repr(r) for r in tied_roots)
+                warnings.append(
+                    f"skill {group.skill_id!r} has a copy in each of roots {names}, which tie on "
+                    f"precedence ({listed}); `daily` refuses to propose for it until the roots "
+                    "have distinct precedences or all but one is marked canonical = false or "
+                    "editable = false"
+                )
+                continue
             warnings.append(
                 f"skill {group.skill_id!r} has {len(group.ambiguous_copies)} copies in editable "
                 f"root {group.ambiguous_copies[0].root_id!r} ({listed}); `daily` refuses to "

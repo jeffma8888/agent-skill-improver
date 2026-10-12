@@ -175,11 +175,13 @@ class SkillGroup:
     canonical: SkillSnapshot | None
     mirrors: tuple[SkillSnapshot, ...]
     canonical_reason: str = ""
-    #: The copies in the editable root that would have been selected, when that
-    #: root holds more than one; ``canonical`` is then None. Measured before:
-    #: a second ``SKILL.md`` for a skill nested elsewhere in the canonical root
-    #: became the canonical copy by walk order, the real one was listed as a
-    #: "mirror" in its own root, and ``daily`` proposed against the newcomer.
+    #: The copies among which the resolver refused to choose; ``canonical`` is
+    #: then None. Either the editable root that would have been selected holds
+    #: more than one (measured before: a second ``SKILL.md`` for a skill nested
+    #: elsewhere in the canonical root became the canonical copy by walk order,
+    #: the real one was listed as a "mirror" in its own root, and ``daily``
+    #: proposed against the newcomer), or two or more editable roots of one
+    #: tier at one precedence each hold one, so the copies span several roots.
     ambiguous_copies: tuple[SkillSnapshot, ...] = ()
 
     @property
@@ -261,6 +263,16 @@ def resolve_groups(
     resolve by walk order: the group then has no canonical copy, names both
     documents, and proposals are refused until one remains.
 
+    The selected root must also be the only root of its tier at its
+    precedence that holds the skill. Two roots of the same tier (both marked
+    canonical, or neither) at the same precedence, each with a copy, give no
+    ordering the operator chose, and this function refuses to resolve that by
+    root id: the group has no canonical copy, the copies are named, and the
+    reason says which setting to change. Measured before: roots ``alpha`` and
+    ``zeta``, both canonical and editable at precedence 10, had the ``alpha``
+    copy proposed against and the ``zeta`` copy listed as its mirror, with no
+    word anywhere that the choice was alphabetical.
+
     ``passed_over`` is ``(root_id, skill_id, reason)`` for every document
     discovery saw and did not take. A copy passed over in an editable root is
     a copy this run cannot see, not an absent one: the skill then has no
@@ -327,6 +339,51 @@ def resolve_groups(
         if canonical is None:
             reason = "no editable root holds this skill; proposals will be refused"
             groups.append(SkillGroup(skill_id, None, tuple(ordered), reason))
+            continue
+        chosen_root = by_root[canonical.root_id]
+        tied_roots = sorted(
+            {
+                s.root_id
+                for s in ordered
+                if s.root_id != canonical.root_id
+                and (root := by_root.get(s.root_id)) is not None
+                and root.editable
+                and root.canonical == chosen_root.canonical
+                and root.precedence == chosen_root.precedence
+            }
+        )
+        if tied_roots:
+            names = ", ".join(repr(r) for r in [canonical.root_id, *tied_roots])
+            if chosen_root.canonical:
+                tier = "canonical and editable"
+                remedy = (
+                    "the roots have distinct precedences (the lower number wins) or all but one "
+                    "is marked canonical = false or editable = false"
+                )
+            else:
+                tier = "editable, and none of them is marked canonical"
+                remedy = (
+                    "the roots have distinct precedences (the lower number wins), one is marked "
+                    "canonical = true, or all but one is marked editable = false"
+                )
+            tied = tuple(s for s in ordered if s.root_id in {canonical.root_id, *tied_roots})
+            reason = (
+                f"roots {names} each hold a copy of this skill and are all {tier} at "
+                f"precedence {chosen_root.precedence}; which copy is the skill would be "
+                f"decided by root id alone, which is ambiguous, so proposals are refused until "
+                f"{remedy}"
+            )
+            # A root in the tie that claims the skill twice is a second
+            # ambiguity, named now so settling the tie does not reveal it.
+            for root_id in [canonical.root_id, *tied_roots]:
+                copies_here = [s for s in tied if s.root_id == root_id]
+                if len(copies_here) > 1:
+                    listed = ", ".join(str(s.path) for s in copies_here)
+                    reason += (
+                        f"; root {root_id!r} also holds {len(copies_here)} copies of this skill "
+                        f"({listed}), an ambiguity of its own once the tie is settled"
+                    )
+            groups.append(SkillGroup(skill_id, None, tuple(ordered), reason, ambiguous_copies=tied))
             continue
         same_root = tuple(s for s in ordered if s.root_id == canonical.root_id)
         if len(same_root) > 1:
