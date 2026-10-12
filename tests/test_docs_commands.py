@@ -556,6 +556,35 @@ class DocumentedQuoteBoundsAreTheCode(unittest.TestCase):
             self.assertEqual(int(other), QUOTED_OUTPUT_CHARS, "a second, different bound is stated")
 
 
+class SchedulerLogsAreDocumentedAssets(unittest.TestCase):
+    """The scheduler templates redirect both streams of a committed ``daily``
+    run into the state tree. Those files can carry the same excerpts as the
+    refusal records, so every log path a template names must have a row in the
+    privacy asset table and a mention in the scheduling doc."""
+
+    TEMPLATES = tuple(sorted((REPO / "packaging").rglob("*.template")))
+    LOG_RE = re.compile(r"__STATE__/([A-Za-z0-9_.-]+\.log)")
+
+    def logs_named_by_the_templates(self) -> set[str]:
+        found: set[str] = set()
+        for template in self.TEMPLATES:
+            found |= set(self.LOG_RE.findall(template.read_text(encoding="utf-8")))
+        return found
+
+    def test_every_template_log_has_a_privacy_row_and_a_scheduling_mention(self) -> None:
+        logs = self.logs_named_by_the_templates()
+        self.assertEqual(logs, {"daily.out.log", "daily.err.log"}, "the extractor drifted")
+        privacy = (REPO / "docs" / "PRIVACY_AND_THREAT_MODEL.md").read_text(encoding="utf-8")
+        scheduling = (REPO / "docs" / "SCHEDULING.md").read_text(encoding="utf-8")
+        assets = privacy.split("## Assets", 1)[1].split("\n## ", 1)[0]
+        rows = [line for line in assets.splitlines() if line.startswith("| Scheduler logs |")]
+        self.assertEqual(len(rows), 1, "exactly one asset row for the scheduler logs")
+        for name in sorted(logs):
+            with self.subTest(log=name):
+                self.assertIn(f"`state/{name}`", rows[0])
+                self.assertIn(f"`{name}`", scheduling)
+
+
 class ReadmeCommandTableIsTwoSided(unittest.TestCase):
     """The README's command table is the first place a reader learns which
     commands write anything. Its rows are checked both ways against the parser,
