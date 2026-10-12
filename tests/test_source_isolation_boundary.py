@@ -943,6 +943,19 @@ class IsolationModeIsRecordedTests(Harness):
         self.assertIn("iso=none", runner.command_id("scorer"))
         self.assertIn("iso=none", runner.command_id("improver"))
 
+    def test_a_credential_in_a_role_argv_is_redacted_from_its_command_id_and_dump(self):
+        """The id lands in every scorecard, candidate and receipt the role
+        touches, and the dump in the config report; a key passed as an option
+        value must not ride along in either."""
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        cmd = RoleCommand(role="scorer", argv=("model", "--key", planted), model_label="m", env={})
+        command_id = cmd.command_id("none")
+        self.assertIn("--key [REDACTED:aws-access-key-id]", command_id)
+        self.assertNotIn(planted, command_id)
+        dumped = cmd.to_dict()["argv"]
+        self.assertEqual(dumped, ["model", "--key", "[REDACTED:aws-access-key-id]"])
+        self.assertEqual(cmd.argv[2], planted, "the command that runs is untouched")
+
     def test_an_os_sandbox_produces_a_different_command_id_for_the_same_argv(self):
         """The claim this makes possible: two artifacts with the same argv but
         different confinement are distinguishable after the fact."""
@@ -1050,6 +1063,27 @@ class ProbeHonestyTests(unittest.TestCase):
     def test_the_probe_reports_every_outcome_instead_of_raising(self):
         self.assertIn("except BaseException", sandbox_mod.PROBE_SOURCE)
         self.assertIn("blocked:", sandbox_mod.PROBE_SOURCE)
+
+    def test_a_probe_that_prints_a_credential_has_it_redacted_from_the_detail(self):
+        """The detail is persisted in the receipt's isolation record. The probe
+        is this package's own script, so the risk is remote; the rule is that no
+        child's output reaches a record unredacted, and the probe is a child."""
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        program = (
+            "import sys\n"
+            "sys.stdout.write('not json ' + 'AKIA' + 'ABCDEFGHIJKLMNOP')\n"
+            "sys.stderr.write('token ' + 'AKIA' + 'ABCDEFGHIJKLMNOP')\n"
+            "sys.exit(3)\n"
+        )
+        with TemporaryDirectory() as tmp:
+            outcome = sandbox_mod._run_probe(
+                [sys.executable, "-c", program], cwd=Path(tmp), env={"PATH": os.environ["PATH"]}
+            )
+        self.assertFalse(outcome.ran)
+        self.assertIn("exit 3", outcome.detail)
+        self.assertEqual(outcome.detail.count("[REDACTED:aws-access-key-id]"), 2, outcome.detail)
+        self.assertNotIn(planted, outcome.detail)
+        self.assertNotIn(planted, json.dumps(outcome.to_dict()))
 
     def test_the_probe_targets_a_listener_this_process_owns(self):
         """So verification needs no network and no external host."""

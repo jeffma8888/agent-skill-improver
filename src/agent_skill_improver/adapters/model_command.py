@@ -56,6 +56,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
+from ..domain.redaction import redact
 from ..errors import MalformedModelOutput, TransientFailure
 from ..jsonio import loads_untrusted
 from .bounded_process import (
@@ -96,7 +97,11 @@ class RoleCommand:
         unable to answer the only question that matters after the fact.
         """
         label = self.model_label or "unlabelled"
-        return f"{self.role}:{label}:iso={isolation_mode}:{' '.join(self.argv)}"
+        # The id is persisted in every scorecard, candidate and receipt the
+        # role touches, so an argv carrying a key as an option value is shown
+        # with the key masked. The placeholder is deterministic, so the id still
+        # tells two configurations apart.
+        return f"{self.role}:{label}:iso={isolation_mode}:{redact(' '.join(self.argv)).text}"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the command itself.
@@ -107,7 +112,7 @@ class RoleCommand:
         """
         return {
             "role": self.role,
-            "argv": list(self.argv),
+            "argv": [redact(part).text for part in self.argv],
             "timeout_seconds": self.timeout_seconds,
             "max_output_bytes": self.max_output_bytes,
             "model_label": self.model_label,

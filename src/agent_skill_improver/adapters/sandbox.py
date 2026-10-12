@@ -51,6 +51,7 @@ from ..domain.isolation import (
     MODE_NONE,
     MODE_SANDBOX_EXEC,
 )
+from .bounded_process import quotable
 
 #: Probe source, executed with ``-c`` so no file has to be readable inside the
 #: sandbox and nothing is left on disk. It never raises: every outcome is
@@ -80,6 +81,10 @@ PROBE_SOURCE = (
 )
 
 PROBE_TIMEOUT_SECONDS = 60
+
+#: How many characters of the probe's stdout and stderr a failed verification
+#: quotes into the receipt.
+PROBE_QUOTE_CHARS = 200
 
 
 def _sbpl_string(value: str) -> str:
@@ -257,8 +262,11 @@ def _run_probe(argv: Sequence[str], *, cwd: Path, env: dict[str, str]) -> ProbeO
             "",
             "",
             "",
-            detail=f"exit {proc.returncode}, unparseable probe output: {text[:200]!r} "
-            f"stderr: {(proc.stderr or '').strip()[:200]!r}",
+            # The detail is persisted in the receipt's isolation record, so the
+            # probe's output is quoted the way any child's is: redacted, then cut.
+            detail=f"exit {proc.returncode}, unparseable probe output: "
+            f"{quotable(text, limit=PROBE_QUOTE_CHARS, from_end=False)!r} stderr: "
+            f"{quotable((proc.stderr or '').strip(), limit=PROBE_QUOTE_CHARS, from_end=False)!r}",
         )
     return ProbeOutcome(
         ran=True,
