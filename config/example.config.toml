@@ -167,6 +167,9 @@ enabled = ["evidence-discipline", "instruction-following"]
 # --- skill roots ---------------------------------------------------------
 # Order matters only through `precedence`. Exactly one root should be
 # canonical+editable; everything else is a mirror that is read but never written.
+# Roots must be disjoint: two roots naming one directory (through `.`, `..`, a
+# link, or a case variant of a directory that exists), or one root inside
+# another, are refused at load.
 [[skill_root]]
 id = "example-canonical"
 path = "examples/skills"

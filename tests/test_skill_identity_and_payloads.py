@@ -36,6 +36,7 @@ from agent_skill_improver.errors import (
     SelfMutationRefused,
 )
 from agent_skill_improver.hashing import sha256_file
+from tests.support import build_env, run_cli
 
 GOOD = """---
 name: example
@@ -881,6 +882,123 @@ class CanonicalResolutionTests(Harness):
             "root_id is part of the key, so the same content in a different root is "
             "a different tree",
         )
+
+
+class SkillRootsMustBeDisjointTests(unittest.TestCase):
+    """Two roots that name one directory, or one root inside another, are a
+    config error rather than a working configuration.
+
+    Measured before this check existed: a ``mirror`` root spelled as the
+    canonical directory loaded cleanly, the inventory found every skill twice
+    (once per root id), each group listed the skill as a mirror of itself, and
+    the root flagged ``editable = false`` was the exact directory
+    ``write_canonical`` landed in. The mirror interlock judged the file
+    canonical first, so the read-only flag protected nothing. The check compares
+    the lexically folded spelling and the link-resolved one, so ``.``, ``..`` and
+    a symbolic link to another root are all caught with no directory needing to
+    exist; roots that do exist are also compared by identity, which catches a
+    case variant on a filesystem that folds case. A sibling that merely shares
+    a name prefix is not inside the other.
+    """
+
+    def _config_with_mirror_at(self, base: Path, spelling: str) -> Path:
+        """The harness config with the mirror root's path replaced by ``spelling``."""
+        config = Path(build_env(base, dry_run=True))
+        text = config.read_text(encoding="utf-8")
+        mirror = json.dumps(str(base / "skills-mirror"))
+        assert text.count(mirror) == 1, text
+        config.write_text(text.replace(mirror, json.dumps(spelling)), encoding="utf-8")
+        return config
+
+    def _refusal(self, config: Path) -> str:
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(config)
+        return str(ctx.exception)
+
+    def test_a_mirror_root_naming_the_canonical_directory_is_refused_by_both_ids(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            message = self._refusal(
+                self._config_with_mirror_at(base, str(base / "skills-canonical"))
+            )
+            self.assertIn("'canonical'", message)
+            self.assertIn("'mirror'", message)
+            self.assertIn("same directory", message)
+
+    def test_the_same_directory_spelled_with_redundant_segments_is_still_refused(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            spelled = str(base / "skills-mirror" / ".." / "skills-canonical" / ".")
+            message = self._refusal(self._config_with_mirror_at(base, spelled))
+            self.assertIn("same directory", message)
+            self.assertIn(spelled, message, "the refusal quotes the spelling as configured")
+
+    def test_a_root_reached_through_a_link_to_another_root_is_refused(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "alias").symlink_to(base / "skills-canonical")
+            message = self._refusal(self._config_with_mirror_at(base, str(base / "alias")))
+            self.assertIn("same directory", message)
+            self.assertIn(str(base / "alias"), message)
+
+    def test_a_root_inside_another_is_refused_whichever_is_listed_first(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            inner = str(base / "skills-canonical" / "nested")
+            message = self._refusal(self._config_with_mirror_at(base, inner))
+            self.assertIn(f"'mirror' ({inner}) lies inside skill_root 'canonical'", message)
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outer = str(base)
+            message = self._refusal(self._config_with_mirror_at(base, outer))
+            self.assertIn("'canonical'", message)
+            self.assertIn(f"lies inside skill_root 'mirror' ({outer})", message)
+
+    def test_a_case_variant_of_an_existing_root_is_judged_by_identity_not_text(self):
+        """On a filesystem that folds case (macOS APFS by default), ``SKILLS``
+        and ``skills`` are one directory and the alias is refused. On one that
+        does not (Linux ext4, so the CI runner), they are two directories and
+        the config is legitimate. Both verdicts are asserted, each where it is
+        true, so the test is a measurement on either host rather than a skip."""
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            variant = base / "SKILLS-CANONICAL"
+            config = self._config_with_mirror_at(base, str(variant))
+            folds_case = variant.exists() and os.path.samefile(base / "skills-canonical", variant)
+            if folds_case:
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(config)
+                self.assertIn("same directory", str(ctx.exception))
+                self.assertIn(str(variant), str(ctx.exception))
+            else:
+                self.assertFalse(variant.exists())
+                loaded = load_config(config)
+                self.assertEqual([r.id for r in loaded.skill_roots], ["canonical", "mirror"])
+
+    def test_the_control_sibling_roots_load_even_when_one_does_not_exist_yet(self):
+        from agent_skill_improver.config import load_config
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = self._config_with_mirror_at(base, str(base / "skills-canonical-to-be"))
+            self.assertFalse((base / "skills-canonical-to-be").exists())
+            loaded = load_config(config)
+            self.assertEqual([r.id for r in loaded.skill_roots], ["canonical", "mirror"])
+
+    def test_doctor_reports_overlapping_roots_as_a_config_error(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = self._config_with_mirror_at(base, str(base / "skills-canonical"))
+            proc = run_cli(["--config", str(config), "doctor"])
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("config error", proc.stderr)
+            self.assertIn("same directory", proc.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

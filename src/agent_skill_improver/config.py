@@ -20,7 +20,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .adapters.conversation_cli import (
     DEFAULT_DISCOVERY_ARGV,
@@ -651,7 +651,82 @@ def _load_skill_roots(raw: Any, *, base_dir: Path) -> tuple[SkillRoot, ...]:
                 note=str(entry.get("note", "")),
             )
         )
+    _assert_roots_disjoint(roots)
     return tuple(roots)
+
+
+def _root_forms(path: Path) -> tuple[Path, ...]:
+    """The spellings under which one root directory is compared with another:
+    the configured path with ``.`` and ``..`` folded lexically, and the same
+    path with every link followed. A root need not exist at load time, so both
+    forms are computed without touching it beyond what ``resolve`` reads."""
+    absolute = path if path.is_absolute() else path.absolute()
+    return (Path(os.path.normpath(absolute)), absolute.resolve())
+
+
+def _is_same_directory(a: Path, b: Path) -> bool:
+    """Whether two spellings reach one directory on disk, judged by identity
+    rather than text, so a case variant on a filesystem that folds case is
+    caught. Either path missing, unreadable, or unstattable (a NUL byte in the
+    spelling is a ``ValueError``) means no verdict here, not a match."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _lies_inside(inner: Path, outer: Path) -> bool:
+    """Whether ``inner`` is strictly below ``outer``: by text on the given
+    forms, or by identity between ``outer`` and any existing ancestor of
+    ``inner`` (the inner root itself may not exist yet)."""
+    if outer in inner.parents:
+        return True
+    return any(_is_same_directory(ancestor, outer) for ancestor in inner.parents)
+
+
+def _assert_roots_disjoint(roots: Sequence[SkillRoot]) -> None:
+    """Refuse two roots that name the same directory, or one inside another.
+
+    Every root is scanned on its own, so a directory reachable from two roots
+    yields the same file twice under two root ids. Measured before this check
+    existed, a ``mirror`` root spelled as the canonical directory made the
+    inventory report each skill as a mirror of itself, and the root flagged
+    read-only was the exact directory the write landed in: the mirror interlock
+    judged the file canonical first and the read-only flag protected nothing.
+    A root inside another is the same fault for the inner tree, and the write
+    path's walk below a root would judge the inner root as a component of the
+    outer.
+
+    Spellings are compared lexically folded and link-resolved, which needs no
+    directory to exist; roots that do exist are also compared by identity
+    (``samefile``), which is what catches ``Skills`` against ``skills`` on a
+    filesystem that folds case. A case variant of a root that does not exist
+    yet is the one spelling this check cannot see. Refused by name, with both
+    spellings quoted.
+    """
+    for i, outer in enumerate(roots):
+        for inner in roots[i + 1 :]:
+            for a in _root_forms(outer.path):
+                for b in _root_forms(inner.path):
+                    if a == b or _is_same_directory(a, b):
+                        raise ConfigError(
+                            f"skill_root {outer.id!r} ({outer.path}) and {inner.id!r} "
+                            f"({inner.path}) name the same directory {a}. Each skill would "
+                            f"be inventoried twice, once per root, and a root flagged "
+                            f"read-only would protect nothing. Remove one, or point it at "
+                            f"a different tree."
+                        )
+                    if _lies_inside(b, a) or _lies_inside(a, b):
+                        contained, container = (
+                            (inner, outer) if _lies_inside(b, a) else (outer, inner)
+                        )
+                        raise ConfigError(
+                            f"skill_root {contained.id!r} ({contained.path}) lies inside "
+                            f"skill_root {container.id!r} ({container.path}). The outer root's "
+                            f"scan already reaches every skill in the inner one, so each would "
+                            f"be inventoried twice under two root ids. Move the inner tree "
+                            f"beside the outer, or drop one of the two roots."
+                        )
 
 
 def _load_rubrics(

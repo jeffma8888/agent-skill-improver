@@ -263,7 +263,14 @@ replacement. Constraints:
 - the target must be a **canonical, editable** root. A skill present only in a
   mirror has no editable copy, and a proposal against it is refused
   (`MirrorEditRefused`) rather than written somewhere that the next sync
-  overwrites.
+  overwrites. The interlock assumes the roots are disjoint, so config loading
+  refuses two roots that name one directory (plainly, through `.` or `..`,
+  through a link, or by on-disk identity when both exist, which is what catches
+  a case variant on a filesystem that folds case) or one root inside another:
+  with an aliased mirror root the inventory listed each skill as a mirror of
+  itself and the read-only flag protected the very directory the write landed in.
+  Stated limit: a case variant of a root that does not exist yet is compared by
+  text only.
 - a skill in `[guard].protected_skill_ids`, or one holding an executable payload,
   is refused as a target and the refusal is written to `state/refusals/`.
 - a proposal whose canonical snapshot carries payload files is annotated
