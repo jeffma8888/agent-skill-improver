@@ -31,10 +31,6 @@ def dumps(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
 
 
-def loads(text: str) -> Any:
-    return json.loads(text)
-
-
 def write_json(path: Path, obj: Any, *, mode: int = FILE_MODE) -> str:
     """Atomically write ``obj``; return the exact text written."""
     text = dumps(obj)
@@ -43,7 +39,8 @@ def write_json(path: Path, obj: Any, *, mode: int = FILE_MODE) -> str:
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Read a JSON file a hand could have edited; deep nesting is a ``ValueError``."""
+    return loads_untrusted(path.read_text(encoding="utf-8"))
 
 
 def loads_untrusted(text: str) -> Any:
@@ -54,12 +51,14 @@ def loads_untrusted(text: str) -> Any:
     pathological export or model reply abort the whole pass: a single record
     vetoing the batch. Here the recursion failure is folded into ``ValueError``
     (which ``JSONDecodeError`` already is) so a caller's one ``except ValueError``
-    covers both, and classifies the record rather than crashing the run.
+    covers both, and classifies the record rather than crashing the run. State
+    leaves and backup manifests take the same route: a file under ``state/`` is
+    something a hand can edit, so it is read as untrusted too.
     """
     try:
         return json.loads(text)
     except RecursionError as exc:
-        raise ValueError("JSON is nested too deeply to be a conversation or a verdict") from exc
+        raise ValueError("JSON is nested too deeply to be anything this tool reads") from exc
 
 
 def write_text_atomic(path: Path, text: str, *, mode: int = FILE_MODE) -> None:

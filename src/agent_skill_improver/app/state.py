@@ -62,7 +62,7 @@ from ..domain.candidate import (
     validate_candidate_id,
 )
 from ..errors import SafetyRefusal, StateUnreadable
-from ..jsonio import FILE_MODE, write_json, write_text_atomic
+from ..jsonio import FILE_MODE, loads_untrusted, write_json, write_text_atomic
 
 #: Owner-only on the state root and every directory beneath it.
 DIR_MODE = 0o700
@@ -681,9 +681,7 @@ def _read_state_json(path: Path) -> Any:
         os.close(fd)
         raise
     with handle:
-        import json
-
-        return json.load(handle)
+        return loads_untrusted(handle.read())
 
 
 def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
@@ -693,10 +691,12 @@ def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
     from the middle of a pass: a traceback, exit code 1, and no file named. Every
     state read is a refusal with the path and the remedy instead. The corrupt
     file is left in place; nothing here guesses at what it was meant to say.
+    Deep nesting is folded into ``ValueError`` by the reader, so one ``except``
+    covers a truncated leaf and a pathological one alike.
     """
     try:
         raw = _read_state_json(path)
-    except (OSError, ValueError, RecursionError) as exc:
+    except (OSError, ValueError) as exc:
         raise StateUnreadable(
             f"refusing to use the {what} record {path}: it could not be read ({exc}). "
             "A truncated or hand-edited state file is never guessed at; move it aside "

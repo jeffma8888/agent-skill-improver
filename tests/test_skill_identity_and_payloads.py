@@ -448,6 +448,18 @@ class RollbackSafetyTests(Harness):
         with self.assertRaises(BackupUnusable):
             self.store(read_only=False).rollback(manifest)
 
+    def test_a_pathologically_nested_manifest_is_a_refusal_not_a_crash(self):
+        """Deep nesting raises ``RecursionError`` rather than ``JSONDecodeError``;
+        the recovery command must still refuse by name and touch nothing.
+        """
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        manifest.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        with self.assertRaises(BackupUnusable) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("could not be read", str(ctx.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), applied)
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "fifos are POSIX")
     def test_a_manifest_that_is_a_fifo_is_refused_rather_than_waited_on(self):
         """``open`` on a fifo with no writer never returns. The manifest is judged

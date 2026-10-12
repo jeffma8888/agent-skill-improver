@@ -1059,6 +1059,18 @@ class StateReadTests(unittest.TestCase):
             self.state.read_candidate(self.candidate.id)
         self.assertIn("could not be read", str(ctx.exception))
 
+    def test_a_pathologically_nested_record_is_a_named_refusal_not_a_crash(self):
+        """``json.load`` raises ``RecursionError``, not ``JSONDecodeError``, on
+        deep nesting. A candidate leaf is a file a hand can edit, so it gets the
+        same treatment as an export or a model reply: the refusal names the file
+        instead of a traceback naming the parser.
+        """
+        self.path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        with self.assertRaises(StateUnreadable) as ctx:
+            self.state.read_candidate(self.candidate.id)
+        self.assertIn("could not be read", str(ctx.exception))
+        self.assertIn(str(self.path), str(ctx.exception))
+
     def test_a_record_of_the_wrong_schema_is_a_named_refusal(self):
         self.path.write_text('{"schema": "asi.receipt.v1"}', encoding="utf-8")
         with self.assertRaises(StateUnreadable):
@@ -1090,6 +1102,13 @@ class StateReadTests(unittest.TestCase):
     def test_listing_skips_an_unreadable_record_rather_than_failing_the_command(self):
         broken = self.state.dir("candidates") / "broken.json"
         broken.write_text("{", encoding="utf-8")
+        ids = [c.id for c in self.state.list_candidates()]
+        self.assertEqual(ids, [self.candidate.id])
+
+    def test_listing_skips_a_pathologically_nested_record_rather_than_failing_the_command(self):
+        """One planted record must not veto ``asi candidates`` for every other one."""
+        bomb = self.state.dir("candidates") / "zzz-nested.json"
+        bomb.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
         ids = [c.id for c in self.state.list_candidates()]
         self.assertEqual(ids, [self.candidate.id])
 
