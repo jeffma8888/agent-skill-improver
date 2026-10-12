@@ -361,6 +361,24 @@ def role_command_from_mapping(role: str, raw: Mapping[str, Any]) -> RoleCommand:
         raise ValueError(
             f"[model.{role}] needs 'argv' as a non-empty list of strings (or a shell-ish string)"
         )
+    if not argv:
+        raise ValueError(
+            f"[model.{role}].argv is {argv_raw!r}, which holds no words: there is no program to "
+            "run for this role. Set it to the command that answers this role's prompts."
+        )
+    for index, part in enumerate(argv):
+        if part.strip():
+            continue
+        # The model command would be started with this blank as one of its
+        # arguments, a request nobody configured. Measured before this was
+        # refused: a stray "" between the interpreter and the script made the
+        # interpreter look for the script in the working directory, and daily
+        # deferred every proposal as a model failure while doctor said ready.
+        raise ValueError(
+            f"[model.{role}].argv element #{index} (counting from 0, value {part!r}) is empty or "
+            "whitespace: it would be handed to the model command as an argument in that position. "
+            "Remove it, or give it the value it was meant to carry."
+        )
     argv = [part.replace(PLACEHOLDER_ROLE, role) for part in argv]
     timeout = raw.get("timeout_seconds", 300)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:

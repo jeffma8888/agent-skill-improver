@@ -581,6 +581,16 @@ def _argv_field(
     if not isinstance(raw, list) or not raw or any(not isinstance(x, str) for x in raw):
         raise ConfigError(f"[source].{key} must be a non-empty list of strings")
     argv = tuple(raw)
+    for index, part in enumerate(argv):
+        if part.strip():
+            continue
+        # The renderer keeps a literal argument as written, so a blank one is
+        # sent to the conversation command verbatim: a request nobody configured.
+        raise ConfigError(
+            f"[source].{key} element #{index} (counting from 0, value {part!r}) is empty or "
+            "whitespace: it would be sent to the conversation command as an argument in that "
+            "position. Remove it, or give it the value it was meant to carry."
+        )
     text = " ".join(argv)
     missing = [ph for ph in required_placeholders if ph not in text]
     if missing:

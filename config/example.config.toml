@@ -59,7 +59,10 @@ fixtures_dir = "examples/fixtures"
 # just before it (`--query`, `-w`) is dropped with it, so no flag is left to take
 # the next argument as its value. The renderer cannot tell a valueless flag from
 # one that takes a value, so do not write a flag like `--json` directly before a
-# placeholder that may be empty; `--`, `-` and negative numbers are kept.
+# placeholder that may be empty; `--`, `-` and negative numbers are kept. A
+# LITERAL empty or whitespace element ("") is refused at load, by position: it
+# would be sent to the tool verbatim as an argument. So no config can express a
+# deliberately empty argument; a tool that needs one gets a one-line wrapper.
 #
 # Your tool has to satisfy two documented contracts, both described in the
 # adapters: a discovery line grammar (numbered `N. "TITLE" (YYYY-MM-DD)`, an
@@ -221,6 +224,13 @@ note = "a deliberately DIVERGENT copy: editing it would be overwritten by the ne
 #
 # Each call also gets a fresh 0700 directory that is the only path it may write,
 # is where HOME and TMPDIR point, and is deleted when the call returns.
+#
+# argv is a list of words (or one shell-like string). {role} in a word is
+# replaced by the role's name. An empty or whitespace-only word is refused at
+# load, by position: the model command would be started with it as an argument.
+# Measured before: a stray "" between the interpreter and the script made the
+# interpreter look for its script in the working directory, and every proposal
+# was deferred as a model failure while doctor said ready.
 [model.defaults]
 timeout_seconds = 120
 max_output_bytes = 4194304

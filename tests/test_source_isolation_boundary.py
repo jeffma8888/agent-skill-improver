@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import socket
 import stat
 import sys
@@ -317,6 +318,94 @@ class ABlankWindowOrWorkspaceIsAConfigurationErrorTests(Harness):
         )
         source = load_config(path).source
         self.assertEqual((source.since, source.workspaces, source.query), ("3d", ("/w",), "gate"))
+
+
+class ABlankArgvElementIsAConfigurationErrorTests(Harness):
+    """Measured before: ``argv = [python, "", script, ...]`` for the improver
+    loaded, ``doctor`` said ready, and the interpreter was handed ``""`` as the
+    script: every proposal was deferred as a model failure, retried each day,
+    with the reason naming the interpreter rather than the config line. The
+    same blank in a ``[source]`` argv template is kept by the renderer as
+    written and sent to the conversation command. Both are refused at load,
+    by position, before anything runs.
+    """
+
+    def _config_with(self, old: str, new: str, *, subprocess_model: bool = False) -> Path:
+        path = build_env(self.base, use_subprocess_model=subprocess_model)
+        text = path.read_text(encoding="utf-8")
+        assert text.count(old) == 1, (old, text)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+        return path
+
+    def _config_with_role_argv(self, role: str, argv_toml: str, **kw: bool) -> Path:
+        path = build_env(self.base, use_subprocess_model=kw.get("subprocess_model", False))
+        text = path.read_text(encoding="utf-8")
+        pattern = re.compile(rf"(\[model\.{role}\]\n)argv = .*\n")
+        assert len(pattern.findall(text)) == 1, (role, text)
+        path.write_text(pattern.sub(rf"\1argv = {argv_toml}\n", text, count=1), encoding="utf-8")
+        return path
+
+    def test_a_blank_model_argv_element_is_refused_by_position(self):
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                path = self._config_with_role_argv(
+                    "improver", f'["{sys.executable}", "{value}", "-c", "pass"]'
+                )
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(path)
+                message = str(ctx.exception)
+                self.assertIn(
+                    f"[model.improver].argv element #1 (counting from 0, value {value!r}) is "
+                    "empty or whitespace",
+                    message,
+                )
+                self.assertIn("handed to the model command as an argument", message)
+
+    def test_a_string_argv_that_splits_into_nothing_is_refused_at_load(self):
+        path = self._config_with_role_argv("judge", '"   "')
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(path)
+        self.assertIn("[model.judge].argv is '   ', which holds no words", str(ctx.exception))
+
+    def test_a_blank_source_argv_element_is_refused_by_position(self):
+        for value in ("", "  "):
+            with self.subTest(value=value):
+                path = self._config_with(
+                    'since = "7d"\n',
+                    'since = "7d"\n'
+                    f'discovery_argv = ["conv", "list", "{value}", "{{since}}", "{{limit}}"]\n',
+                )
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(path)
+                message = str(ctx.exception)
+                self.assertIn(
+                    f"[source].discovery_argv element #2 (counting from 0, value {value!r}) is "
+                    "empty or whitespace",
+                    message,
+                )
+                self.assertIn("sent to the conversation command as an argument", message)
+
+    def test_doctor_and_daily_both_stop_at_the_config_line_nothing_is_deferred(self):
+        from tests.support import run_cli
+
+        path = self._config_with_role_argv(
+            "improver", f'["{sys.executable}", "", "-c", "pass"]', subprocess_model=True
+        )
+        doctor = run_cli(["--config", str(path), "doctor"])
+        self.assertEqual(doctor.returncode, 3, doctor.stdout + doctor.stderr)
+        self.assertIn("[model.improver].argv element #1", doctor.stderr)
+        self.assertNotIn("verdict: ready", doctor.stdout)
+        daily = run_cli(["--config", str(path), "daily", "--commit", "--day", DAY])
+        self.assertEqual(daily.returncode, 3, daily.stdout + daily.stderr)
+        self.assertIn("[model.improver].argv element #1", daily.stderr)
+        self.assertFalse(list((self.base / "state" / "deferred").rglob("*.json")))
+
+    def test_the_control_a_full_argv_loads_and_the_role_placeholder_still_renders(self):
+        path = self._config_with_role_argv(
+            "improver", f'["{sys.executable}", "-c", "pass", "--role", "{{role}}"]'
+        )
+        argv = load_config(path).model_roles["improver"].argv
+        self.assertEqual(argv, (sys.executable, "-c", "pass", "--role", "improver"))
 
 
 class PromptFencingIsNotABoundaryTests(Harness):
