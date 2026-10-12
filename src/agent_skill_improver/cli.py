@@ -475,8 +475,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             warnings.append(f"a receipt cannot be read ({record['path']}): {record['reason']}")
         if last_run is not None and last_run.mutation_detected:
             problems.append(
-                f"the last run ({last_run.day}) detected a skill tree mutation; do not re-run "
-                f"before reading skill_tree.changes in {last_run.path}"
+                f"the last run ({one_line(last_run.day)}) detected a skill tree mutation; "
+                f"`daily` refuses to run again until you have read skill_tree.changes in "
+                f"{one_line(str(last_run.path))} and start one run with "
+                f"--mutation-reviewed {one_line(last_run.day)}"
             )
         if last_run is not None and last_run.mutation_detected is None:
             warnings.append(

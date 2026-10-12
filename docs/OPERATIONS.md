@@ -514,7 +514,8 @@ There is no dashboard, and one would be misleading. Three questions cover it:
 last run     2026-10-11 ok at 2026-10-11T09:00:12Z (1 day(s) ago); skill tree mutation=False; isolation=none
 ```
 
-A detected mutation is a problem (exit 1, with the receipt path to read); a receipt
+A detected mutation is a problem (exit 1, with the receipt path to read and the
+`--mutation-reviewed 2026-01-01` run that lets `daily` continue); a receipt
 that does not say whether the tree was mutated prints `mutation=unknown` with a
 warning; a receipt that does not read as one is a warning with its reason, never a
 silent skip. Recency is judged, not only printed: a finish time more than two days
