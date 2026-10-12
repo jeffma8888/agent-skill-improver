@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
+from .redaction import quoted_value
+
 
 class Verdict(str, Enum):
     PASS = "PASS"
@@ -35,7 +37,9 @@ class Verdict(str, Enum):
         for member in Verdict:
             if member.value == norm:
                 return member
-        raise ValueError(f"unknown verdict {value!r}; expected PASS, FAIL or INSUFFICIENT")
+        raise ValueError(
+            f"unknown verdict {quoted_value(value)}; expected PASS, FAIL or INSUFFICIENT"
+        )
 
     @property
     def is_decided(self) -> bool:

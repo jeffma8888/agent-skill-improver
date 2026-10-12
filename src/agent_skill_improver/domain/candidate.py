@@ -28,6 +28,7 @@ from .. import SCHEMA_CANDIDATE, SCHEMA_PROPOSAL
 from ..hashing import sha256_text
 from .conversation import EvidenceRef
 from .failure import FailureCase
+from .redaction import quoted_value
 
 STATUS_PROPOSED = "proposed"
 STATUS_VALIDATED = "validated"
@@ -491,7 +492,7 @@ def parse_proposal(payload: Any) -> Proposal:
         raise ValueError(f"proposal must be a JSON object, got {type(payload).__name__}")
     if payload.get("schema") != SCHEMA_PROPOSAL:
         raise ValueError(
-            f"proposal schema must be {SCHEMA_PROPOSAL!r}, got {payload.get('schema')!r}"
+            f"proposal schema must be {SCHEMA_PROPOSAL!r}, got {quoted_value(payload.get('schema'))}"
         )
     required = ("target_skill_id", "hypothesis", "intended_change", "rollback", "new_skill_text")
     for key in required:

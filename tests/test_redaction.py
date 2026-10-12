@@ -154,3 +154,32 @@ class HighConfidenceDetectorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotedValueTests(unittest.TestCase):
+    """``quoted_value`` is the one way a message quotes what a model sent."""
+
+    def test_a_short_value_is_its_repr(self) -> None:
+        from agent_skill_improver.domain.redaction import quoted_value
+
+        self.assertEqual(quoted_value("abc"), "'abc'")
+        self.assertEqual(quoted_value(None), "None")
+        self.assertEqual(quoted_value(["a", 1]), "['a', 1]")
+
+    def test_a_long_value_is_cut_and_the_cut_is_counted(self) -> None:
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS, quoted_value
+
+        text = quoted_value("v" * 1_000, limit=10)
+        self.assertEqual(text, "'vvvvvvvvv... [992 more chars not quoted]")
+        exact = quoted_value("w" * (QUOTED_VALUE_CHARS - 2))
+        self.assertEqual(exact, repr("w" * (QUOTED_VALUE_CHARS - 2)), "fits: quoted whole")
+
+    def test_a_credential_is_redacted_whole_before_the_cut(self) -> None:
+        from agent_skill_improver.domain.redaction import quoted_value
+
+        key = "AK" + "IA" + "C" * 16
+        text = quoted_value("prefix " + key + " suffix", limit=36)
+        self.assertNotIn(key, text)
+        self.assertNotIn(key[:8], text, "no fragment of the key survives the cut either")
+        self.assertIn("aws-access-key-id", text)
+        self.assertIn("more chars not quoted", text, "the cut fell inside the suffix")

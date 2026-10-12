@@ -413,6 +413,43 @@ class TargetRefBindingTests(unittest.TestCase):
         self.assertIn("refusing to review", str(ctx.exception))
 
 
+class AJudgeRefusalQuotesTheModelBoundedTests(unittest.TestCase):
+    """The judge's output is bounded only by max_output_bytes; a refusal that
+    quotes it lands in a quarantine reason, the receipt, the text summary and
+    the scheduler log, so the quote is cut and redacted (``quoted_value``)."""
+
+    def test_a_huge_or_secret_preferred_label_is_quoted_bounded_and_redacted(self):
+        from agent_skill_improver import SCHEMA_JUDGEMENT
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+        from agent_skill_improver.domain.validation import parse_judgement
+
+        case = ReplayCase("t1", "c1", CASE_TARGET)
+        arms = {"A": ARM_CANDIDATE, "B": "baseline"}
+        with self.assertRaises(ValueError) as ctx:
+            parse_judgement(
+                {"schema": SCHEMA_JUDGEMENT, "preferred": "C" * 20_000}, case=case, arms=arms
+            )
+        self.assertLess(len(str(ctx.exception)), QUOTED_VALUE_CHARS + 200)
+        self.assertIn("more chars not quoted", str(ctx.exception))
+        key = "gh" + "p_" + "D" * 24
+        with self.assertRaises(ValueError) as ctx:
+            parse_judgement({"schema": key, "preferred": "A"}, case=case, arms=arms)
+        self.assertNotIn(key, str(ctx.exception))
+        self.assertIn("github-token", str(ctx.exception))
+
+    def test_the_control_a_short_wrong_label_is_quoted_whole(self):
+        from agent_skill_improver import SCHEMA_JUDGEMENT
+        from agent_skill_improver.domain.validation import parse_judgement
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_judgement(
+                {"schema": SCHEMA_JUDGEMENT, "preferred": "both"},
+                case=ReplayCase("t1", "c1", CASE_TARGET),
+                arms={"A": ARM_CANDIDATE, "B": "baseline"},
+            )
+        self.assertIn("got 'both'", str(ctx.exception))
+
+
 class EvidenceCallCountTests(unittest.TestCase):
     """The model-call count is derived from the record or it is not evidence."""
 

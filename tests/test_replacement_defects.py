@@ -133,3 +133,30 @@ class CredentialInReplacementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AProposalRefusalQuotesTheModelBoundedTests(unittest.TestCase):
+    """The improver's output is bounded only by max_output_bytes; a refusal
+    that quotes it lands in a quarantine reason, the receipt, the text summary
+    and the scheduler log, so the quote is cut and redacted (``quoted_value``)."""
+
+    def test_a_huge_schema_value_is_cut_and_a_secret_one_redacted(self) -> None:
+        from agent_skill_improver.domain.candidate import parse_proposal
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_proposal({"schema": "s" * 50_000})
+        self.assertLess(len(str(ctx.exception)), QUOTED_VALUE_CHARS + 200)
+        self.assertIn("more chars not quoted", str(ctx.exception))
+        key = "AK" + "IA" + "E" * 16
+        with self.assertRaises(ValueError) as ctx:
+            parse_proposal({"schema": key})
+        self.assertNotIn(key, str(ctx.exception))
+        self.assertIn("aws-access-key-id", str(ctx.exception))
+
+    def test_the_control_a_short_wrong_schema_is_quoted_whole(self) -> None:
+        from agent_skill_improver.domain.candidate import parse_proposal
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_proposal({"schema": "asi.wrong.v1"})
+        self.assertIn("got 'asi.wrong.v1'", str(ctx.exception))

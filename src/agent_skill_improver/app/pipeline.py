@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..config import ROLE_IMPROVER, ROLE_SCORER, PromptConfig
-from ..domain.redaction import credential_labels
+from ..domain.redaction import credential_labels, quoted_value
 from ..domain.candidate import (
     Candidate,
     STATUS_PROPOSED,
@@ -157,7 +157,8 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
     if base_open and base_fields.get("name") and new_fields.get("name") != base_fields.get("name"):
         problems.append(
             f"replacement changes the frontmatter name from {base_fields.get('name')!r} to "
-            f"{new_fields.get('name')!r}; renaming a skill is not an in-place improvement"
+            f"{quoted_value(new_fields.get('name'))}; renaming a skill is not an in-place "
+            "improvement"
         )
     if base_fields.get("description") and not new_fields.get("description"):
         problems.append("replacement drops the frontmatter 'description' used for skill discovery")
@@ -309,7 +310,7 @@ def propose_candidate(
         ) from exc
     if proposal.target_skill_id != group.skill_id:
         raise RecordDefect(
-            f"improver targeted {proposal.target_skill_id!r} but was asked about "
+            f"improver targeted {quoted_value(proposal.target_skill_id)} but was asked about "
             f"{group.skill_id!r}; refusing to redirect a patch to a different skill",
             record_id=group.skill_id,
         )

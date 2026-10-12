@@ -91,6 +91,45 @@ class ScorecardContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             card([], thread="some-other-thread")
 
+    def test_a_refusal_quotes_the_models_value_bounded_and_redacted(self) -> None:
+        """What the scorer sent is quoted so the operator can see it, but the
+        quote is bounded and redacted: the value is the model's, limited only
+        by max_output_bytes, and the message lands in a quarantine reason, the
+        receipt, the text summary and the scheduler log."""
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+
+        huge = "x" * 10_000
+        with self.assertRaises(ValueError) as ctx:
+            card([], thread=huge)
+        message = str(ctx.exception)
+        self.assertLess(len(message), QUOTED_VALUE_CHARS + 200, len(message))
+        self.assertIn("'" + "x" * (QUOTED_VALUE_CHARS - 1) + "...", message)
+        self.assertIn(f"[{len(repr(huge)) - QUOTED_VALUE_CHARS} more chars not quoted]", message)
+        self.assertIn("does not match the record being scored", message)
+
+        key = "AK" + "IA" + "B" * 16
+        with self.assertRaises(ValueError) as ctx:
+            card([], thread=f"token {key}")
+        self.assertNotIn(key, str(ctx.exception))
+        self.assertIn("aws-access-key-id", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_scorecard(
+                {"schema": "y" * 5_000, "criteria": []},
+                rubric=rubric(),
+                conversation=conversation("failing.json"),
+            )
+        self.assertLess(len(str(ctx.exception)), QUOTED_VALUE_CHARS + 200)
+
+        result = card([{"criterion_id": "z" * 5_000, "verdict": "PASS"}])
+        note = next(n for n in result.notes if "is not in rubric" in n)
+        self.assertLess(len(note), QUOTED_VALUE_CHARS + 200, len(note))
+
+    def test_the_control_a_short_value_is_quoted_whole(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            card([], thread="some-other-thread")
+        self.assertIn("('some-other-thread' != ", str(ctx.exception))
+
     def test_an_unmentioned_criterion_becomes_insufficient_never_pass(self) -> None:
         """Silence is not a pass."""
         result = card([])
@@ -176,6 +215,60 @@ class EvidenceTrustTests(unittest.TestCase):
         )
         self.assertIs(score.verdict, Verdict.INSUFFICIENT)
         self.assertIn("does not resolve", score.downgrade_reason)
+
+    def test_an_unresolved_element_id_is_quoted_bounded_redacted_and_not_stored(self) -> None:
+        """The element_id the scorer cited is the scorer's text. When it does
+        not resolve, the downgrade reason names it bounded and redacted, and
+        the scorecard stores no ref for it: a claim that does not resolve is
+        not evidence, and the scorecard's evidence feeds the improver prompt."""
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+
+        key = "gh" + "p_" + "A" * 24
+        refs = [{"element_id": f"{key} {'y' * 5_000}", "position": 1}]
+        refs += [{"element_id": f"made-up-{i}", "position": i} for i in range(5)]
+        score = self._one(evidence=refs)
+        self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+        self.assertEqual(score.evidence, ())
+        self.assertNotIn(key, score.downgrade_reason)
+        self.assertIn("github-token", score.downgrade_reason)
+        self.assertIn("more chars not quoted]@1", score.downgrade_reason)
+        self.assertIn(" and 3 more", score.downgrade_reason)
+        self.assertLess(len(score.downgrade_reason), 3 * QUOTED_VALUE_CHARS + 200)
+
+    def test_a_ref_that_resolves_is_stored_beside_one_that_does_not(self) -> None:
+        message = self.conv.messages[0]
+        good = {"element_id": message.element_id, "position": message.position}
+        score = self._one(
+            verdict="INSUFFICIENT", evidence=[good, {"element_id": "no", "position": 9}]
+        )
+        self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+        self.assertIsNone(score.downgraded_from)
+        self.assertEqual([e.element_id for e in score.evidence], [message.element_id])
+
+    def test_an_unknown_verdict_is_quoted_bounded_and_redacted(self) -> None:
+        """The verdict string is the scorer's too; its failure becomes a note
+        and a downgrade_reason, both persisted in the scorecard."""
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+
+        key = "AK" + "IA" + "C" * 16
+        conv = self.conv
+        notes_payload = [
+            {
+                "criterion_id": self.cid,
+                "verdict": f"MAYBE {key} {'z' * 5_000}",
+                "rationale": "r",
+                "evidence": [good_ref(conv)],
+            }
+        ]
+        result = card(notes_payload)
+        score = result.score_for(self.cid)
+        self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+        for text in (score.downgrade_reason, *result.notes):
+            self.assertNotIn(key, text)
+        self.assertIn("aws-access-key-id", score.downgrade_reason)
+        self.assertIn("more chars not quoted]", score.downgrade_reason)
+        self.assertLess(len(score.downgrade_reason), QUOTED_VALUE_CHARS + 200)
+        self.assertTrue(any("unknown verdict 'MAYBE" in n for n in result.notes), result.notes)
 
     def test_fail_with_malformed_evidence_is_downgraded_with_a_reason(self) -> None:
         score = self._one(evidence=[{"element_id": "", "position": "nope"}])

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_JUDGEMENT, SCHEMA_VALIDATION
+from .redaction import quoted_value
 from .rubric import Verdict
 
 ARM_BASELINE = "baseline"
@@ -210,11 +211,13 @@ def parse_judgement(payload: Any, *, case: ReplayCase, arms: Mapping[str, str]) 
         raise ValueError(f"judgement must be a JSON object, got {type(payload).__name__}")
     if payload.get("schema") != SCHEMA_JUDGEMENT:
         raise ValueError(
-            f"judgement schema must be {SCHEMA_JUDGEMENT!r}, got {payload.get('schema')!r}"
+            f"judgement schema must be {SCHEMA_JUDGEMENT!r}, got {quoted_value(payload.get('schema'))}"
         )
     label = payload.get("preferred")
     if label not in ("A", "B", "tie"):
-        raise ValueError(f"judgement 'preferred' must be 'A', 'B' or 'tie', got {label!r}")
+        raise ValueError(
+            f"judgement 'preferred' must be 'A', 'B' or 'tie', got {quoted_value(label)}"
+        )
     arm = "tie" if label == "tie" else arms[label]
     rationale = payload.get("rationale")
     return Judgement(

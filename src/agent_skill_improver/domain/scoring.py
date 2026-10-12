@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from .. import SCHEMA_SCORECARD
 from .conversation import EvidenceRef, NormalizedConversation
+from .redaction import quoted_value
 from .rubric import Rubric, Verdict
 
 MAX_RATIONALE_CHARS = 2000
@@ -122,12 +123,14 @@ def parse_scorecard(
         raise ValueError(f"scorecard must be a JSON object, got {type(payload).__name__}")
     schema = payload.get("schema")
     if schema != SCHEMA_SCORECARD:
-        raise ValueError(f"scorecard schema must be {SCHEMA_SCORECARD!r}, got {schema!r}")
+        raise ValueError(
+            f"scorecard schema must be {SCHEMA_SCORECARD!r}, got {quoted_value(schema)}"
+        )
     reported_id = payload.get("conversation_id")
     if reported_id is not None and str(reported_id) != conversation.thread_id:
         raise ValueError(
             "scorecard conversation_id does not match the record being scored "
-            f"({reported_id!r} != {conversation.thread_id!r})"
+            f"({quoted_value(reported_id)} != {conversation.thread_id!r})"
         )
     raw_items = payload.get("criteria")
     if not isinstance(raw_items, list):
@@ -148,10 +151,10 @@ def parse_scorecard(
             continue
         if cid not in known:
             extraneous.append(cid)
-            notes.append(f"criterion {cid!r} is not in rubric {rubric.id}; ignored")
+            notes.append(f"criterion {quoted_value(cid)} is not in rubric {rubric.id}; ignored")
             continue
         if cid in seen:
-            notes.append(f"criterion {cid!r} scored more than once; first verdict kept")
+            notes.append(f"criterion {quoted_value(cid)} scored more than once; first verdict kept")
             continue
         seen[cid] = _build_score(item, rubric=rubric, conversation=conversation, notes=notes)
 
@@ -210,6 +213,9 @@ def _build_score(
             bad_refs.append(str(exc))
 
     unresolved = conversation.unresolved(refs)
+    # A ref that does not resolve is the model's claim, not evidence: it is
+    # named in the reason (bounded, redacted) and stored nowhere else.
+    resolved = tuple(r for r in refs if r not in unresolved)
     confidence = item.get("confidence")
     conf = float(confidence) if isinstance(confidence, (int, float)) else None
     rationale = _clip(item.get("rationale"))
@@ -223,15 +229,16 @@ def _build_score(
         elif len(refs) < max(rubric.min_evidence_refs, 1):
             reason = f"needs >= {max(rubric.min_evidence_refs, 1)} evidence ref(s), got {len(refs)}"
         elif unresolved:
-            shown = ", ".join(f"{r.element_id}@{r.position}" for r in unresolved[:3])
-            reason = f"evidence does not resolve in conversation: {shown}"
+            shown = ", ".join(f"{quoted_value(r.element_id)}@{r.position}" for r in unresolved[:3])
+            more = f" and {len(unresolved) - 3} more" if len(unresolved) > 3 else ""
+            reason = f"evidence does not resolve in conversation: {shown}{more}"
         if reason:
             notes.append(f"criterion {cid}: {verdict.value} downgraded to INSUFFICIENT ({reason})")
             return CriterionScore(
                 criterion_id=cid,
                 verdict=Verdict.INSUFFICIENT,
                 rationale=rationale,
-                evidence=tuple(refs),
+                evidence=resolved,
                 confidence=conf,
                 downgraded_from=verdict,
                 downgrade_reason=reason,
@@ -241,7 +248,7 @@ def _build_score(
         criterion_id=cid,
         verdict=verdict,
         rationale=rationale,
-        evidence=tuple(refs),
+        evidence=resolved,
         confidence=conf,
     )
 

@@ -137,6 +137,27 @@ class RedactionResult:
         return sum(self.counts.values())
 
 
+#: How much of a model-supplied value a message may quote before it is cut.
+QUOTED_VALUE_CHARS = 120
+
+
+def quoted_value(value: object, *, limit: int = QUOTED_VALUE_CHARS) -> str:
+    """A model-supplied value as a message may quote it: ``repr``, redacted, bounded.
+
+    A refusal that quotes what the model sent lands in a quarantine reason, the
+    receipt, the daily text summary and so the scheduler log. The model's
+    output is bounded only by ``max_output_bytes``, so a scorer that puts four
+    megabytes, or a pasted credential, into ``conversation_id`` would otherwise
+    put it in all four places. Redaction runs over the whole ``repr`` before the
+    cut, so a key is masked whole rather than sliced into a fragment the shapes
+    no longer recognise; the cut says how much was left unquoted.
+    """
+    text = redact(repr(value)).text
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... [{len(text) - limit} more chars not quoted]"
+
+
 def redact(text: str) -> RedactionResult:
     """Replace recognised secret shapes with labelled placeholders."""
     counts: dict[str, int] = {}
