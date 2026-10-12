@@ -14,7 +14,10 @@ Three things follow, and they are worth stating before any module names.
    tool's own source directory, its config file, its config directory, its state
    directory and its rubric directory are protected unconditionally, and that set
    is derived in code rather than read from configuration. A configurable
-   protection list is not a protection list.
+   protection list is not a protection list. A canonical, editable skill root
+   inside one of those paths is refused when the config loads, since every
+   write to it would be refused later anyway, after the proposals against it
+   had been paid for and reviewed.
 2. **Evidence is not the same as a verdict.** A model's `FAIL` is accepted only
    when it cites a turn that actually resolves in the transcript at the position
    claimed. Everything else becomes `INSUFFICIENT`, which earns no credit in

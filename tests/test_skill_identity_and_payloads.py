@@ -1001,5 +1001,106 @@ class SkillRootsMustBeDisjointTests(unittest.TestCase):
             self.assertIn("same directory", proc.stderr)
 
 
+class EditableRootsMustBeWritableTests(unittest.TestCase):
+    """A canonical, editable root inside a protected path is a config error.
+
+    The protected set (package, config directory, state directory, rubrics
+    directory) is derived in code and every write under it is refused as
+    self-mutation. Measured before this check existed: a canonical root at
+    ``config/skills`` loaded, ``doctor`` reported nothing, and the first write
+    under it raised ``SelfMutationRefused``, after the candidates it refused had
+    been proposed, scored and reviewed. A read-only mirror in the same place is
+    legitimate, and so is a root that contains the config or state directory.
+    """
+
+    def _config(self, base: Path, *, canonical: str | None = None, mirror: str | None = None):
+        config = Path(build_env(base, dry_run=True))
+        text = config.read_text(encoding="utf-8")
+        for current, replacement in (
+            (str(base / "skills-canonical"), canonical),
+            (str(base / "skills-mirror"), mirror),
+        ):
+            if replacement is None:
+                continue
+            assert text.count(json.dumps(current)) == 1, text
+            text = text.replace(json.dumps(current), json.dumps(replacement))
+        config.write_text(text, encoding="utf-8")
+        return config
+
+    def _refusal(self, config: Path) -> str:
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(config)
+        return str(ctx.exception)
+
+    def test_a_canonical_root_inside_the_config_directory_is_refused_at_load(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            inside = str(base / "config" / "skills")
+            message = self._refusal(self._config(base, canonical=inside))
+            self.assertIn(f"'canonical' ({inside})", message)
+            self.assertIn("the config directory", message)
+            self.assertIn("self-mutation", message)
+
+    def test_a_canonical_root_inside_or_at_the_state_directory_is_refused_at_load(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            message = self._refusal(self._config(base, canonical=str(base / "state" / "skills")))
+            self.assertIn("the state directory", message)
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            message = self._refusal(self._config(base, canonical=str(base / "state")))
+            self.assertIn("the state directory", message)
+
+    def test_a_canonical_root_inside_the_rubrics_directory_is_refused_at_load(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            message = self._refusal(self._config(base, canonical=str(base / "rubrics" / "skills")))
+            self.assertIn("the rubrics directory", message)
+
+    def test_a_canonical_root_inside_the_tool_package_is_refused_at_load(self):
+        from agent_skill_improver.config import package_dir
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            inside = str(package_dir() / "would-be-skills")
+            self.assertFalse(Path(inside).exists(), "nothing is created in the package")
+            message = self._refusal(self._config(base, canonical=inside))
+            self.assertIn("this tool's own package", message)
+            self.assertFalse(Path(inside).exists())
+
+    def test_the_control_a_read_only_mirror_inside_the_config_directory_loads(self):
+        from agent_skill_improver.config import load_config
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            loaded = load_config(self._config(base, mirror=str(base / "config" / "skills")))
+            self.assertEqual([r.id for r in loaded.skill_roots], ["canonical", "mirror"])
+
+    def test_the_control_a_root_that_contains_the_config_and_state_directories_loads(self):
+        """The reverse containment is legitimate: skills elsewhere under that
+        root are writable, and only the ones under the protected directories
+        are refused, by the write path, with the protected path named."""
+        from agent_skill_improver.config import load_config
+
+        with TemporaryDirectory() as tmp:
+            wide = Path(tmp) / "wide"
+            config = self._config(wide, canonical=str(wide), mirror=str(Path(tmp) / "elsewhere"))
+            loaded = load_config(config)
+            self.assertEqual(loaded.skill_roots[0].path, wide)
+            self.assertIn(loaded.config_path.parent.resolve(), loaded.protected_paths)
+
+    def test_doctor_reports_a_canonical_root_in_a_protected_path_as_a_config_error(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = self._config(base, canonical=str(base / "config" / "skills"))
+            proc = run_cli(["--config", str(config), "doctor"])
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("config error", proc.stderr)
+            self.assertIn("self-mutation", proc.stderr)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

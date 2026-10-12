@@ -430,15 +430,18 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
     )
     model_roles = _load_model_roles(_require_table(raw, "model"))
 
-    protected = [
-        package_dir(),
-        config_path,
-        config_path.parent,
-        state_dir,
-    ]
+    # One labelled set, so the load-time check below and the write path's
+    # refusal cannot drift apart by a directory added to one and not the other.
+    protected_dirs = {
+        "this tool's own package": package_dir(),
+        "the config directory": config_path.parent,
+        "the state directory": state_dir,
+    }
     rub_dir = _require_table(raw, "rubrics").get("dir", "rubrics")
     if isinstance(rub_dir, str):
-        protected.append(_expand(rub_dir, base=config_path.parent))
+        protected_dirs["the rubrics directory"] = _expand(rub_dir, base=config_path.parent)
+    protected = [config_path, *protected_dirs.values()]
+    _assert_editable_roots_outside_protected(skill_roots, protected_dirs)
     guard_table = _require_table(raw, "guard")
     protected_skill_ids = guard_table.get("protected_skill_ids", [])
     if not isinstance(protected_skill_ids, list) or any(
@@ -726,6 +729,41 @@ def _assert_roots_disjoint(roots: Sequence[SkillRoot]) -> None:
                             f"scan already reaches every skill in the inner one, so each would "
                             f"be inventoried twice under two root ids. Move the inner tree "
                             f"beside the outer, or drop one of the two roots."
+                        )
+
+
+def _assert_editable_roots_outside_protected(
+    roots: Sequence[SkillRoot], protected_dirs: Mapping[str, Path]
+) -> None:
+    """Refuse a canonical, editable root that lies inside a protected path.
+
+    Every write under the package, the config directory, the state directory or
+    the rubrics directory is refused as self-mutation, and that set is not
+    configurable. A root marked canonical and editable inside one of them is
+    therefore a tree the pipeline would propose against, score, hold for review
+    and then refuse to write, at apply time, after the model calls were paid for.
+    Measured before this check existed: such a config loaded, ``doctor`` was
+    clean, and the first write raised ``SelfMutationRefused``. A read-only
+    mirror inside a protected path is fine, since nothing is ever written to it,
+    and a root that CONTAINS the config or state directory is fine too: only the
+    skills under those directories are unwritable, and the write path says so.
+    """
+    for root in roots:
+        if not (root.canonical and root.editable):
+            continue
+        for label, guard in protected_dirs.items():
+            for a in _root_forms(root.path):
+                for b in _root_forms(guard):
+                    if a == b or _is_same_directory(a, b) or _lies_inside(a, b):
+                        raise ConfigError(
+                            f"skill_root {root.id!r} ({root.path}) is canonical and editable but "
+                            f"lies inside {label} ({guard}), which is protected: every write there "
+                            f"is refused as self-mutation, so candidates against it would be "
+                            f"proposed, scored and reviewed and then refused at apply. Keep the "
+                            f"skills and {label} apart (move the skills out, or move the config "
+                            f"file into its own subdirectory if it sits at the project root), "
+                            f"or mark the root canonical = false and editable = false if it is "
+                            f"only to be read."
                         )
 
 

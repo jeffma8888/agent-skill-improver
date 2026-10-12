@@ -208,8 +208,8 @@ class ProtectedPathTests(unittest.TestCase):
 
     def test_the_protected_set_is_not_taken_from_configuration(self):
         source = (package_dir() / "config.py").read_text(encoding="utf-8")
-        index = source.index("protected = [")
-        block = source[index : index + 400]
+        index = source.index("protected_dirs = {")
+        block = source[index : index + 600]
         for expected in ("package_dir()", "config_path", "state_dir"):
             self.assertIn(
                 expected,
@@ -218,6 +218,12 @@ class ProtectedPathTests(unittest.TestCase):
                 "is not a protection list: the loop's own config would be able to "
                 "remove its own examiner from it",
             )
+        self.assertIn(
+            "protected = [config_path, *protected_dirs.values()]",
+            block,
+            "the write path's protected set is built from the same labelled directories "
+            "the load-time root check uses, so neither can drift from the other",
+        )
 
     def test_a_missing_enabled_rubric_is_a_configuration_error(self):
         from tests.support import build_env

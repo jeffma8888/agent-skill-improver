@@ -169,7 +169,9 @@ enabled = ["evidence-discipline", "instruction-following"]
 # canonical+editable; everything else is a mirror that is read but never written.
 # Roots must be disjoint: two roots naming one directory (through `.`, `..`, a
 # link, or a case variant of a directory that exists), or one root inside
-# another, are refused at load.
+# another, are refused at load. So is a canonical+editable root inside this
+# tool's package, the config directory, the state directory or the rubrics
+# directory: writes there are always refused as self-mutation.
 [[skill_root]]
 id = "example-canonical"
 path = "examples/skills"
