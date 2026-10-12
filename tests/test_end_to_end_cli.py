@@ -347,6 +347,37 @@ def _tree_snapshot(*roots: Path) -> dict[str, str]:
     return out
 
 
+class AnUndecodableSkillIsQuarantinedNotFatalTests(unittest.TestCase):
+    """Measured before: one invalid byte in one skill made ``daily`` exit 70 with
+    a traceback, write no receipt and produce no candidate for any skill."""
+
+    def test_daily_quarantines_the_skill_writes_its_receipt_and_exits_normally(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            cfg = ["--config", str(build_env(base, dry_run=False, seed="utf8-seed"))]
+            skill = base / "skills-canonical" / "tdd" / "SKILL.md"
+            data = skill.read_bytes()
+            skill.write_bytes(data[:40] + b"\xff" + data[40:])
+            proc = run_cli([*cfg, "--json", "daily", "--commit", "--day", "2026-05-01"])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["status"], "partial")
+            self.assertGreaterEqual(payload["counts"]["skills_quarantined"], 1)
+            records = list((base / "state" / "quarantine").glob("tdd--*.json"))
+            self.assertEqual(len(records), 1, records)
+            reason = json.loads(records[0].read_text(encoding="utf-8"))["reason"]
+            self.assertIn("not valid UTF-8 at byte 40", reason)
+            self.assertTrue(list((base / "state" / "receipts").glob("*.json")), "receipt written")
+            self.assertEqual(skill.read_bytes(), data[:40] + b"\xff" + data[40:], "left as it is")
+            listing = json.loads(run_cli([*cfg, "--json", "skills"]).stdout)
+            tdd = [g for g in listing["groups"] if g["skill_id"] == "tdd"][0]
+            self.assertTrue(
+                any("not valid UTF-8" in w for w in tdd["canonical"]["warnings"]),
+                tdd["canonical"]["warnings"],
+            )
+
+
 class ReviewRefusesWhatApplyWouldRefuseTests(unittest.TestCase):
     """One validated candidate, then its target is replaced under it.
 

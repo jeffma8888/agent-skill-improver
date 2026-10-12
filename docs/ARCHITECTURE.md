@@ -276,6 +276,9 @@ replacement. Constraints:
   text only.
 - a skill in `[guard].protected_skill_ids`, or one holding an executable payload,
   is refused as a target and the refusal is written to `state/refusals/`.
+- a skill whose document is not valid UTF-8 is quarantined (`UndecodableDocument`,
+  a record defect, so the run goes on) rather than proposed against text read
+  with replacement characters; the inventory still lists it, with the byte named.
 - a proposal whose canonical snapshot carries payload files is annotated
   `ELEVATED REVIEW RISK`, because a skill directory can hold scripts and hooks
   and write access there is arbitrary code execution rather than documentation

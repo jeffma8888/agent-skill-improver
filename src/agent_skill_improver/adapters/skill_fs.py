@@ -45,6 +45,7 @@ from ..errors import (
     NonDocumentWriteRefused,
     ReadOnlyViolation,
     SelfMutationRefused,
+    UndecodableDocument,
 )
 from ..hashing import normalize_text, sha256_bytes, sha256_file, sha256_text, tree_digest
 from ..jsonio import write_bytes_atomic, write_json
@@ -217,7 +218,9 @@ class FilesystemSkillStore:
         read of its target) and ``O_NONBLOCK`` (a fifo opens instead of
         waiting for a writer), then judged on the open handle: anything but a
         regular file is refused. A file that is simply missing stays an
-        ``OSError`` for the caller to name. Line endings are folded to ``\n``
+        ``OSError`` for the caller to name; bytes that are not UTF-8 are an
+        ``UndecodableDocument`` (a record defect, so ``daily`` quarantines the
+        one skill rather than ending the run). Line endings are folded to ``\n``
         as the text-mode read before it did, so a CRLF document still reviews
         as the lines that changed rather than as every line.
         """
@@ -253,7 +256,17 @@ class FilesystemSkillStore:
                 chunks.append(chunk)
         finally:
             os.close(fd)
-        return normalize_text(b"".join(chunks).decode("utf-8"))
+        try:
+            text = b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise UndecodableDocument(
+                f"skill document {target} is not valid UTF-8 at byte {exc.start} ({exc.reason}); "
+                f"nothing is proposed, shown or applied against text this tool cannot read "
+                f"exactly. The file is left as it is: fix the encoding and the next pass will "
+                f"handle it.",
+                record_id=target.parent.name,
+            ) from exc
+        return normalize_text(text)
 
     # -- write path ------------------------------------------------------
     def write_canonical(
@@ -796,8 +809,21 @@ class FilesystemSkillStore:
         return tuple(found)
 
     def _snapshot(self, root: SkillRoot, base: Path, skill_file: Path) -> SkillSnapshot:
-        text = skill_file.read_text(encoding="utf-8", errors="replace")
+        raw = skill_file.read_bytes()
+        undecodable: list[str] = []
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # Inventoried so the operator sees it, with the bytes replaced so the
+            # rest of the document still reads; the strict read on the write
+            # path refuses it, and the warning says so here rather than there.
+            text = raw.decode("utf-8", errors="replace")
+            undecodable = [
+                f"not valid UTF-8 at byte {exc.start} ({exc.reason}): inventoried with the bytes "
+                f"replaced; proposals against it are refused until the encoding is fixed"
+            ]
         fields, has_open, warnings = parse_frontmatter(text)
+        warnings = undecodable + warnings
         rel = skill_file.resolve().relative_to(base)
         skill_id = rel.parts[-2] if len(rel.parts) >= 2 else skill_file.parent.name
         declared = fields.get("name", "")
@@ -824,7 +850,7 @@ class FilesystemSkillStore:
             root_id=root.id,
             path=skill_file,
             sha256=sha256_text(text),
-            size_bytes=len(text.encode("utf-8")),
+            size_bytes=len(raw),
             frontmatter_name=declared,
             frontmatter_description=fields.get("description", ""),
             has_opening_delimiter=has_open,

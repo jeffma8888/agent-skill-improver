@@ -37,8 +37,9 @@ from agent_skill_improver.errors import (
     NonDocumentWriteRefused,
     ReadOnlyViolation,
     SelfMutationRefused,
+    UndecodableDocument,
 )
-from agent_skill_improver.hashing import sha256_file
+from agent_skill_improver.hashing import sha256_file, sha256_text
 from tests.support import build_env, run_cli
 
 GOOD = """---
@@ -619,6 +620,51 @@ class BaseReadsAreJudgedLikeWritesTests(Harness):
         self.assertEqual(self.store().read_text(target), GOOD)
         with self.assertRaises(FileNotFoundError):
             self.store().read_text(self.canonical_dir / "absent" / SKILL_FILENAME)
+
+
+class UndecodableDocumentsAreOneDefectNotAFatalityTests(Harness):
+    """One stray byte in one skill must cost that skill its turn, not the run.
+
+    Measured before this class existed: discovery decoded with replacement
+    characters and the base read decoded strictly, so a skill with a single
+    invalid byte was inventoried, selected, and then ended ``daily`` with an
+    uncaught ``UnicodeDecodeError`` (exit 70, no receipt, no candidate for any
+    other skill), while ``doctor`` and ``skills`` said nothing about it.
+    """
+
+    def _corrupt(self) -> Path:
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        data = target.read_bytes()
+        target.write_bytes(data[:10] + b"\xff" + data[10:])
+        return target
+
+    def test_the_base_read_names_the_byte_and_is_a_record_defect(self):
+        from agent_skill_improver.errors import RecordDefect
+
+        target = self._corrupt()
+        with self.assertRaises(UndecodableDocument) as ctx:
+            self.store().read_text(target)
+        self.assertIsInstance(ctx.exception, RecordDefect, "quarantine the skill, not the run")
+        self.assertIn("byte 10", str(ctx.exception))
+        self.assertEqual(ctx.exception.record_id, "shared")
+
+    def test_discovery_still_inventories_it_with_a_warning_that_names_the_byte(self):
+        target = self._corrupt()
+        snapshot = self.canonical_snapshots()["shared"]
+        self.assertTrue(
+            any(w.startswith("not valid UTF-8 at byte 10") for w in snapshot.warnings),
+            snapshot.warnings,
+        )
+        self.assertEqual(
+            snapshot.sha256,
+            sha256_text(target.read_bytes().decode("utf-8", errors="replace")),
+            "the inventory hash is over the replaced text, as it was before",
+        )
+
+    def test_the_control_a_clean_document_carries_no_such_warning(self):
+        snapshot = self.canonical_snapshots()["shared"]
+        self.assertFalse(any("UTF-8" in w for w in snapshot.warnings), snapshot.warnings)
+        self.assertEqual(self.store().read_text(snapshot.path), GOOD)
 
 
 class BackupWriteSafetyTests(Harness):

@@ -107,7 +107,8 @@ conversations_ingested        what came back from the source
 records_scored                what actually got a verdict
 records_quarantined           malformed or unverifiable, one file each with a reason
 records_deferred              retryable, e.g. the source was unreachable
-skills_quarantined            a proposal target that is defective (implicated but absent), or
+skills_quarantined            a proposal target that is defective (implicated but absent,
+                              or not valid UTF-8: `UndecodableDocument`, byte named), or
                               a skill that kept deferring past caps.max_defer_attempts
 skills_deferred               a proposal that could not be made, e.g. the improver timed out
 failure_cases                 FAIL verdicts with resolvable evidence
@@ -199,6 +200,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `CredentialInSkill` | the skill file holds a token, key or key block, so no model role was shown it and nothing was proposed. Remove the credential from the skill; the next pass proposes normally |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
+| `UndecodableDocument` | on `review` or `apply`: the skill document is not valid UTF-8 at the byte named. In `daily` the same finding quarantines that one skill (`skills --json` carries the warning on its snapshot) and the run goes on; nothing is proposed, shown or applied against text the tool cannot read exactly. Fix the encoding and re-run |
 | `LinkedTargetRefused` | on `review`, `apply` or `rollback`: the skill document (judged `O_NOFOLLOW` on every read of it, so `review` shows no token for it), or a directory beneath its root on the way to it, is now a symbolic link, or the target is spelled outside every configured root yet resolves into a canonical one, so the write would land wherever the link points (a same-text twin would pass the hash check). Nothing was read through the link, backed up or written; replace the link with the real file and re-run `review` |
 | `BackupUnusable` | rollback's backup or manifest does not verify, or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
 | `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |

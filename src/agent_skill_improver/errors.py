@@ -39,6 +39,18 @@ class EvidenceInvalid(RecordDefect):
     """Cited evidence does not resolve against the normalized conversation."""
 
 
+class UndecodableDocument(RecordDefect):
+    """A skill document whose bytes are not UTF-8.
+
+    One record, one quarantine: the skill is inventoried with the offending
+    bytes replaced so the operator can see it, but no text is proposed,
+    reviewed or applied against a document this tool cannot read exactly.
+    Measured before this class existed, one stray byte in one skill ended the
+    whole ``daily`` run as an internal error, with no receipt and no candidate
+    for any other skill.
+    """
+
+
 class TransientFailure(AsiError):
     """Not the record's fault; defer and retry on a later run."""
 
