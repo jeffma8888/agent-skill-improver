@@ -512,6 +512,14 @@ class MalformedModelOutputTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-TAIL", message)
         self.assertNotIn("T" * 10, message)
 
+    def test_the_quoted_head_is_redacted_before_it_lands_in_a_quarantine_record(self) -> None:
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        with self.assertRaises(MalformedModelOutput) as ctx:
+            extract_json_object("Here is the key you asked for: " + planted)
+        message = str(ctx.exception)
+        self.assertIn("[REDACTED:aws-access-key-id]", message)
+        self.assertNotIn(planted, message)
+
     def test_an_unbalanced_object_is_refused_rather_than_repaired(self) -> None:
         with self.assertRaises(MalformedModelOutput):
             extract_json_object('{"a": 1, "b": ')

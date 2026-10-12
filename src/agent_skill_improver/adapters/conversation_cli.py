@@ -50,9 +50,16 @@ from ..domain.discovery import (
     is_safe_thread_id,
     page_from_threads,
 )
+from ..domain.redaction import redact
 from ..errors import RecordDefect, SourceUnavailable
 from ..jsonio import loads_untrusted
-from .bounded_process import QUOTED_TAIL_CHARS, OutputOverflow, RunTimedOut, run_bounded
+from .bounded_process import (
+    QUOTED_TAIL_CHARS,
+    OutputOverflow,
+    RunTimedOut,
+    quotable,
+    run_bounded,
+)
 
 __all__ = [
     "ConversationCliSource",
@@ -299,7 +306,9 @@ class ConversationCliSource:
         batch going); without it, it is the source being unusable. A timeout is
         always the source: the command, not the record, failed to answer.
         """
-        shown = " ".join(argv)
+        # The command line is quoted into every failure reason below, and a
+        # configured argv can carry a key as an option value just as stderr can.
+        shown = redact(" ".join(argv)).text
         try:
             result = run_bounded(
                 argv,
@@ -323,7 +332,7 @@ class ConversationCliSource:
             # only when stderr said nothing, blank lines included.
             stderr = result.stderr_tail.decode("utf-8", errors="replace").strip()
             stdout = result.stdout.decode("utf-8", errors="replace").strip()
-            tail = (stderr or stdout)[-QUOTED_TAIL_CHARS:]
+            tail = quotable(stderr or stdout, limit=QUOTED_TAIL_CHARS, from_end=True)
             raise SourceUnavailable(f"{shown} exited {result.returncode}: {tail or '<no output>'}")
         try:
             return result.stdout.decode("utf-8")

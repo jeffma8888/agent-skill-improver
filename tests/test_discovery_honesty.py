@@ -268,6 +268,34 @@ class SourceOutputBoundsTests(unittest.TestCase):
         self.assertEqual(len(quoted), 500, "the documented bound is exactly 500 characters")
         self.assertNotIn("partial stdout", quoted)
 
+    def test_a_failing_export_that_prints_a_credential_has_it_redacted_in_the_reason(self):
+        """The quoted tail becomes a deferral reason, then a receipt line, a
+        checkpoint entry and a scheduler-log line. A CLI that dies printing the
+        key it was refused with must not seed four copies of that key."""
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        # Assembled inside the child so the key is not on the command line too.
+        program = (
+            "import sys\n"
+            "sys.stderr.write('401 unauthorized for key ' + 'AKIA' + 'ABCDEFGHIJKLMNOP')\n"
+            "sys.exit(1)\n"
+        )
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(program).fetch("thread-8")
+        message = str(ctx.exception)
+        self.assertIn("exited 1: 401 unauthorized for key [REDACTED:aws-access-key-id]", message)
+        self.assertNotIn(planted, message)
+
+    def test_a_credential_in_the_configured_command_line_is_redacted_from_the_reason(self):
+        """The failure reason quotes the command that failed. A configured argv
+        carrying a key as an option value would put that key in the same four
+        places the stderr tail reaches."""
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source("import sys; sys.exit(2)", "--key", planted).fetch("thread-9")
+        message = str(ctx.exception)
+        self.assertIn("--key [REDACTED:aws-access-key-id]", message)
+        self.assertNotIn(planted, message)
+
     def test_a_failing_export_that_said_nothing_says_so(self):
         with self.assertRaises(SourceUnavailable) as ctx:
             self._source("import sys; sys.exit(2)").fetch("thread-6")

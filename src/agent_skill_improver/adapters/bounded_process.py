@@ -21,6 +21,9 @@ This module is the one place that reads a child's pipes:
   or never reads, cannot wedge the parent on a full pipe;
 * stderr is drained concurrently and only a bounded tail is kept, because it is
   diagnostic, not data.
+* whatever a caller quotes from the child into a failure message goes through
+  ``quotable``: redacted with the transcript's credential shapes, then cut to
+  the documented length, because that message becomes a persisted ``reason``.
 
 Callers map the two exceptions onto their own failure classes; this module
 knows nothing about records, roles or sources.
@@ -37,6 +40,8 @@ import time
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from ..domain.redaction import redact
+
 #: How much of the child's stderr is kept for the failure message.
 STDERR_TAIL_BYTES = 4096
 
@@ -50,6 +55,23 @@ QUOTED_TAIL_CHARS = 500
 #: The head rather than the tail: it shows what the reply started as (prose, a
 #: fence, an error page) and no more. Stated in the privacy doc as well.
 QUOTED_OUTPUT_CHARS = 120
+
+
+def quotable(text: str, *, limit: int, from_end: bool) -> str:
+    """Child output as a failure message may quote it: redacted, then bounded.
+
+    Quoted output lands in a deferral or quarantine ``reason`` and from there in
+    the receipt, the checkpoint and the scheduler log. A CLI that dies printing
+    its own authorization header, or a role that echoes a key instead of JSON,
+    would otherwise persist that credential in four places. Redaction runs over
+    the whole captured text *before* the cut, so a key is masked as a whole
+    rather than sliced into a fragment the shapes no longer recognise. Best
+    effort, like every redaction here: the shapes are the ones the transcript
+    redactor uses.
+    """
+    masked = redact(text).text
+    return masked[-limit:] if from_end else masked[:limit]
+
 
 #: Pipe read size. Small enough that the overshoot past ``max_output_bytes``
 #: before the kill is at most one chunk.

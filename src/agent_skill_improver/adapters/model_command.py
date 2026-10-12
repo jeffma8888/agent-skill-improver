@@ -63,6 +63,7 @@ from .bounded_process import (
     QUOTED_TAIL_CHARS,
     OutputOverflow,
     RunTimedOut,
+    quotable,
     run_bounded,
 )
 
@@ -237,7 +238,11 @@ class CommandModelRunner:
             # later walks the state tree.
             shutil.rmtree(workdir, ignore_errors=True)
         if result.returncode != 0:
-            tail = result.stderr_tail.decode("utf-8", errors="replace").strip()[-QUOTED_TAIL_CHARS:]
+            tail = quotable(
+                result.stderr_tail.decode("utf-8", errors="replace").strip(),
+                limit=QUOTED_TAIL_CHARS,
+                from_end=True,
+            )
             raise TransientFailure(
                 f"role {role!r} exited {result.returncode}: {tail or '<no stderr>'}"
             )
@@ -314,7 +319,8 @@ def _last_balanced_object(text: str, *, role: str) -> Any:
             continue
     raise MalformedModelOutput(
         f"role {role!r} produced no parseable JSON object "
-        f"(first {QUOTED_OUTPUT_CHARS} chars: {text[:QUOTED_OUTPUT_CHARS]!r})"
+        f"(first {QUOTED_OUTPUT_CHARS} chars: "
+        f"{quotable(text, limit=QUOTED_OUTPUT_CHARS, from_end=False)!r})"
     )
 
 

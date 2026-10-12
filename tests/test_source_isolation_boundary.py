@@ -771,6 +771,42 @@ class OutputCapIsEnforcedWhileReadingTests(unittest.TestCase):
         self.assertEqual(len(quoted), QUOTED_TAIL_CHARS)
         self.assertNotIn("partial stdout", quoted)
 
+    def test_a_role_that_exits_printing_a_credential_has_it_redacted_in_the_reason(self):
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        program = "import sys\nsys.stderr.write('bad token ' + sys.argv[1])\nsys.exit(2)\n"
+        cmd = RoleCommand(
+            role="scorer",
+            argv=(sys.executable, "-c", program, planted),
+            env={},
+            model_label="leaky",
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        with self.assertRaises(TransientFailure) as ctx:
+            runner.run(role="scorer", system="s", user="u", response_schema="x")
+        message = str(ctx.exception)
+        self.assertIn("exited 2: bad token [REDACTED:aws-access-key-id]", message)
+        self.assertNotIn(planted, message)
+
+    def test_quoting_redacts_the_whole_capture_before_it_cuts(self):
+        """A key straddling the cut must not survive as a fragment: redaction
+        runs over the captured text first, so the shape is still whole when it
+        is matched, and only the placeholder can be sliced."""
+        from agent_skill_improver.adapters.bounded_process import quotable
+
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        text = "x" * 489 + " " + planted + " and then the reason"
+        quoted = quotable(text, limit=500, from_end=True)
+        self.assertNotIn(planted, quoted)
+        self.assertNotIn(planted[-12:], quoted, "no fragment of the key either")
+        self.assertTrue(quoted.endswith(" and then the reason"))
+        self.assertLessEqual(len(quoted), 500)
+        # The control: harmless text is cut exactly as before.
+        self.assertEqual(quotable("E" * 5000 + " R", limit=500, from_end=True)[-2:], " R")
+        self.assertEqual(len(quotable("E" * 5000 + " R", limit=500, from_end=True)), 500)
+        self.assertEqual(quotable("abcdef", limit=3, from_end=False), "abc")
+
     def test_a_role_that_exits_non_zero_in_silence_says_so(self):
         cmd = RoleCommand(
             role="scorer",
