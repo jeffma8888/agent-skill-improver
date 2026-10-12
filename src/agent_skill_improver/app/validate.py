@@ -48,7 +48,7 @@ from ..domain.validation import (
     evidence_call_count,
     parse_judgement,
 )
-from ..errors import AsiError
+from ..errors import AsiError, ConfigError
 from ..ports import ModelRunner
 from . import prompts
 from .pipeline import score_conversation
@@ -147,6 +147,21 @@ def validate_candidate(
     notes: list[str] = []
     skill_id = candidate.target.skill_id
     new_text = candidate.patch.new_text
+    cap = cfg.max_skill_text_chars
+    if 0 < cap < max(len(base_text), len(new_text)):
+        # Both arms are shown to the scorer, and both options to the judge,
+        # clipped at this cap. A decision about text no model read to the end
+        # is not evidence about the candidate, so none is produced: the daily
+        # pass refuses the replacement at propose, and this is the same rule
+        # for a record proposed under a larger cap than the one in force now.
+        readers = "the scorer and judge prompts" if policy.require_judge else "the scorer prompt"
+        raise ConfigError(
+            f"candidate {candidate.id}: the base is {len(base_text)} chars and the replacement "
+            f"{len(new_text)} chars, and [prompt].max_skill_text_chars = {cap} would clip "
+            f"whichever is longer in {readers}; a gate decision about text no model read to "
+            "the end is not evidence, so no model was called. Raise the cap to at least "
+            f"{max(len(base_text), len(new_text))} and run again."
+        )
     scorer_command_id = runner.command_id(ROLE_SCORER)
     improver_command_id = candidate.improver_command_id
     judge_command_id = runner.command_id(ROLE_JUDGE) if policy.require_judge else ""

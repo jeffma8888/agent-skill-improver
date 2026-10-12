@@ -321,6 +321,22 @@ def propose_candidate(
             "proposed replacement text is unsafe: " + "; ".join(text_problems),
             record_id=group.skill_id,
         )
+    if 0 < cfg.max_skill_text_chars < len(proposal.new_skill_text):
+        # The replay scores the candidate arm with this text and the judge
+        # reads it as one blind option, both clipped at the same cap. Measured
+        # before this check: a 1,120-char replacement under a 500-char cap was
+        # scored and judged from its first 500 chars and the gate passed with
+        # no note, so the approval token would have covered text no model read.
+        raise RecordDefect(
+            f"improver returned a {len(proposal.new_skill_text)}-char replacement for skill "
+            f"{group.skill_id!r}, above [prompt].max_skill_text_chars = "
+            f"{cfg.max_skill_text_chars}: the scorer, and the judge when the gate requires one, "
+            "would see it clipped at the cap, and a gate pass would certify text no model read "
+            "to the end. Nothing is "
+            "proposed against it this run and no replay was run; raise the cap to cover a "
+            "replacement this size, or expect the improver to add less.",
+            record_id=group.skill_id,
+        )
 
     patch = make_patch(base_text, proposal.new_skill_text, path_label=str(canonical.path))
     from ..domain.candidate import TargetRef

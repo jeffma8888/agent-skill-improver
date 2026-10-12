@@ -63,11 +63,11 @@ from agent_skill_improver.domain.validation import (
     blind_arms,
     evidence_call_count,
 )
-from agent_skill_improver.errors import CandidateTampered, TransientFailure
+from agent_skill_improver.errors import CandidateTampered, ConfigError, TransientFailure
 from agent_skill_improver.hashing import sha256_file, sha256_text
 
 from tests.support import FIX_MARKER, build_env, run_cli
-from tests.test_candidate_integrity import BASE_TEXT, build_candidate, build_validation
+from tests.test_candidate_integrity import BASE_TEXT, NEW_TEXT, build_candidate, build_validation
 
 SEED = "integrity-test-seed"
 FIX_LINE = "watch it fail for the right reason"
@@ -553,6 +553,96 @@ def run_producer(refs, *, runner: ReplayRunner, conversations=None, rubrics=None
         seed="producer-seed",
         holdout_pairs=holdouts,
     )
+
+
+class PromptRecordingRunner(ReplayRunner):
+    """The replay runner, keeping every prompt so a test can read what a model saw."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.users: list[tuple[str, str]] = []
+
+    def run(self, *, role: str, system: str, user: str, response_schema: str) -> Any:
+        self.users.append((role, user))
+        return super().run(role=role, system=system, user=user, response_schema=response_schema)
+
+
+class AValidationNeverCertifiesTextTheModelsSawClippedTests(unittest.TestCase):
+    """Both arms reach the scorer, and both options reach the judge, clipped at
+    ``[prompt].max_skill_text_chars``. Measured before this check: a 1,120-char
+    replacement under a 500-char cap was scored and judged from its first 500
+    chars, the gate passed, and the record carried no note; the approval token
+    would have covered text no model read."""
+
+    PADDING = "- a line of guidance that is part of the skill\n" * 20
+
+    def _candidate(self, *, base_text: str, new_text: str):
+        built = build_candidate(
+            status=STATUS_PROPOSED, validation={}, base_text=base_text, new_text=new_text
+        )
+        return replace(built, rubric_failures=(ref(IC, "t1", "c1"),), validation=None)
+
+    def _validate(self, candidate, *, base_text: str, cap: int, runner):
+        return validate_candidate(
+            candidate,
+            runner,
+            rubrics=PRODUCER_RUBRICS,
+            conversations=CONVERSATIONS,
+            base_text=base_text,
+            cfg=PromptConfig(max_skill_text_chars=cap),
+            policy=GatePolicy(min_holdout_cases=0, require_judge=True),
+            seed="clipped-seed",
+        )
+
+    def test_a_replacement_past_the_cap_is_refused_before_any_model_call(self):
+        new = NEW_TEXT + self.PADDING
+        self.assertGreater(len(new), 500)
+        runner = PromptRecordingRunner()
+        with self.assertRaises(ConfigError) as caught:
+            self._validate(
+                self._candidate(base_text=BASE_TEXT, new_text=new),
+                base_text=BASE_TEXT,
+                cap=500,
+                runner=runner,
+            )
+        message = str(caught.exception)
+        self.assertIn(f"the replacement {len(new)} chars", message)
+        self.assertIn("[prompt].max_skill_text_chars = 500", message)
+        self.assertIn(f"Raise the cap to at least {len(new)}", message)
+        self.assertEqual(runner.calls, [], "no scorer or judge call is spent on it")
+
+    def test_a_base_past_the_cap_is_refused_the_same_way(self):
+        # The replacement stays under the cap, so only the base can be the
+        # reason: a check that read the replacement alone would let this
+        # through and score the baseline arm from a clipped view.
+        base = BASE_TEXT + self.PADDING
+        new = NEW_TEXT
+        self.assertGreater(len(base), 500)
+        self.assertLess(len(new), 500)
+        runner = PromptRecordingRunner()
+        with self.assertRaises(ConfigError) as caught:
+            self._validate(
+                self._candidate(base_text=base, new_text=new),
+                base_text=base,
+                cap=500,
+                runner=runner,
+            )
+        self.assertIn(f"the base is {len(base)} chars", str(caught.exception))
+        self.assertEqual(runner.calls, [])
+
+    def test_the_control_texts_within_the_cap_are_replayed_in_full(self):
+        new = NEW_TEXT + self.PADDING
+        runner = PromptRecordingRunner()
+        result = self._validate(
+            self._candidate(base_text=BASE_TEXT, new_text=new),
+            base_text=BASE_TEXT,
+            cap=len(new),
+            runner=runner,
+        )
+        self.assertTrue(result.decision.passed, result.decision.reasons)
+        self.assertEqual({role for role, _ in runner.users}, {"scorer", "judge"})
+        for role, user in runner.users:
+            self.assertNotIn("[clipped", user, f"the {role} saw a clipped text")
 
 
 class ProducerWritesRecordsThatParseThemselvesTests(unittest.TestCase):

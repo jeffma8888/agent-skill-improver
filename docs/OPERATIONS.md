@@ -224,8 +224,9 @@ skills_quarantined            a proposal target that is defective (implicated bu
                               the skill), a replacement that fails a structural check (lost
                               frontmatter, a rename, more than triple the base, or less than
                               half of a base of 2,000+ chars: a truncated output or a
-                              large deletion), or
-                              a skill that kept deferring past caps.max_defer_attempts
+                              large deletion), a replacement longer than the cap (the
+                              scorer and judge would see it clipped, so no replay is run),
+                              or a skill that kept deferring past caps.max_defer_attempts
 skills_deferred               a proposal that could not be made, e.g. the improver timed out
 failure_cases                 FAIL verdicts with resolvable evidence
 failure_cases_unattributed    real failures NOT tied to a skill (abstention, not absence)

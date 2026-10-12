@@ -1153,6 +1153,18 @@ class CredentialBearingSkillTests(DailyHarness):
         self.assertIn("credential", refused[0]["reason"].lower())
 
 
+def env_with_cap(base, cap: int):
+    """The standard harness config with ``[prompt].max_skill_text_chars`` set to ``cap``."""
+    config_path = build_env(base, dry_run=False, use_subprocess_model=False)
+    text = config_path.read_text(encoding="utf-8")
+    assert text.count("max_skill_text_chars = 24000\n") == 1, text
+    config_path.write_text(
+        text.replace("max_skill_text_chars = 24000\n", f"max_skill_text_chars = {cap}\n"),
+        encoding="utf-8",
+    )
+    return load_config(config_path)
+
+
 class ADocumentPastThePromptCapIsNotProposedAgainstTests(DailyHarness):
     """The improver rewrites the document whole from the text it is shown, and
     the prompt clips that text at ``[prompt].max_skill_text_chars``. Measured
@@ -1162,16 +1174,7 @@ class ADocumentPastThePromptCapIsNotProposedAgainstTests(DailyHarness):
     structural check (it then failed the gate for unrelated reasons)."""
 
     def _env_with_cap(self, cap: int):
-        from tests.support import build_env
-
-        config_path = build_env(self.base, dry_run=False, use_subprocess_model=False)
-        text = config_path.read_text(encoding="utf-8")
-        assert text.count("max_skill_text_chars = 24000\n") == 1, text
-        config_path.write_text(
-            text.replace("max_skill_text_chars = 24000\n", f"max_skill_text_chars = {cap}\n"),
-            encoding="utf-8",
-        )
-        return load_config(config_path)
+        return env_with_cap(self.base, cap)
 
     def _lengthen(self, skill_id: str, chars: int) -> int:
         path = self.base / "skills-canonical" / skill_id / "SKILL.md"
@@ -1215,6 +1218,66 @@ class ADocumentPastThePromptCapIsNotProposedAgainstTests(DailyHarness):
 
     def _candidate_files(self, state):
         return sorted(p.name for p in state.dir("candidates").glob("*.json"))
+
+
+class PaddingImproverRunner(InProcessRunner):
+    """The in-process fake, with an improver that appends ``extra`` to every
+    replacement: the shape of a model that rewrites generously."""
+
+    def __init__(self, extra: str) -> None:
+        super().__init__()
+        self.extra = extra
+
+    def run(self, *, role: str, system: str, user: str, response_schema: str):
+        payload = super().run(role=role, system=system, user=user, response_schema=response_schema)
+        if role == "improver":
+            payload = dict(payload, new_skill_text=payload["new_skill_text"] + self.extra)
+        return payload
+
+
+class AReplacementPastThePromptCapIsNotValidatedTests(DailyHarness):
+    """The replay scores the candidate arm with the replacement and the judge
+    reads it as one blind option, both clipped at ``[prompt].max_skill_text_chars``.
+    Measured before this check: a 1,120-char replacement under a 500-char cap
+    was scored and judged from its first 500 chars, the gate passed and the
+    validation carried no note, so a reviewer would have been handed a token
+    for text no model read to the end."""
+
+    EXTRA = "- a line of guidance that is part of the skill\n" * 20
+
+    def test_the_skill_is_quarantined_at_propose_and_no_replay_is_run(self):
+        config = env_with_cap(self.base, 500)
+        base = (self.base / "skills-canonical" / "tdd" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertLess(len(base), 500, "the base itself is within the cap")
+        runner = PaddingImproverRunner(self.EXTRA)
+        receipt, state, _ = self.run_pass(config, runner=runner)
+        payload = receipt.to_dict()
+        self.assertEqual(payload["counts"]["candidates_proposed"], 0)
+        row = payload["skills"]["tdd"]
+        self.assertEqual((row["status"], row["stage"]), ("quarantined", "propose"))
+        self.assertRegex(
+            row["reason"],
+            r"improver returned a \d+-char replacement for skill 'tdd', above "
+            r"\[prompt\]\.max_skill_text_chars = 500",
+        )
+        self.assertIn("no replay was run", row["reason"])
+        roles = [role for role, _ in runner.calls]
+        self.assertEqual(roles.count("improver"), 1, roles)
+        self.assertNotIn("judge", roles)
+        self.assertEqual(
+            roles[roles.index("improver") + 1 :],
+            [],
+            "nothing is spent on the replay of a replacement the models would see clipped",
+        )
+        self.assertEqual(sorted(p.name for p in state.dir("candidates").glob("*.json")), [])
+
+    def test_the_control_a_replacement_within_the_cap_is_replayed(self):
+        config = env_with_cap(self.base, 500_000)
+        runner = PaddingImproverRunner(self.EXTRA)
+        receipt, _, _ = self.run_pass(config, runner=runner)
+        payload = receipt.to_dict()
+        self.assertGreaterEqual(payload["counts"]["candidates_proposed"], 1, payload["skills"])
+        self.assertIn("judge", [role for role, _ in runner.calls])
 
 
 class ACanonicalDocumentUnreadableAtProposeTests(DailyHarness):
