@@ -789,5 +789,131 @@ class ExitCodesTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), "SafetyRefusal: declined\n")
 
 
+class TerminalOutputIsEscaped(unittest.TestCase):
+    """Every text line the CLI writes is read by a person at a terminal, and a
+    terminal OBEYS control characters rather than showing them. Error messages
+    quote model stderr tails, file names and configured paths verbatim, so a
+    hostile byte in any of those would erase or rewrite the lines above it. The
+    propose-stage quarantine keeps such bytes out of candidates; this is the
+    last line, at the point of writing: whatever is written is shown as the
+    escape it is, never executed.
+    """
+
+    HOSTILE = "a model said \x1b[2K\x1b[1Agone\r and \x07 and \u202eright-to-left"
+    SHOWN = "a model said \\x1b[2K\\x1b[1Agone\\r and \\x07 and \\u202eright-to-left"
+
+    def test_the_escape_shows_what_a_terminal_would_obey(self):
+        self.assertEqual(cli.escape_for_terminal(self.HOSTILE), self.SHOWN)
+        self.assertEqual(cli.escape_for_terminal("\U000e0041"), "\\U000e0041")
+
+    def test_newlines_tabs_and_ordinary_unicode_pass_through(self):
+        plain = "line one\n\tindented caf\u00e9 \u65e5\u672c \U0001f469\u200d\U0001f4bb"
+        self.assertEqual(cli.escape_for_terminal(plain), plain)
+
+    def _main_streams(self, argv, *, patch=None):
+        import contextlib
+        import io
+        from unittest import mock
+
+        out, err = io.StringIO(), io.StringIO()
+        ctx = (
+            mock.patch.object(cli, patch[0], side_effect=patch[1])
+            if patch
+            else contextlib.nullcontext()
+        )
+        with ctx, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_refusal_quoting_hostile_text_reaches_stderr_escaped(self):
+        from agent_skill_improver.errors import SafetyRefusal
+
+        rc, out, err = self._main_streams(
+            ["doctor"], patch=("cmd_doctor", SafetyRefusal(self.HOSTILE))
+        )
+        self.assertEqual(rc, cli.RC_REFUSED)
+        self.assertEqual(err, f"SafetyRefusal: {self.SHOWN}\n")
+        self.assertEqual(out, "")
+
+    def test_a_not_found_message_and_an_internal_error_are_escaped_too(self):
+        rc, _, err = self._main_streams(
+            ["doctor"], patch=("cmd_doctor", FileNotFoundError(self.HOSTILE))
+        )
+        self.assertEqual(rc, cli.RC_MISSING_FILE)
+        self.assertEqual(err, f"not found: {self.SHOWN}\n")
+        rc, _, err = self._main_streams(
+            ["doctor"], patch=("cmd_doctor", RuntimeError(self.HOSTILE))
+        )
+        self.assertEqual(rc, cli.RC_INTERNAL_ERROR)
+        self.assertIn("Traceback", err)
+        self.assertIn(f"RuntimeError: {self.SHOWN}", err)
+        self.assertNotIn("\x1b", err)
+
+    def test_a_hostile_configured_path_is_shown_not_obeyed(self):
+        rc, out, err = self._main_streams(
+            ["--config", "/nonexistent/\x1b[2K/config.toml", "doctor"]
+        )
+        self.assertEqual(rc, cli.RC_REFUSED)
+        self.assertIn("/nonexistent/\\x1b[2K/config.toml", err)
+        self.assertNotIn("\x1b", err)
+        self.assertNotIn("\x1b", out)
+
+    def test_json_output_is_left_to_the_json_encoder(self):
+        """``--json`` is for programs: the encoder escapes every C0 control
+        character itself, and a second pass would corrupt the payload. It does
+        NOT touch a bidi override, which is why the docs say that reading
+        ``--json`` output in a terminal is not the reviewed path."""
+        import json
+
+        text = cli.dumps({"note": "x\x1by\u202ez"})
+        self.assertNotIn("\x1b", text)
+        self.assertIn("\u202e", text, "the encoder leaves a bidi override in the payload")
+        self.assertEqual(json.loads(text), {"note": "x\x1by\u202ez"})
+
+    def test_argparse_messages_that_repeat_argv_are_escaped_too(self):
+        """argparse writes its own errors; "unrecognized arguments" repeats
+        argv raw, so the parser class escapes every message it prints."""
+        import contextlib
+        import io
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            cli.main(["daily", "--nope", "\x1b[2K\u202eevil"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("unrecognized arguments", err.getvalue())
+        self.assertIn("\\x1b[2K\\u202eevil", err.getvalue())
+        self.assertNotIn("\x1b", err.getvalue())
+        self.assertNotIn("\u202e", err.getvalue())
+
+    def test_every_text_write_in_the_cli_goes_through_the_escape(self):
+        """Static: the only places ``cli.py`` touches ``sys.stdout`` or
+        ``sys.stderr`` directly are the two choke points (``_say`` and ``_err``)
+        and the JSON branches, where the argument is a ``dumps(...)`` call.
+        A new ``sys.stdout.write(f"...")`` anywhere else fails this test."""
+        import ast
+
+        tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Call):
+                    continue
+                target = ast.unparse(node.func)
+                if target in ("print", "traceback.print_exc", "traceback.print_exception"):
+                    offenders.append(f"{func.name}:{node.lineno} {target}")
+                    continue
+                if target not in ("sys.stdout.write", "sys.stderr.write"):
+                    continue
+                if func.name in ("_say", "_err"):
+                    continue
+                arg = node.args[0] if node.args else None
+                is_json = isinstance(arg, ast.Call) and ast.unparse(arg.func) == "dumps"
+                if not is_json:
+                    offenders.append(f"{func.name}:{node.lineno} {ast.unparse(node)[:60]}")
+        self.assertEqual(offenders, [])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -184,6 +184,18 @@ The defences, in order of how much they matter:
    to declare a skill broken cannot make that stick without a resolvable citation,
    and it cannot cause a write at all, because the write path needs a human.
 
+5. **The reviewer sees what applies.** The human is the gate, so what the human
+   reads has to be what the file will hold. A proposal whose prose or replacement
+   carries a terminal escape, a bidi override or an invisible tag character is
+   quarantined at the propose stage with the code point named, never the byte
+   echoed. And every text line any `asi` command writes to a terminal passes
+   through one escape (`escape_for_terminal`), so a hostile byte quoted from a
+   model's stderr, a file name or a configured path is shown as `\x1b` rather
+   than obeyed, and the argument parser's own messages go through the same
+   escape. `--json` output is left to the JSON encoder: it escapes every C0
+   control character itself, but leaves a bidi override in the payload, so
+   `--json` is for programs and is not the reviewed path.
+
 The honest limitation: injection can waste a run, and it can push a record into
 quarantine. It cannot silently edit a skill.
 

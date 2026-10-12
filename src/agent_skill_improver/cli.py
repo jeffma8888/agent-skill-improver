@@ -28,6 +28,7 @@ import os
 import shlex
 import sys
 import traceback
+import unicodedata
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -35,7 +36,7 @@ from . import __version__
 from .clock import SystemClock, iso
 from .config import SOURCE_FIXTURES, Config, load_config, package_dir
 from .domain.approval import HumanApproval, automation_active
-from .domain.candidate import STATUS_VALIDATED
+from .domain.candidate import BIDI_CONTROLS, HIDDEN_CONTROLS, STATUS_VALIDATED
 from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
@@ -109,12 +110,58 @@ def _load(args: argparse.Namespace) -> Config:
     return load_config(path)
 
 
+#: The two control characters a terminal is meant to obey in prose.
+_SHOWN_AS_IS = frozenset("\n\t")
+
+
+def escape_for_terminal(text: str) -> str:
+    """Show every byte a terminal would otherwise obey.
+
+    A terminal executes control characters: ``ESC [2K`` erases the line above,
+    a carriage return rewrites the current one, a bidi override reorders what
+    follows. The CLI quotes model stderr tails, file names and configured paths
+    verbatim in its messages, so any of them can carry such a byte. Here each
+    one becomes the Python escape it is (``\\x1b``, ``\\r``, ``\\u202e``), which
+    a person reads as a warning rather than a terminal acting on it. Newline
+    and tab are kept: they are the structure of the output itself.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch in _SHOWN_AS_IS:
+            out.append(ch)
+        elif ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) == "Cc":
+            code = ord(ch)
+            if ch == "\r":
+                out.append("\\r")
+            elif code < 0x100:
+                out.append(f"\\x{code:02x}")
+            elif code < 0x10000:
+                out.append(f"\\u{code:04x}")
+            else:
+                out.append(f"\\U{code:08x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _say(text: str) -> None:
+    """The one place text for a person reaches stdout."""
+    sys.stdout.write(escape_for_terminal(text))
+
+
+def _err(text: str) -> None:
+    """The one place text for a person reaches stderr."""
+    sys.stderr.write(escape_for_terminal(text))
+
+
 def _emit(payload: Any, *, as_json: bool, lines: Sequence[str] = ()) -> None:
     if as_json:
+        # JSON is for programs; the encoder escapes control characters itself,
+        # and a second pass would corrupt the payload.
         sys.stdout.write(dumps(payload))
     else:
         for line in lines:
-            sys.stdout.write(line + "\n")
+            _say(line + "\n")
 
 
 # -- commands ------------------------------------------------------------
@@ -124,7 +171,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         config = _load(args)
     except ConfigError as exc:
-        sys.stderr.write(f"config error: {exc}\n")
+        _err(f"config error: {exc}\n")
         return RC_REFUSED
     store = build_skill_store(config)
     missing = [r.id for r in store.missing_roots()]
@@ -414,15 +461,13 @@ def cmd_daily(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(dumps(receipt.to_dict()))
     else:
-        sys.stdout.write(receipt.summary_line() + "\n")
+        _say(receipt.summary_line() + "\n")
         for note in receipt.notes:
-            sys.stdout.write(f"note: {note}\n")
+            _say(f"note: {note}\n")
         if receipt.dry_run:
-            sys.stdout.write(
-                "receipt: not written (dry run); --json prints it, --commit persists it\n"
-            )
+            _say("receipt: not written (dry run); --json prints it, --commit persists it\n")
         else:
-            sys.stdout.write(f"receipt: {state.receipt_path(receipt.day, dry_run=False)}\n")
+            _say(f"receipt: {state.receipt_path(receipt.day, dry_run=False)}\n")
     return exit_code_for(receipt.status)
 
 
@@ -529,7 +574,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         "",
         "Nothing has been written to any skill file yet.",
     ]
-    sys.stdout.write("\n".join(out) + "\n")
+    _say("\n".join(out) + "\n")
     return 0
 
 
@@ -560,7 +605,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         sys.stdout.write(dumps(result))
     else:
         write = result["write"]
-        sys.stdout.write(
+        _say(
             "\n".join(
                 [
                     f"applied {result['candidate_id']} to {write['path']}",
@@ -587,7 +632,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(dumps(result))
     else:
-        sys.stdout.write(f"rolled back {result['candidate_id']}: {result['result']}\n")
+        _say(f"rolled back {result['candidate_id']}: {result['result']}\n")
     return 0
 
 
@@ -602,7 +647,7 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
         )
     )
     if not path.is_file():
-        sys.stderr.write(f"template not found: {path}\n")
+        _err(f"template not found: {path}\n")
         return RC_MISSING_FILE
     # The job must run the config this invocation was given, and its logs must
     # land in THAT config's state tree: the output can carry private content, and
@@ -618,8 +663,8 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     text = text.replace("__PYTHON__", sys.executable)
     text = text.replace("__CONFIG__", str(config_path))
     text = text.replace("__STATE__", str(config.state_dir))
-    sys.stdout.write(text)
-    sys.stderr.write(
+    _say(text)
+    _err(
         "\nThis template was printed, not installed. Nothing is scheduled. "
         "Read docs/SCHEDULING.md before enabling it.\n"
     )
@@ -951,8 +996,18 @@ def _referenced_names(source: str) -> set[str]:
 
 
 # -- parser --------------------------------------------------------------
+class _EscapingParser(argparse.ArgumentParser):
+    """argparse writes usage and errors to the terminal itself, and its
+    "unrecognized arguments" message repeats argv raw. Subparsers inherit this
+    class, so the one override covers every message argparse prints."""
+
+    def _print_message(self, message: str, file: Any = None) -> None:
+        if message:
+            (file or sys.stderr).write(escape_for_terminal(message))
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _EscapingParser(
         prog="asi",
         description=(
             "Safe, human-gated daily self-improvement loop for agent skills. "
@@ -972,7 +1027,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Accepted either before or after the subcommand. `default=SUPPRESS` is what
     # makes that work: without it the subparser would write its own False over a
     # value the user already supplied at the top level.
-    common = argparse.ArgumentParser(add_help=False)
+    common = _EscapingParser(add_help=False)
     common.add_argument("--config", help=config_help, default=argparse.SUPPRESS)
     common.add_argument(
         "--json", action="store_true", help="machine-readable output", default=argparse.SUPPRESS
@@ -1056,10 +1111,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return int(args.func(args))
     except AsiError as exc:
-        sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+        _err(f"{type(exc).__name__}: {exc}\n")
         return RC_REFUSED
     except FileNotFoundError as exc:
-        sys.stderr.write(f"not found: {exc}\n")
+        _err(f"not found: {exc}\n")
         return RC_MISSING_FILE
     except BrokenPipeError:  # pragma: no cover - piping into head/less
         return RC_OK
@@ -1067,8 +1122,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Last resort. KeyboardInterrupt and SystemExit are not Exceptions and
         # keep their own exit statuses. Naming the failure and keeping the
         # traceback is what makes this a bug report rather than a silent 1.
-        sys.stderr.write("internal error: this is a bug in asi, not a negative answer\n")
-        traceback.print_exc()
+        _err("internal error: this is a bug in asi, not a negative answer\n")
+        _err(traceback.format_exc())
         return RC_INTERNAL_ERROR
 
 
