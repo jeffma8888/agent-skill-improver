@@ -214,7 +214,9 @@ diagnose first.
 
 The backup and its manifest are verified before anything is written, so a
 `BackupUnusable` refusal means the applied file is still exactly as it was and
-you can try a different backup directory under `state/backups/`.
+you can try a different backup directory under `state/backups/`. Each directory
+there is named `<candidate id>--<stamp>`, and rollback uses only the newest one
+whose candidate id is exactly the one you named.
 
 Rollback overwrites only the text its own apply wrote. If the skill has been
 edited since (by you, or by applying another candidate), it refuses with

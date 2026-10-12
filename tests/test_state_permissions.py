@@ -530,6 +530,40 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         self.assertIsNone(store.latest_backup_manifest("CAND-1"))
         self.assertEqual(outside.read_text(encoding="utf-8"), '{"schema": "asi.backup.v1"}\n')
 
+    def test_a_backup_belongs_to_exactly_the_candidate_whose_id_names_it(self):
+        """The backup directory is ``<candidate id>--<stamp>``, and a candidate
+        id may itself contain ``--``. Measured before this test, the lookup for
+        ``CAND-a`` was a string-prefix glob, so it returned the manifest of
+        ``CAND-a--b``'s apply: ``asi rollback CAND-a``, for a candidate that was
+        never applied, would have restored another candidate's file and marked
+        the wrong record rolled back. A rollback must find only its own apply."""
+        store = self.store()
+        store.ensure()
+        other = store.backup_dir_for("CAND-a--b", "20260102-000000")
+        write_json(other / "backup.json", {"schema": "asi.backup.v1"})
+        self.assertIsNone(store.latest_backup_manifest("CAND-a"))
+        self.assertEqual(store.latest_backup_manifest("CAND-a--b"), other / "backup.json")
+        own = store.backup_dir_for("CAND-a", "20260103-000000")
+        write_json(own / "backup.json", {"schema": "asi.backup.v1"})
+        self.assertEqual(store.latest_backup_manifest("CAND-a"), own / "backup.json")
+        self.assertEqual(store.latest_backup_manifest("CAND-a--b"), other / "backup.json")
+
+    def test_a_stamp_that_would_blur_the_owner_is_refused_at_write_time(self):
+        store = self.store()
+        store.ensure()
+        with self.assertRaises(ValueError):
+            store.backup_dir_for("CAND-1", "2026--0102")
+        self.assertEqual(list((self.root / "backups").iterdir()), [])
+
+    def test_the_latest_backup_is_the_newest_stamp_for_that_candidate(self):
+        store = self.store()
+        store.ensure()
+        older = store.backup_dir_for("CAND-1", "20260102-000000")
+        newer = store.backup_dir_for("CAND-1", "20260105-000000")
+        write_json(older / "backup.json", {"schema": "asi.backup.v1"})
+        write_json(newer / "backup.json", {"schema": "asi.backup.v1"})
+        self.assertEqual(store.latest_backup_manifest("CAND-1"), newer / "backup.json")
+
     def test_the_control_shows_a_healthy_layout_reports_no_problems(self):
         store = self.store()
         store.ensure()

@@ -619,16 +619,30 @@ class StateStore:
         child before either happens.
         """
         self._refuse_promotion_when_withholding("backup")
+        stem = safe_name(stamp)
+        if "--" in stem:
+            # The owner of a backup directory is read off its name by splitting
+            # at the last ``--`` (see ``latest_backup_manifest``); a stamp that
+            # carried one would make the directory look like another candidate's.
+            raise ValueError(f"backup stamp {stamp!r} must not contain '--'")
         return _ensure_child_dir(
-            self.dir("backups"),
-            f"{validate_candidate_id(candidate_id)}--{safe_name(stamp)}",
-            self.root,
+            self.dir("backups"), f"{validate_candidate_id(candidate_id)}--{stem}", self.root
         )
 
     def latest_backup_manifest(self, candidate_id: str) -> Path | None:
-        prefix = f"{validate_candidate_id(candidate_id)}--"
+        """The newest ``backup.json`` written by an apply of exactly this candidate.
+
+        A backup directory is named ``<candidate id>--<stamp>``, and a candidate
+        id may itself contain ``--``, so the owner is read off the directory name
+        by splitting at the LAST ``--`` (the stamp never contains one), never by
+        string prefix: a prefix match would hand ``CAND-a`` the backup of
+        ``CAND-a--b`` and let a rollback restore the wrong candidate's file.
+        """
+        wanted = validate_candidate_id(candidate_id)
         dirs = sorted(
-            p for p in self.dir("backups").glob(prefix + "*") if p.is_dir() and not p.is_symlink()
+            p
+            for p in self.dir("backups").glob(f"{wanted}--*")
+            if p.is_dir() and not p.is_symlink() and p.name.rsplit("--", 1)[0] == wanted
         )
         for path in reversed(dirs):
             manifest = path / "backup.json"
