@@ -41,7 +41,9 @@ from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
     SOURCE_CLASS_SYNTHETIC,
+    credential_bearing_env_values,
     decide as decide_isolation,
+    denied_env_names,
     source_class,
 )
 from .errors import AsiError, ConfigError
@@ -187,6 +189,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for role in ("scorer", "improver", "judge"):
         if role not in config.model_roles:
             problems.append(f"no [model.{role}] command configured")
+    # The same rules minimal_env applies at the first model call, applied here
+    # so the operator learns about a refused role environment from the report
+    # rather than from the first scheduled run. Names and shapes only; a value
+    # that looks like a credential is never printed.
+    for role, command in sorted(config.model_roles.items()):
+        role_env = command.env or {}
+        denied = denied_env_names(role_env)
+        if denied:
+            problems.append(
+                f"[model.{role}].env carries a name matching a credential, token or proxy "
+                f"pattern ({', '.join(denied)}); the run would refuse it at the first model call"
+            )
+        # A denied name is already reported above; the shape check is for the
+        # rename that slips past the name denylist, as in minimal_env.
+        for name, shape in credential_bearing_env_values(role_env):
+            if name in denied:
+                continue
+            problems.append(
+                f"[model.{role}].env value {name} is shaped like a credential ({shape}); "
+                "the run would refuse it at the first model call"
+            )
     independence = config.evaluator_independence()
     if not independence["judge_independent"]:
         warnings.append(

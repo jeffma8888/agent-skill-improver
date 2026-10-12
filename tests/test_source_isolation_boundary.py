@@ -513,6 +513,73 @@ class MinimalEnvironmentTests(unittest.TestCase):
         self.assertEqual(iso.denied_env_names({"PATH": "/bin", "LANG": "C", "TZ": "UTC"}), ())
 
 
+class DoctorReportsARoleEnvTheRunWouldRefuseTests(unittest.TestCase):
+    """``doctor`` is what an operator runs before scheduling. Measured before
+    this class existed, it said ``ready`` for a configuration whose role
+    environment the first scheduled ``daily`` would refuse outright at the first
+    model call (``IsolationRequired``): the credential check lived only in the
+    runner. The verdict has to come from the same rule, before anything runs.
+    """
+
+    def _config_with_role_env(self, base: Path, line: str) -> Path:
+        from tests.support import build_env
+
+        config = Path(build_env(base, dry_run=True))
+        text = config.read_text(encoding="utf-8")
+        marker = 'model_label = "fake-scorer"\n'
+        assert text.count(marker) == 1
+        config.write_text(text.replace(marker, marker + line + "\n"), encoding="utf-8")
+        return config
+
+    def _doctor(self, config: Path) -> tuple[int, dict[str, Any]]:
+        from tests.support import run_cli
+
+        proc = run_cli(["--config", str(config), "--json", "doctor"])
+        return proc.returncode, json.loads(proc.stdout)
+
+    def test_a_denied_name_in_role_env_is_a_doctor_problem(self):
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_role_env(Path(tmp), 'env = { OPENAI_API_KEY = "x" }')
+            rc, payload = self._doctor(config)
+        self.assertEqual(rc, 1, payload)
+        problems = [p for p in payload["problems"] if "OPENAI_API_KEY" in p]
+        self.assertEqual(len(problems), 1, payload["problems"])
+        self.assertIn("scorer", problems[0])
+
+    def test_a_credential_shaped_value_in_role_env_is_a_doctor_problem(self):
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_role_env(Path(tmp), f'env = {{ MODEL_FLAG = "{planted}" }}')
+            rc, payload = self._doctor(config)
+        self.assertEqual(rc, 1, payload)
+        problems = [p for p in payload["problems"] if "MODEL_FLAG" in p]
+        self.assertEqual(len(problems), 1, payload["problems"])
+        self.assertIn("scorer", problems[0])
+        self.assertIn("aws-access-key-id", problems[0])
+        self.assertNotIn(planted, json.dumps(payload))
+
+    def test_a_denied_name_holding_a_credential_shaped_value_is_reported_once(self):
+        """``minimal_env`` refuses such a variable once, by name; the report
+        must not say the same thing twice under two headings."""
+        planted = "".join(("AKIA", "ABCDEFGHIJKLMNOP"))
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_role_env(
+                Path(tmp), f'env = {{ OPENAI_API_KEY = "{planted}" }}'
+            )
+            rc, payload = self._doctor(config)
+        self.assertEqual(rc, 1, payload)
+        self.assertEqual(len(payload["problems"]), 1, payload["problems"])
+        self.assertIn("OPENAI_API_KEY", payload["problems"][0])
+        self.assertNotIn(planted, json.dumps(payload))
+
+    def test_the_control_a_harmless_role_env_keeps_doctor_ready(self):
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_role_env(Path(tmp), 'env = { MODEL_TEMPERATURE = "0" }')
+            rc, payload = self._doctor(config)
+        self.assertEqual(rc, 0, payload)
+        self.assertEqual(payload["problems"], [])
+
+
 class TimedOutCommandLeavesNoGrandchildTests(unittest.TestCase):
     """A role command is routinely a wrapper (a shell, a node launcher, an
     isolation tool) that starts the real worker as its own child. Killing only

@@ -32,6 +32,12 @@ Linux it is `bubblewrap` (`bwrap`), which usually means installing a distributio
 package. The alternative, if you cannot install one, is to run against the
 synthetic fixture corpus, which classifies as synthetic and needs no sandbox.
 
+`doctor` also applies the role-environment rules the run applies at its first
+model call: a `[model.<role>].env` name matching a credential, token or proxy
+pattern, or a value shaped like a credential whatever it is named, is a `PROBLEM`
+here rather than an `IsolationRequired` refusal discovered by a scheduled run.
+The report names the variable and the shape, never the value.
+
 `doctor` also repairs `state/` permissions on the way through and reports what it
 changed. A repair that cannot take effect is a refusal, not a warning. An entry
 inside the tree that is not a regular file or directory (a symlink, a fifo or a
