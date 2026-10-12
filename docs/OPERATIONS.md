@@ -137,7 +137,11 @@ reading first, in order:
 
 **`status`** — `ok`, `partial`, `stood-down`, or `blocked`. `partial` is normal: it
 means at least one record or skill was quarantined or deferred while the rest
-completed. `blocked` means the skill tree changed during the run; see below.
+completed. `stood-down` carries a `stand_down_reason`. One stand-down, "no skill
+to improve" (no configured root is a directory, or the present roots hold no
+skill document), is decided before discovery, so no conversation is read or
+scored for a proposal that could not exist; `doctor` reports the same state as a
+`PROBLEM`. `blocked` means the skill tree changed during the run; see below.
 
 **`skill_tree.mutation_detected`** — must be false after any daily run. It is
 true when any skill document's tree entry differed between the run's first and

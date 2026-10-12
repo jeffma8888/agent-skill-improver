@@ -1127,6 +1127,81 @@ class ARoleCommandThatCannotStartIsAConfigProblemTests(unittest.TestCase):
         )
 
 
+class ARunWithNoSkillToImproveReadsNoConversationTests(unittest.TestCase):
+    """Measured before: with both skill roots gone, ``daily`` ingested and
+    scored five conversations, marked them processed for the day and wrote a
+    receipt whose status was ``ok``. Nothing could have been proposed.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, seed="no-skills"))]
+        self.canonical = self.base / "skills-canonical"
+        self.mirror = self.base / "skills-mirror"
+
+    def _run_expecting_a_stand_down_before_discovery(self) -> dict:
+        proc = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        receipt = json.loads(proc.stdout)
+        self.assertEqual(receipt["status"], "stood-down", receipt["stand_down_reason"])
+        # ``discovery`` is filled in by the discovery stage; empty means the
+        # source was never asked for a conversation.
+        self.assertEqual(receipt["discovery"], {}, "discovery never ran")
+        self.assertEqual(receipt["counts"]["conversations_ingested"], 0)
+        self.assertEqual(receipt["counts"]["records_scored"], 0)
+        self.assertEqual(receipt["records"], {})
+        self.assertIn("no conversation was read or scored", receipt["stand_down_reason"])
+        return receipt
+
+    def test_no_root_that_is_a_directory_stands_the_run_down_before_discovery(self):
+        shutil.rmtree(self.canonical)
+        shutil.rmtree(self.mirror)
+        self.mirror.write_text("not a directory\n", encoding="utf-8")
+        receipt = self._run_expecting_a_stand_down_before_discovery()
+        self.assertTrue(
+            receipt["stand_down_reason"].startswith(
+                "no configured skill root is a directory (canonical has nothing at its path; "
+                "mirror is a regular file, not a directory); nothing could be proposed"
+            ),
+            receipt["stand_down_reason"],
+        )
+
+    def test_present_roots_with_no_skill_document_stand_the_run_down_too(self):
+        shutil.rmtree(self.canonical)
+        shutil.rmtree(self.mirror)
+        self.canonical.mkdir()
+        self.mirror.mkdir()
+        (self.mirror / "tdd").mkdir()
+        (self.mirror / "tdd" / "SKILL.md").symlink_to(self.base / "nowhere.md")
+        receipt = self._run_expecting_a_stand_down_before_discovery()
+        self.assertTrue(
+            receipt["stand_down_reason"].startswith(
+                "no skill document was discovered under the present root(s) canonical, mirror; "
+                "1 path(s) were passed over, see skill_tree; nothing could be proposed"
+            ),
+            receipt["stand_down_reason"],
+        )
+        self.assertEqual(len(receipt["skill_tree"]["skill_documents_passed_over"]), 1)
+        # `doctor` says the same thing, so the operator is not surprised by
+        # the stand-down: before, a tree with no document read as ready.
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        self.assertIn(
+            "no skill document was discovered under the present root(s) canonical, mirror; "
+            "`daily` will stand down with nothing to propose",
+            json.loads(doctor.stdout)["problems"],
+        )
+
+    def test_the_control_a_tree_with_one_skill_still_scores(self):
+        proc = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        receipt = json.loads(proc.stdout)
+        self.assertNotEqual(receipt["status"], "stood-down", receipt["stand_down_reason"])
+        self.assertGreater(receipt["counts"]["records_scored"], 0)
+
+
 class ARootThatIsARegularFileIsNotReportedAsAbsentTests(unittest.TestCase):
     """Measured before: with ``skills-canonical`` a regular file, ``doctor``
     warned "skill root(s) not present on this machine: canonical" with

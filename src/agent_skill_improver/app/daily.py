@@ -256,6 +256,18 @@ def run_daily(
                 "not independent evidence"
             )
 
+        # No skill to improve means nothing this run could propose, so no
+        # conversation is read or scored: a private transcript shown
+        # to a model for a proposal that cannot exist is a cost with no return,
+        # and the records would be marked processed for the day with nothing to
+        # show for it. Measured before: with both roots gone, five conversations
+        # were ingested and scored and the receipt read ``ok``.
+        if not known_skill_ids:
+            receipt.stand_down(_no_skills_reason(skill_store))
+            return _finish(
+                receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
+            )
+
         # A record under candidates/ that cannot be read is a queue this run
         # cannot count: it may be an open candidate for any skill, so neither the
         # backlog cap nor the per-skill cap can be applied honestly. Measured
@@ -799,6 +811,30 @@ def _downgrade_candidates_of_blocked_run(
             f"{len(receipt.candidates)} candidate(s) from this blocked run were closed as "
             f"blocked-run ({rewritten} rewritten on disk) and cannot be applied"
         )
+
+
+def _no_skills_reason(skill_store: Any) -> str:
+    """Why discovery found no skill, as a stand-down an operator can act on."""
+    present = [r.id for r in skill_store.existing_roots()]
+    missing = [r.id for r in skill_store.missing_roots()]
+    misplaced = [f"{root.id} is {problem}" for root, problem in skill_store.misplaced_roots()]
+    passed_over = skill_store.passed_over()
+    if not present:
+        whys = [f"{m} has nothing at its path" for m in missing] + misplaced
+        head = "no configured skill root is a directory (" + "; ".join(whys) + ")"
+    else:
+        head = (
+            f"no skill document was discovered under the present root(s) {', '.join(present)}"
+            + (
+                f"; {len(passed_over)} path(s) were passed over, see skill_tree"
+                if passed_over
+                else ""
+            )
+        )
+    return (
+        f"{head}; nothing could be proposed, so no conversation was read or scored. "
+        "Fix the skill roots in the config and the next run resumes."
+    )
 
 
 def _finish(

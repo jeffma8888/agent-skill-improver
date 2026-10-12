@@ -254,6 +254,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         warnings.append(f"skill root(s) not present on this machine: {', '.join(missing)}")
     if not store.existing_roots():
         problems.append("no configured skill root is a directory; nothing can be discovered")
+    elif not store.known_skill_ids():
+        # `daily` stands down before discovery in this state, so say so here
+        # rather than let a tree with no document read as ready.
+        present = ", ".join(r.id for r in store.existing_roots())
+        problems.append(
+            f"no skill document was discovered under the present root(s) {present}; `daily` "
+            "will stand down with nothing to propose"
+        )
     for role in ("scorer", "improver", "judge"):
         if role not in config.model_roles:
             problems.append(f"no [model.{role}] command configured")
