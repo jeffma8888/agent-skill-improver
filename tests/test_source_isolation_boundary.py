@@ -493,6 +493,103 @@ class MinimalEnvironmentTests(unittest.TestCase):
         self.assertEqual(iso.denied_env_names({"PATH": "/bin", "LANG": "C", "TZ": "UTC"}), ())
 
 
+class TimedOutCommandLeavesNoGrandchildTests(unittest.TestCase):
+    """A role command is routinely a wrapper (a shell, a node launcher, an
+    isolation tool) that starts the real worker as its own child. Killing only
+    the wrapper leaves that worker running past the deadline, still holding
+    whatever it was doing, and a scheduled job that times out once a day leaves
+    one more such process each day. The whole process group has to go.
+    """
+
+    WRAPPER = (
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+        "time.sleep(600)\n"
+    )
+
+    @staticmethod
+    def _gone(pid: int, *, within: float = 3.0) -> bool:
+        """True once ``pid`` no longer exists or is a zombie awaiting its reaper."""
+        import subprocess
+
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                # The pid was recycled to another user's process: ours is gone.
+                return True
+            probe = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+            )
+            if not probe.stdout.strip() or probe.stdout.strip().startswith("Z"):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_a_timed_out_role_takes_its_grandchild_with_it(self):
+        with TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "grandchild"
+            cmd = RoleCommand(
+                role="scorer",
+                argv=(sys.executable, "-c", self.WRAPPER, str(pidfile)),
+                env={},
+                max_output_bytes=1 << 20,
+                timeout_seconds=1,
+                model_label="wrapper",
+            )
+            runner = CommandModelRunner(
+                {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+            )
+            with self.assertRaises(TransientFailure) as ctx:
+                runner.run(role="scorer", system="s", user="u", response_schema="x")
+            self.assertIn("timed out", str(ctx.exception))
+            grandchild = int(pidfile.read_text())
+            try:
+                self.assertTrue(
+                    self._gone(grandchild),
+                    "the wrapper's own child outlived the deadline the wrapper was killed at",
+                )
+            finally:
+                try:
+                    os.kill(grandchild, 9)
+                except ProcessLookupError:
+                    pass
+
+    def test_a_flooding_wrapper_takes_its_grandchild_with_it_too(self):
+        """The cap is the other way a command is stopped early."""
+        flood = self.WRAPPER.replace(
+            "time.sleep(600)\n",
+            "sys.stdout.write('x' * 4096); sys.stdout.flush(); time.sleep(600)\n",
+        )
+        with TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "grandchild"
+            cmd = RoleCommand(
+                role="scorer",
+                argv=(sys.executable, "-c", flood, str(pidfile)),
+                env={},
+                max_output_bytes=1024,
+                timeout_seconds=30,
+                model_label="wrapper",
+            )
+            runner = CommandModelRunner(
+                {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+            )
+            with self.assertRaises(MalformedModelOutput):
+                runner.run(role="scorer", system="s", user="u", response_schema="x")
+            grandchild = int(pidfile.read_text())
+            try:
+                self.assertTrue(self._gone(grandchild))
+            finally:
+                try:
+                    os.kill(grandchild, 9)
+                except ProcessLookupError:
+                    pass
+
+
 class OutputCapIsEnforcedWhileReadingTests(unittest.TestCase):
     """``max_output_bytes`` must bound what the runner reads, not what it reports.
 

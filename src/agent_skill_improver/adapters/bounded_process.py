@@ -13,6 +13,10 @@ This module is the one place that reads a child's pipes:
 * the timeout is a wall-clock deadline over the whole exchange, including the
   stdin write, and a child that outlives it is killed and reaped
   (:class:`RunTimedOut`);
+* the child is started in its own session, so stopping it stops its whole
+  process group: a role command is routinely a wrapper (a shell, a launcher, an
+  isolation tool) whose real worker is a grandchild, and killing the wrapper
+  alone would leave that worker running past the deadline or the cap;
 * stdin is fed from a helper thread so a child that answers before it reads,
   or never reads, cannot wedge the parent on a full pipe;
 * stderr is drained concurrently and only a bounded tail is kept, because it is
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import os
 import selectors
+import signal
 import subprocess
 import threading
 import time
@@ -77,9 +82,13 @@ def run_bounded(
     """Run ``argv`` with bounded output and a wall-clock deadline.
 
     ``env=None`` inherits the parent environment (the conversation CLI needs the
-    operator's own session); a mapping replaces it entirely (a model role gets
-    the allowlisted minimum). Raises ``FileNotFoundError`` if the executable is
-    missing, :class:`RunTimedOut` or :class:`OutputOverflow` as described above.
+    operator's own variables and credentials); a mapping replaces it entirely (a
+    model role gets the allowlisted minimum). The POSIX session is never
+    inherited: the child leads its own, with no controlling terminal, so a tool
+    that opened ``/dev/tty`` to prompt would fail at once rather than wait for
+    an answer nobody can give through these pipes. Raises ``FileNotFoundError``
+    if the executable is missing, :class:`RunTimedOut` or :class:`OutputOverflow`
+    as described above.
     """
     deadline = time.monotonic() + timeout_seconds
     proc = subprocess.Popen(  # noqa: S603 - argv is constructed by the caller, never shell
@@ -88,6 +97,7 @@ def run_bounded(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=None if env is None else dict(env),
+        start_new_session=True,
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     stdin_pipe, stdout_pipe, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
@@ -162,11 +172,20 @@ def run_bounded(
 
 
 def _kill(proc: subprocess.Popen[bytes]) -> None:
-    """Stop the child and reap it; never leave a zombie or a writer blocked on us."""
+    """Stop the child and everything it started, then reap it.
+
+    The child leads its own process group (``start_new_session``), so the
+    signal goes to the group: the wrapper and every worker it spawned. The
+    direct kill is kept as the fallback for a platform without process groups
+    or a child that already changed group.
+    """
     try:
-        proc.kill()
-    except OSError:
-        pass
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
     try:
         proc.wait(timeout=5)
     except (subprocess.TimeoutExpired, OSError):

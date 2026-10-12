@@ -142,6 +142,10 @@ pipes:
   refusal fired. A limit checked after the resource is spent is a log line;
 - the timeout is a wall-clock deadline over the whole exchange, stdin included,
   and a child that outlives it is killed and reaped rather than left running;
+- the child is started in its own session and stopped as a process group. A
+  role command is routinely a wrapper (a shell, a launcher, an isolation tool)
+  whose real worker is a grandchild; killing the wrapper alone left that worker
+  running past the deadline, one more each time a scheduled run timed out;
 - stdin is fed from a helper thread, so a child that answers before it reads
   cannot wedge the parent on a full pipe;
 - stderr is drained concurrently and only a bounded tail is kept for the
