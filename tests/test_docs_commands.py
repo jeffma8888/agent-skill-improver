@@ -533,6 +533,99 @@ class DocumentedRefusalsExist(unittest.TestCase):
         self.assertEqual(names, {"GateFailed", "StateUnreadable", "LockHeld"})
 
 
+class ReadmeCommandTableIsTwoSided(unittest.TestCase):
+    """The README's command table is the first place a reader learns which
+    commands write anything. Its rows are checked both ways against the parser,
+    and its "writes a skill file" claims against the CLI source: the commands
+    that say so must be exactly the ones that open the skill store writable.
+    """
+
+    README = REPO / "README.md"
+    ROW_RE = re.compile(r"^\| `([a-z][a-z-]*)` \| (.+?) \| (.+) \|$")
+
+    @classmethod
+    def rows(cls, text: str) -> dict[str, str]:
+        """``{command: writes-column}`` from the ``## The commands`` table."""
+        head = text.index("\n## The commands\n")
+        tail = text.find("\n## ", head + 1)
+        section = text[head : tail if tail != -1 else len(text)]
+        out: dict[str, str] = {}
+        for line in section.splitlines():
+            match = cls.ROW_RE.match(line)
+            if match:
+                out[match.group(1)] = match.group(2)
+        return out
+
+    @staticmethod
+    def subcommands() -> dict[str, str]:
+        """``{subcommand: handler function name}`` from the real parser."""
+        out: dict[str, str] = {}
+        for action in cli.build_parser()._actions:
+            for name, sub in _choices_map(action).items():
+                out[name] = sub.get_default("func").__name__
+        return out
+
+    @staticmethod
+    def handlers_opening_the_store_writable() -> set[str]:
+        """Top-level CLI functions passing a literal ``writable=True``."""
+        import ast
+
+        from agent_skill_improver.config import package_dir
+
+        tree = ast.parse((package_dir() / "cli.py").read_text(encoding="utf-8"))
+        out: set[str] = set()
+        for func in tree.body:
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            for node in ast.walk(func):
+                if not (
+                    isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) == "build_skill_store"
+                ):
+                    continue
+                for kw in node.keywords:
+                    if kw.arg == "writable" and getattr(kw.value, "value", None) is True:
+                        out.add(func.name)
+        return out
+
+    def test_every_subcommand_has_a_row_and_every_row_is_a_subcommand(self) -> None:
+        rows = self.rows(self.README.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(rows), 10, "the extractor found almost nothing")
+        self.assertEqual(sorted(rows), sorted(self.subcommands()))
+
+    def test_the_rows_that_claim_to_write_a_skill_file_are_the_writable_store_callers(
+        self,
+    ) -> None:
+        rows = self.rows(self.README.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(rows), 10, "the extractor found almost nothing")
+        claiming = {name for name, writes in rows.items() if "skill file" in writes}
+        opening = self.handlers_opening_the_store_writable()
+        writable = {name for name, func in self.subcommands().items() if func in opening}
+        self.assertEqual(claiming, writable)
+        self.assertEqual(claiming, {"apply", "rollback"}, "the set itself is a safety claim")
+        for name, writes in rows.items():
+            if name in claiming:
+                continue
+            with self.subTest(command=name):
+                self.assertTrue(
+                    writes == "nothing"
+                    or writes.startswith("`state/`")
+                    or writes == "as `candidates`",
+                    f"{name!r} writes column {writes!r} is neither nothing nor confined to state/",
+                )
+
+    def test_the_command_table_extractor_sees_the_known_rows(self) -> None:
+        rows = self.rows(
+            "# x\n\n## The commands\n\n| Command | Writes | Notes |\n| --- | --- | --- |\n"
+            "| `daily` | `state/` only | the pass |\n| `apply` | **a skill file**, plus `state/` | g |\n"
+            "\n## Next\n\n| `ghost` | nothing | not in the table |\n"
+        )
+        self.assertEqual(
+            rows, {"daily": "`state/` only", "apply": "**a skill file**, plus `state/`"}
+        )
+        self.assertEqual(self.handlers_opening_the_store_writable(), {"cmd_apply", "cmd_rollback"})
+
+
 class DocumentedStateTreeIsComplete(unittest.TestCase):
     """Every ``state/<dir>/`` the docs name must exist, and every directory that
     can hold transcript-derived content must have a row in the privacy asset
