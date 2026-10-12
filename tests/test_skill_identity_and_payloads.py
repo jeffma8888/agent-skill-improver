@@ -383,6 +383,30 @@ class WritePathRefusalTests(Harness):
         self.assertEqual(twin.read_text(encoding="utf-8"), GOOD)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_the_outside_link_refusal_covers_an_editable_root_not_marked_canonical(self):
+        """``resolve_groups`` treats the highest-precedence editable root as the
+        canonical one when no root is marked canonical, so the write path must
+        guard that root the same way. Measured before: with ``canonical =
+        false`` on the editable root, the spelling through the outside link was
+        not refused by the link check and the resolved-path check accepted it.
+        """
+        self.roots = [
+            dataclasses.replace(r, canonical=False) if r.id == "canonical" else r
+            for r in self.roots
+        ]
+        shared, twin, base = self._plant_twin()
+        via = self.base / "elsewhere" / "via"
+        via.parent.mkdir(parents=True)
+        self._link(via, self.canonical_dir)
+        spelled = via / "shared" / SKILL_FILENAME
+        with self.assertRaises(LinkedTargetRefused) as ctx:
+            self.store(read_only=False).write_canonical(
+                spelled, GOOD + "\n- changed\n", expected_sha256=base, backup_dir=self.base / "bak"
+            )
+        self.assertIn("through a symbolic link", str(ctx.exception))
+        self.assertEqual(shared.read_text(encoding="utf-8"), GOOD)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
     def test_the_control_a_root_that_is_itself_a_link_still_takes_the_write(self):
         """A skills directory that is a link to a checkout is an ordinary setup;
         only links BELOW the root redirect a reviewed write."""
@@ -1866,6 +1890,40 @@ class EditableRootsMustBeWritableTests(unittest.TestCase):
             message = self._refusal(self._config(base, canonical=inside))
             self.assertIn("this tool's own package", message)
             self.assertFalse(Path(inside).exists())
+
+    def test_an_unmarked_editable_root_inside_a_protected_path_is_refused_at_load_too(self):
+        """The resolver treats the highest-precedence editable root as the
+        canonical one when none is marked, so an editable root that is not
+        marked canonical is proposed against all the same and must be held to
+        the same check. Measured before: with ``canonical = false`` the root
+        loaded and the write was refused only at apply."""
+        from agent_skill_improver.config import load_config
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            inside = str(base / "rubrics" / "skills")
+            config = self._config(base, canonical=inside)
+            text = config.read_text(encoding="utf-8")
+            assert text.count("canonical = true\n") == 1, text
+            config.write_text(
+                text.replace("canonical = true\n", "canonical = false\n"), encoding="utf-8"
+            )
+            message = self._refusal(config)
+            self.assertIn(f"'canonical' ({inside}) is editable but", message)
+            self.assertIn("the rubrics directory", message)
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = self._config(base, canonical=str(base / "rubrics" / "skills"))
+            text = config.read_text(encoding="utf-8")
+            assert text.count("canonical = true\neditable = true\n") == 1, text
+            config.write_text(
+                text.replace(
+                    "canonical = true\neditable = true\n", "canonical = false\neditable = false\n"
+                ),
+                encoding="utf-8",
+            )
+            loaded = load_config(config)
+            self.assertEqual([r.id for r in loaded.skill_roots], ["canonical", "mirror"])
 
     def test_the_control_a_read_only_mirror_inside_the_config_directory_loads(self):
         from agent_skill_improver.config import load_config

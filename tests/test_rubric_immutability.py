@@ -226,6 +226,25 @@ class ProtectedPathTests(unittest.TestCase):
             "the load-time root check uses, so neither can drift from the other",
         )
 
+    def test_a_rubric_enabled_twice_is_a_configuration_error(self):
+        # Measured before: the rubric loaded twice, `doctor` listed it twice and
+        # every conversation was scored against it twice.
+        from tests.support import build_env
+
+        config_path = build_env(self.base, rubric_ids=("instruction-compliance",))
+        text = config_path.read_text(encoding="utf-8").replace(
+            'enabled = ["instruction-compliance"]',
+            'enabled = ["instruction-compliance", "instruction-compliance"]',
+        )
+        config_path.write_text(text, encoding="utf-8")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(config_path)
+        self.assertEqual(
+            str(ctx.exception),
+            "[rubrics].enabled lists 'instruction-compliance' more than once; a rubric enabled "
+            "twice would score every conversation against it twice",
+        )
+
     def test_a_missing_enabled_rubric_is_a_configuration_error(self):
         from tests.support import build_env
 

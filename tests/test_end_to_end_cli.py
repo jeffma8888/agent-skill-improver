@@ -1127,6 +1127,42 @@ class ARoleCommandThatCannotStartIsAConfigProblemTests(unittest.TestCase):
         )
 
 
+class DoctorDescribesWhichRootIsCanonicalTests(unittest.TestCase):
+    """Measured before: with the editable root not marked canonical, ``doctor``
+    warned "proposals will be refused" and ``daily`` then proposed a candidate
+    from that very root, because ``resolve_groups`` treats the highest-precedence
+    editable root as canonical when none is marked.
+    """
+
+    def _doctor_warnings(self, base: Path, replace: tuple[str, str]) -> list[str]:
+        config_path = build_env(base, seed="which-root")
+        text = config_path.read_text(encoding="utf-8")
+        assert text.count(replace[0]) == 1, replace
+        config_path.write_text(text.replace(*replace), encoding="utf-8")
+        proc = run_cli(["--config", str(config_path), "--json", "doctor"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        return json.loads(proc.stdout)["warnings"]
+
+    def test_an_editable_root_not_marked_canonical_is_named_as_the_one_treated_as_canonical(self):
+        with TemporaryDirectory() as tmp:
+            warnings = self._doctor_warnings(
+                Path(tmp).resolve(), ("canonical = true", "canonical = false")
+            )
+            self.assertIn(
+                "no editable skill root is marked canonical; the highest-precedence editable "
+                "root 'canonical' is treated as the canonical one",
+                warnings,
+            )
+            self.assertFalse(any("proposals will be refused" in w for w in warnings), warnings)
+
+    def test_no_editable_root_is_the_case_where_proposals_are_refused(self):
+        with TemporaryDirectory() as tmp:
+            warnings = self._doctor_warnings(
+                Path(tmp).resolve(), ("editable = true", "editable = false")
+            )
+            self.assertIn("no skill root is editable; proposals will be refused", warnings)
+
+
 class ARunWithNoSkillToImproveReadsNoConversationTests(unittest.TestCase):
     """Measured before: with both skill roots gone, ``daily`` ingested and
     scored five conversations, marked them processed for the day and wrote a

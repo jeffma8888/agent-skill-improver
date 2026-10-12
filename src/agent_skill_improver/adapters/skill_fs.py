@@ -823,7 +823,11 @@ class FilesystemSkillStore:
         # ``_assert_canonical``, which refuses it as a mirror or as unknown.
         resolved = spelled.resolve()
         for root in self._roots:
-            if not (root.canonical and root.editable):
+            # Every editable root, not only one marked canonical: a skill
+            # present only in an unmarked editable root is written there, and
+            # when none is marked canonical the highest-precedence editable
+            # root is the canonical one for every skill.
+            if not root.editable:
                 continue
             root_resolved = Path(root.path).resolve()
             if resolved == root_resolved or root_resolved in resolved.parents:

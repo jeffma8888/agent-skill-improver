@@ -293,9 +293,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "[gate].require_independent_judge is true, because a self-graded preference is not "
             "independent evidence"
         )
-    canonical_roots = [r.id for r in config.skill_roots if r.canonical and r.editable]
-    if not canonical_roots:
-        warnings.append("no skill root is marked canonical+editable; proposals will be refused")
+    # The same rule ``resolve_groups`` applies: a root marked canonical and
+    # editable is the canonical one; failing that, the highest-precedence
+    # editable root is. Only with no editable root at all are proposals refused.
+    # Measured before: the warning said "proposals will be refused" for a config
+    # whose editable root was simply not marked canonical, and `daily` proposed.
+    editable_roots = sorted(
+        (r for r in config.skill_roots if r.editable), key=lambda r: (r.precedence, r.id)
+    )
+    if not editable_roots:
+        warnings.append("no skill root is editable; proposals will be refused")
+    elif not any(r.canonical for r in editable_roots):
+        warnings.append(
+            f"no editable skill root is marked canonical; the highest-precedence editable "
+            f"root {editable_roots[0].id!r} is treated as the canonical one"
+        )
     snapshots = store.snapshots()
     broken = [s for s in snapshots if not s.loads]
     # A document discovery saw and stepped over is a finding, not a silence:

@@ -171,6 +171,9 @@ enabled = ["evidence-discipline", "instruction-following"]
 # --- skill roots ---------------------------------------------------------
 # Order matters only through `precedence`. Exactly one root should be
 # canonical+editable; everything else is a mirror that is read but never written.
+# If no root is marked canonical, the highest-precedence editable root is treated
+# as the canonical one (`doctor` names it); with no editable root at all, every
+# proposal is refused.
 # Roots must be disjoint: two roots naming one directory (through `.`, `..`, a
 # link, or a case variant of a directory that exists), or one root inside
 # another, are refused at load. So is a canonical+editable root inside this

@@ -837,7 +837,7 @@ def _assert_roots_disjoint(roots: Sequence[SkillRoot]) -> None:
 def _assert_editable_roots_outside_protected(
     roots: Sequence[SkillRoot], protected_dirs: Mapping[str, Path]
 ) -> None:
-    """Refuse a canonical, editable root that lies inside a protected path.
+    """Refuse an editable root that lies inside a protected path.
 
     Every write under the package, the config directory, the state directory or
     the rubrics directory is refused as self-mutation, and that set is not
@@ -845,20 +845,25 @@ def _assert_editable_roots_outside_protected(
     therefore a tree the pipeline would propose against, score, hold for review
     and then refuse to write, at apply time, after the model calls were paid for.
     Measured before this check existed: such a config loaded, ``doctor`` was
-    clean, and the first write raised ``SelfMutationRefused``. A read-only
-    mirror inside a protected path is fine, since nothing is ever written to it,
+    clean, and the first write raised ``SelfMutationRefused``. Every editable
+    root is held to it, not only one marked canonical, because the resolver
+    writes to unmarked editable roots too: a skill present only in such a root
+    gets that root as its canonical copy even beside a marked one, and when no
+    root is marked canonical the highest-precedence editable root is the
+    canonical one for every skill. A read-only mirror inside a protected path
+    is fine, since nothing is ever written to it,
     and a root that CONTAINS the config or state directory is fine too: only the
     skills under those directories are unwritable, and the write path says so.
     """
     for root in roots:
-        if not (root.canonical and root.editable):
+        if not root.editable:
             continue
         for label, guard in protected_dirs.items():
             for a in _root_forms(root.path):
                 for b in _root_forms(guard):
                     if a == b or _is_same_directory(a, b) or _lies_inside(a, b):
                         raise ConfigError(
-                            f"skill_root {root.id!r} ({root.path}) is canonical and editable but "
+                            f"skill_root {root.id!r} ({root.path}) is editable but "
                             f"lies inside {label} ({guard}), which is protected: every write there "
                             f"is refused as self-mutation, so candidates against it would be "
                             f"proposed, scored and reviewed and then refused at apply. Keep the "
@@ -876,6 +881,12 @@ def _load_rubrics(
     enabled = table.get("enabled", [])
     if not isinstance(enabled, list) or not enabled or any(not isinstance(x, str) for x in enabled):
         raise ConfigError("[rubrics].enabled must be a non-empty list of rubric ids")
+    repeated = sorted({r for r in enabled if enabled.count(r) > 1})
+    if repeated:
+        raise ConfigError(
+            f"[rubrics].enabled lists {', '.join(repr(r) for r in repeated)} more than once; "
+            "a rubric enabled twice would score every conversation against it twice"
+        )
     rubrics: list[Rubric] = []
     for rubric_id in enabled:
         # Resolved so a message about it names one real path, not `config/../rubrics`.
