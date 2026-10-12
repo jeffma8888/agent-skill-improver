@@ -138,15 +138,29 @@ class Patch:
         return out
 
 
+def one_line_label(text: str) -> str:
+    r"""Untrusted text that must occupy exactly one line: a line break inside
+    it is spelled (``\n``, ``\r``), not obeyed.
+
+    Used for the ``---``/``+++`` labels of a unified diff, which difflib copies
+    verbatim: every content line of a diff carries a prefix character, but the
+    header labels are whatever path they were given, and a skill directory
+    named with a newline would otherwise put its text at column 0 of the diff
+    a reviewer reads. The CLI's listing lines use the same spelling.
+    """
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def make_patch(base_text: str, new_text: str, *, path_label: str) -> Patch:
+    label = one_line_label(path_label)
     base_lines = base_text.splitlines(keepends=True)
     new_lines = new_text.splitlines(keepends=True)
     diff = list(
         difflib.unified_diff(
             base_lines,
             new_lines,
-            fromfile=f"a/{path_label}",
-            tofile=f"b/{path_label}",
+            fromfile=f"a/{label}",
+            tofile=f"b/{label}",
             n=3,
         )
     )

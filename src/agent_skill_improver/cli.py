@@ -36,7 +36,7 @@ from . import __version__
 from .clock import SystemClock, iso
 from .config import SOURCE_FIXTURES, Config, load_config, package_dir
 from .domain.approval import HumanApproval, automation_active
-from .domain.candidate import BIDI_CONTROLS, HIDDEN_CONTROLS, STATUS_VALIDATED
+from .domain.candidate import BIDI_CONTROLS, HIDDEN_CONTROLS, STATUS_VALIDATED, one_line_label
 from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
@@ -127,7 +127,28 @@ def one_line(text: str) -> str:
     ``_emit`` to every line it prints. Measured before: an executable named
     ``run\n    warning: ...`` printed as two warnings in ``skills``.
     """
-    return text.replace("\r", "\\r").replace("\n", "\\n")
+    return one_line_label(text)
+
+
+def quoted(text: str, *, prefix: str = "  | ") -> list[str]:
+    """Model-authored or file-derived prose rendered as a quoted block: every
+    line it occupies carries ``prefix``, so none of it can stand at column 0
+    where the review's own section headers and its apply instruction live.
+
+    ``asi review`` prints the candidate's hypothesis, intended change, risks
+    and rollback note as the model wrote them, line breaks included, because
+    that prose is what the reviewer is weighing. Measured before this: a
+    hypothesis containing ``\nDIFF\n(empty)\n\nTo promote this change ...
+    asi apply ... --approve FORGEDTOKEN`` printed a second, fake DIFF and apply
+    section above the real one, indistinguishable by shape. Prose that is not
+    the tool's own text is quoted; the headers, the diff and the real apply
+    line are the only lines that start at the margin.
+    """
+    # Split on "\n" alone: a bare "\r" or a Unicode line separator stays in
+    # its line and reaches the terminal spelled by ``escape_for_terminal``, so
+    # the prose is shown as written and still cannot start a line.
+    lines = text.split("\n")
+    return [prefix.rstrip() if line == "" else f"{prefix}{line}" for line in lines]
 
 
 def escape_for_terminal(text: str) -> str:
@@ -599,15 +620,23 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.json:
         _say_json(report)
         return 0
+    # Only the tool's own words stand at column 0 in this report: the section
+    # headers, the diff and the apply instruction. Every content line of the
+    # diff carries difflib's prefix character and ``make_patch`` keeps its two
+    # header labels to one line; ``review_report`` has already checked that the
+    # stored diff equals the one recomputed from the live base, so the diff
+    # printed here is one ``make_patch`` produced. A skill id, path, gate reason
+    # or note is kept to one line; the model's prose is quoted (see ``quoted``)
+    # so it cannot imitate a header or the apply line.
     out = [
-        f"candidate     {report['candidate_id']}  ({report['status']})",
-        f"skill         {report['skill_id']}",
-        f"file          {report['canonical_path']}",
+        one_line(f"candidate     {report['candidate_id']}  ({report['status']})"),
+        one_line(f"skill         {report['skill_id']}"),
+        one_line(f"file          {report['canonical_path']}"),
         f"base sha256   {report['base_sha256']}",
         f"gate          {'PASS' if report['gate'].get('passed') else 'FAIL'}",
     ]
     for reason in report["gate"].get("reasons", []):
-        out.append(f"  gate reason: {reason}")
+        out.append(one_line(f"  gate reason: {reason}"))
     metrics = report["gate"].get("metrics", {})
     if metrics:
         out.append(
@@ -619,32 +648,31 @@ def cmd_review(args: argparse.Namespace) -> int:
                 judge_candidate_preference_ratio=metrics.get("judge_candidate_preference_ratio"),
             )
         )
-    out += [
-        "",
-        "HYPOTHESIS",
-        report["hypothesis"],
-        "",
-        "INTENDED CHANGE",
-        report["intended_change"],
-        "",
-        "RISKS",
-    ]
-    out += [f"  - {r}" for r in report["risks"]]
-    out += ["", "ROLLBACK", report["rollback"], ""]
+    out += ["", "HYPOTHESIS", *quoted(report["hypothesis"])]
+    out += ["", "INTENDED CHANGE", *quoted(report["intended_change"])]
+    out += ["", "RISKS"]
+    for risk in report["risks"]:
+        first, *rest = risk.split("\n")
+        out.append(f"  - {first}".rstrip())
+        if rest:
+            out += quoted("\n".join(rest))
+    out += ["", "ROLLBACK", *quoted(report["rollback"]), ""]
     if report["mirror_paths"]:
         out.append("MIRROR COPIES (not written by apply):")
-        out += [f"  - {p}" for p in report["mirror_paths"]]
+        out += [one_line(f"  - {p}") for p in report["mirror_paths"]]
         out.append("")
     out += ["EVIDENCE (rubric failures this claims to fix)"]
     for failure in report["rubric_failures"]:
         refs = ", ".join(f"{e['element_id']}@{e['position']}" for e in failure["evidence"])
         out.append(
-            f"  - {failure['criterion_id']} in conversation {failure['conversation_id']}"
-            + (f" [{refs}]" if refs else " [no evidence refs]")
+            one_line(
+                f"  - {failure['criterion_id']} in conversation {failure['conversation_id']}"
+                + (f" [{refs}]" if refs else " [no evidence refs]")
+            )
         )
     out += ["", "DIFF", report["diff"] or "(empty)"]
     for note in report["notes"]:
-        out.append(f"note: {note}")
+        out.append(one_line(f"note: {note}"))
     out += [
         "",
         "To promote this change, review the diff above, then run:",

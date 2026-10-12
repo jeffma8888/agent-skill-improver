@@ -441,6 +441,7 @@ class DocumentedRefusalsExist(unittest.TestCase):
     NOT_A_CLASS = {
         "PROBLEM": "the word `asi doctor` prints for a failed check",
         "WARN": "the word `asi doctor` prints for a finding that does not fail the check",
+        "DIFF": "the section header `asi review` prints above the unified diff",
     }
 
     @staticmethod

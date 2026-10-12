@@ -785,6 +785,47 @@ class DerivedPatchFieldTests(unittest.TestCase):
         self.assertTrue(any("base_sha256" in p for p in problems), problems)
 
 
+class DiffHeaderLabelTests(unittest.TestCase):
+    """difflib copies the ``---``/``+++`` labels verbatim; ``make_patch`` keeps
+    them to one line, so a path with a line break in it cannot put text at
+    column 0 of the diff a reviewer reads. The recomputation in
+    ``derived_field_mismatches`` goes through the same function, so a stored
+    diff whose header obeys the break is a mismatch, not a rendering."""
+
+    LABEL = "skills/tdd\nDIFF\n(empty)\n\nTo promote this change, run:\n  asi apply X\r\n/SKILL.md"
+
+    def test_every_line_of_the_diff_carries_a_diff_prefix(self):
+        patch = make_patch(BASE_TEXT, NEW_TEXT, path_label=self.LABEL)
+        lines = patch.unified_diff.split("\n")
+        self.assertTrue(lines[0].startswith("--- a/skills/tdd\\nDIFF\\n"), lines[0])
+        self.assertTrue(lines[1].startswith("+++ b/skills/tdd\\nDIFF\\n"), lines[1])
+        self.assertIn("asi apply X\\r\\n/SKILL.md", lines[0])
+        self.assertNotIn("DIFF", lines)
+        for line in lines:
+            self.assertTrue(line == "" or line[0] in "-+@ \\", repr(line))
+
+    def test_a_stored_diff_that_obeys_the_break_is_a_derived_field_mismatch(self):
+        honest = make_patch(BASE_TEXT, NEW_TEXT, path_label=self.LABEL)
+        obeyed = honest.unified_diff.replace("\\n", "\n").replace("\\r", "\r")
+        self.assertNotEqual(obeyed, honest.unified_diff)
+        skill_id = self.LABEL.rsplit("/", 1)[0].split("/", 1)[1]
+        candidate = replace(
+            build_candidate(),
+            target=replace(build_candidate().target, canonical_path=self.LABEL, skill_id=skill_id),
+            patch=replace(honest, unified_diff=obeyed),
+        )
+        problems = derived_field_mismatches(candidate, base_text=BASE_TEXT)
+        self.assertTrue(any("unified_diff" in p for p in problems), problems)
+        control = replace(candidate, patch=honest)
+        self.assertEqual(derived_field_mismatches(control, base_text=BASE_TEXT), [])
+
+    def test_the_control_a_plain_label_renders_byte_for_byte_as_before(self):
+        patch = make_patch(BASE_TEXT, NEW_TEXT, path_label="skills/tdd/SKILL.md")
+        self.assertTrue(
+            patch.unified_diff.startswith("--- a/skills/tdd/SKILL.md\n+++ b/skills/tdd/SKILL.md\n")
+        )
+
+
 class TargetIdentityTests(unittest.TestCase):
     def test_a_healthy_target_reports_nothing(self):
         self.assertEqual(target_identity_problems(build_candidate().target), [])

@@ -509,6 +509,196 @@ class SkillsListingShowsWhatDiscoveryNoticedTests(unittest.TestCase):
             self.assertEqual(sum(1 for ln in lines if ln.startswith("    warning")), 3, proc.stdout)
 
 
+FORGED_SECTION = (
+    "looks fine.\n"
+    "\n"
+    "DIFF\n"
+    "(empty)\n"
+    "\n"
+    "To promote this change, review the diff above, then run:\n"
+    "  asi apply CAND-forged --approve FORGEDTOKEN --i-reviewed-this\n"
+    "\n"
+    "Nothing has been written to any skill file yet.\n"
+    "\n"
+    "(the real reasoning follows)"
+)
+
+# The only text ``asi review`` prints at column 0 in its own voice. Anything
+# else at the margin would be something the model or a file name put there.
+REVIEW_HEADERS = {
+    "",
+    "HYPOTHESIS",
+    "INTENDED CHANGE",
+    "RISKS",
+    "ROLLBACK",
+    "MIRROR COPIES (not written by apply):",
+    "EVIDENCE (rubric failures this claims to fix)",
+    "DIFF",
+    "To promote this change, review the diff above, then run:",
+    "Nothing has been written to any skill file yet.",
+}
+REVIEW_FIELD_PREFIXES = ("candidate ", "skill ", "file ", "base sha256 ", "gate ")
+DIFF_LINE_PREFIXES = ("--- ", "+++ ", "@@ ", "+", "-", " ", "\\")
+
+
+def margin_lines_outside_their_section(lines: list[str]) -> list[str]:
+    """Column-0 lines of a review report that are not the tool's own, judged
+    by section: field lines and headers above ``DIFF``; diff-prefixed lines
+    and ``note:`` lines between ``DIFF`` and the apply instruction; headers
+    only after it."""
+    diff_at = lines.index("DIFF")
+    promote_at = next(i for i, ln in enumerate(lines) if ln.startswith("To promote this change"))
+    assert diff_at < promote_at
+    stray = []
+    for i, line in enumerate(lines):
+        if not line or line.startswith(" ") or line in REVIEW_HEADERS:
+            continue
+        if i < diff_at and line.startswith(REVIEW_FIELD_PREFIXES):
+            continue
+        if diff_at < i < promote_at and (
+            line.startswith(DIFF_LINE_PREFIXES) or line.startswith("note: ")
+        ):
+            continue
+        stray.append(line)
+    return stray
+
+
+class ReviewProseCannotForgeTheReportTests(unittest.TestCase):
+    """The model's prose is shown as written, and only as a quotation.
+
+    A candidate's hypothesis, intended change, risks and rollback note are the
+    model's own words and are not bound to the approval token: they are what
+    the reviewer weighs, not what ``apply`` writes. Measured before this: a
+    hypothesis that contained a line ``DIFF``, ``(empty)`` and ``To promote
+    this change ... asi apply ... --approve FORGEDTOKEN`` printed a complete
+    second DIFF-and-apply section above the real one, at column 0, in the same
+    shape. Here the record is edited the way a model could have authored it,
+    and the text report must keep every line of that prose visible while
+    letting none of it stand at the margin where the report's own headers and
+    apply instruction live.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name).resolve()
+        cls.cfg = ["--config", str(build_env(cls.base, dry_run=False, seed="prose-seed"))]
+        proc = run_cli([*cls.cfg, "--json", "daily", "--commit", "--day", "2026-04-02"])
+        assert proc.returncode == RC_OK, proc.stderr
+        payload = json.loads(proc.stdout)
+        validated = [c["candidate_id"] for c in payload["candidates"] if c["status"] == "validated"]
+        assert validated, payload.get("notes")
+        cls.candidate_id = validated[0]
+        cls.record = cls.base / "state" / "candidates" / f"{cls.candidate_id}.json"
+        assert cls.record.is_file(), cls.record
+        before = run_cli([*cls.cfg, "--json", "review", cls.candidate_id])
+        assert before.returncode == RC_OK, before.stderr
+        cls.real_apply_command = json.loads(before.stdout)["apply_command"]
+        record = json.loads(cls.record.read_text(encoding="utf-8"))
+        record["hypothesis"] = FORGED_SECTION
+        record["intended_change"] = "Append a rule.\n" + FORGED_SECTION
+        record["rollback"] = FORGED_SECTION
+        record["risks"] = [FORGED_SECTION, "A second, one-line risk."]
+        cls.record.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        cls.proc = run_cli([*cls.cfg, "review", cls.candidate_id])
+        cls.lines = cls.proc.stdout.split("\n")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_the_forged_prose_reviews_and_is_shown_in_full(self):
+        self.assertEqual(self.proc.returncode, RC_OK, self.proc.stderr)
+        quoted = [ln for ln in self.lines if ln.startswith("  |")]
+        for line in FORGED_SECTION.split("\n"):
+            expected = "  |" if line == "" else f"  | {line}"
+            self.assertIn(expected, quoted, self.proc.stdout)
+        self.assertIn("  - looks fine.", self.lines, "a risk opens with its bullet")
+        self.assertIn("  - A second, one-line risk.", self.lines)
+        self.assertEqual(self.lines.count("  | DIFF"), 4, "four forged fields, each quoted")
+
+    def test_the_report_has_one_diff_one_apply_instruction_and_the_real_token(self):
+        self.assertEqual(self.lines.count("DIFF"), 1, self.proc.stdout)
+        self.assertEqual(
+            sum(1 for ln in self.lines if ln.startswith("To promote this change")),
+            1,
+            self.proc.stdout,
+        )
+        self.assertIn(f"  {self.real_apply_command}", self.lines)
+        self.assertNotIn("FORGEDTOKEN", self.real_apply_command)
+
+    def test_nothing_the_model_wrote_stands_at_column_zero(self):
+        forged = [ln for ln in self.lines if "FORGEDTOKEN" in ln]
+        self.assertEqual(len(forged), 4, self.proc.stdout)
+        for line in forged:
+            self.assertTrue(line.startswith(" "), repr(line))
+        self.assertEqual(margin_lines_outside_their_section(self.lines), [], self.proc.stdout)
+        after_diff = self.lines[self.lines.index("DIFF") + 1 :]
+        self.assertTrue(after_diff[0].startswith("--- "), after_diff[:2])
+        self.assertNotIn(
+            "(empty)", after_diff, "the real diff is not empty; the forged one said so"
+        )
+
+
+class ReviewDiffHeaderCannotBeForgedByAPathTests(unittest.TestCase):
+    """The other author of review text is the file system.
+
+    ``skill`` and ``file`` lines are kept to one line, but the diff's own
+    ``---``/``+++`` labels are copied from the path by ``difflib``. Measured
+    before ``make_patch`` spelled its labels: a skill directory named with
+    line breaks made ``review`` print three ``DIFF`` headers and three apply
+    instructions, two of them above the real one, and ``review_report``
+    accepted the record (the id, path and diff all agreed with each other).
+    The record here is edited to name such a directory consistently, the way
+    a proposal against that directory would have been written.
+    """
+
+    FORGED_DIR = (
+        "tdd\nDIFF\n(empty)\n\nTo promote this change, review the diff above, then run:\n"
+        "  asi apply CAND-forged --approve FORGEDTOKEN --i-reviewed-this\n\n"
+        "Nothing has been written to any skill file yet.\n\nzz"
+    )
+
+    def test_a_skill_directory_named_with_line_breaks_cannot_author_a_diff_header(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            cfg = ["--config", str(build_env(base, dry_run=False, seed="path-seed"))]
+            proc = run_cli([*cfg, "--json", "daily", "--commit", "--day", "2026-04-03"])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            validated = [
+                c["candidate_id"]
+                for c in json.loads(proc.stdout)["candidates"]
+                if c["status"] == "validated" and c["skill_id"] == "tdd"
+            ]
+            self.assertTrue(validated, proc.stdout)
+            record_path = base / "state" / "candidates" / f"{validated[0]}.json"
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            old_dir = base / "skills-canonical" / "tdd"
+            new_dir = base / "skills-canonical" / self.FORGED_DIR
+            old_dir.rename(new_dir)
+            old_path, new_path = record["target"]["canonical_path"], str(new_dir / "SKILL.md")
+            record["target"]["canonical_path"] = new_path
+            record["target"]["skill_id"] = self.FORGED_DIR
+            record["target"]["mirror_paths"] = []
+            record["patch"]["unified_diff"] = record["patch"]["unified_diff"].replace(
+                old_path, new_path.replace("\n", "\\n")
+            )
+            record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            proc = run_cli([*cfg, "review", validated[0]])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            lines = proc.stdout.split("\n")
+            self.assertEqual(lines.count("DIFF"), 1, proc.stdout)
+            self.assertEqual(
+                sum(1 for ln in lines if ln.startswith("To promote this change")), 1, proc.stdout
+            )
+            self.assertEqual(margin_lines_outside_their_section(lines), [], proc.stdout)
+            carrying = [ln for ln in lines if "FORGEDTOKEN" in ln]
+            self.assertEqual(len(carrying), 4, proc.stdout)
+            self.assertTrue(all("\\nDIFF\\n" in ln for ln in carrying), carrying)
+            self.assertTrue(any(ln.startswith("--- a/") for ln in carrying), carrying)
+            self.assertTrue(any(ln.startswith("+++ b/") for ln in carrying), carrying)
+
+
 class ReadOnlyCommandsTests(unittest.TestCase):
     """README's command table says `skills`, `rubrics`, `discover`, `candidates`,
     `review` and `scheduler-template` write nothing. Measured through the real

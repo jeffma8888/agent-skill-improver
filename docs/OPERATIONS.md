@@ -180,6 +180,17 @@ Read the *evidence*, not the summary. The question to ask is not "does this edit
 look reasonable" but "does the cited turn actually show the problem this edit
 claims to fix".
 
+The hypothesis, intended change, risks and rollback note are the model's own
+words, shown as written but quoted: every line of them opens with `  | `, or
+with `  - ` for the first line of a risk. Nothing the tool says carries that
+prefix. The real `asi apply ...` command is the two-space-indented line right
+under the sentence that begins "To promote this change", which itself stands
+at the left margin after `DIFF`. A `DIFF` or an apply
+command behind a `  | ` or `  - ` prefix was written by the model and promotes
+nothing; a skill id or path with a line break in it is shown with the break
+spelled as `\n`, in the `skill` and `file` lines and in the diff's own
+`---`/`+++` labels alike.
+
 ```bash
 asi apply <candidate-id> --approve <approval-token> --i-reviewed-this
 ```
