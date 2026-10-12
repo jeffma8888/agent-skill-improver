@@ -459,6 +459,31 @@ class WritePathRefusalTests(Harness):
         self.assertEqual(Path(receipt.path), (real_root / "shared" / SKILL_FILENAME).resolve())
         self.assertIn("- changed", target.read_text(encoding="utf-8"))
 
+    def test_a_document_with_mixed_line_endings_is_written_as_lf(self):
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        mixed = GOOD.replace("\n", "\r\n", 1).encode("utf-8")
+        target.write_bytes(mixed)
+        receipt = self.store(read_only=False).write_canonical(
+            target,
+            GOOD + "- changed\n",
+            expected_sha256=sha256_file(target),
+            backup_dir=self.base / "bak",
+        )
+        self.assertEqual(receipt.new_sha256, sha256_file(target))
+        self.assertNotIn(b"\r", target.read_bytes(), "no convention to keep, so the tool's own")
+
+    def test_a_document_that_became_undecodable_at_the_write_is_named_not_called_changed(self):
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        expected = sha256_file(target)
+        target.write_bytes(GOOD.encode("utf-8") + b"\xff\xfe tail\n")
+        with self.assertRaises(UndecodableDocument) as ctx:
+            self.store(read_only=False).write_canonical(
+                target, GOOD + "- changed\n", expected_sha256=expected, backup_dir=self.base / "bak"
+            )
+        self.assertIn("not valid UTF-8 at byte", str(ctx.exception))
+        self.assertIn("fix the encoding and run the command again", str(ctx.exception))
+        self.assertNotIn("changed since", str(ctx.exception))
+
     def test_a_mirror_copy_is_refused_with_the_canonical_path_named(self):
         target = self.mirror_dir / "shared" / SKILL_FILENAME
         with self.assertRaises(MirrorEditRefused) as ctx:

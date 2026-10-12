@@ -214,8 +214,14 @@ def make_patch(base_text: str, new_text: str, *, path_label: str) -> Patch:
             n=3,
         )
     )
-    added = sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
-    removed = sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
+    # The two file headers are the first two lines of a non-empty unified diff
+    # and nothing else is one. Judged by prefix they were mistaken for a changed
+    # line that happens to begin with two dashes or two pluses: a removed
+    # frontmatter delimiter renders as ``----`` and was not counted. Measured
+    # before: a replacement that dropped both delimiters reported 0 removed.
+    body = diff[2:]
+    added = sum(1 for line in body if line.startswith("+"))
+    removed = sum(1 for line in body if line.startswith("-"))
     return Patch(
         new_text=new_text,
         new_text_sha256=sha256_text(new_text),

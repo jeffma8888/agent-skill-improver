@@ -49,7 +49,7 @@ from ..errors import (
     SelfMutationRefused,
     UndecodableDocument,
 )
-from ..hashing import normalize_text, sha256_bytes, sha256_file, sha256_text
+from ..hashing import normalize_text, sha256_file, sha256_text
 from ..jsonio import write_bytes_atomic, write_json
 
 #: Backups live under the owner-only state tree, so they are owner-only too.
@@ -481,6 +481,40 @@ class FilesystemSkillStore:
             ) from exc
         return normalize_text(text)
 
+    @staticmethod
+    def _document_sha256(data: bytes, target: Path) -> str:
+        """The hash of a document's bytes under the identity every other hash here uses.
+
+        ``sha256_text`` folds line endings before hashing, and every snapshot,
+        candidate and manifest records that value. Measured before this helper:
+        apply hashed the raw bytes, so a CRLF document, proposed and validated
+        from its folded text, was refused at apply as "changed since the
+        proposal was made" when nothing had changed, every time.
+        """
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise UndecodableDocument(
+                f"skill document {target} is not valid UTF-8 at byte {exc.start} ({exc.reason}); "
+                "nothing is written over text this tool cannot read exactly. The file is left "
+                "as it is: fix the encoding and run the command again.",
+                record_id=target.parent.name,
+            ) from exc
+        return sha256_text(text)
+
+    @staticmethod
+    def _in_document_convention(text: str, data: bytes) -> bytes:
+        """``text`` encoded with the line endings the document on disk uses.
+
+        The tool's text is LF throughout; a document written as CRLF throughout
+        stays CRLF, so apply changes the lines the diff showed and no others.
+        Anything else (LF, mixed, or lone carriage returns) is written as LF.
+        """
+        payload = normalize_text(text)
+        if b"\r\n" in data and data.count(b"\n") == data.count(b"\r\n"):
+            payload = payload.replace("\n", "\r\n")
+        return payload.encode("utf-8")
+
     # -- write path ------------------------------------------------------
     def write_canonical(
         self,
@@ -522,7 +556,7 @@ class FilesystemSkillStore:
         parent_fd, leaf = self._open_parent_pinned(Path(path), verb="write")
         try:
             data, target_mode = self._read_pinned(parent_fd, leaf, target, verb="write")
-            current = sha256_bytes(data)
+            current = self._document_sha256(data, target)
             if current != expected_sha256:
                 raise BaseHashMismatch(
                     f"refusing to write {target}: on-disk sha256 is {current[:12]} but the "
@@ -551,9 +585,11 @@ class FilesystemSkillStore:
                     f"but source hashes {current[:12]}; refusing to proceed"
                 )
             new_sha = sha256_text(text)
-            _write_pinned(parent_fd, leaf, normalize_text(text).encode("utf-8"), mode=target_mode)
+            _write_pinned(
+                parent_fd, leaf, self._in_document_convention(text, data), mode=target_mode
+            )
             written, _mode = self._read_pinned(parent_fd, leaf, target, verb="write")
-            written_sha = sha256_bytes(written)
+            written_sha = self._document_sha256(written, target)
             if written_sha != new_sha:
                 # Restore immediately: a write that did not land as intended is
                 # a rollback trigger, not something to report and leave in place.
@@ -681,7 +717,7 @@ class FilesystemSkillStore:
     ) -> dict[str, Any]:
         """The verified half of :meth:`rollback`, through the pinned handle."""
         live_bytes, live_mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
-        live = sha256_bytes(live_bytes)
+        live = self._document_sha256(live_bytes, target)
         if live == expected:
             # Already holds the previous text: a second rollback, or a manual
             # `cp` of the backup. Nothing to write; say so rather than rewrite.
@@ -710,7 +746,7 @@ class FilesystemSkillStore:
             mode = live_mode
         _write_pinned(parent_fd, leaf, backup.read_bytes(), mode=mode)
         restored_bytes, _mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
-        restored = sha256_bytes(restored_bytes)
+        restored = self._document_sha256(restored_bytes, target)
         if restored != expected:
             raise BaseHashMismatch(
                 f"rollback verification failed: restored sha {restored[:12]} != {expected[:12]}"

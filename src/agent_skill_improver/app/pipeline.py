@@ -313,22 +313,21 @@ def propose_candidate(
             f"{group.skill_id!r}; refusing to redirect a patch to a different skill",
             record_id=group.skill_id,
         )
-    text_problems = skill_text_defects(
-        proposal.new_skill_text, base_text=base_text, skill_id=group.skill_id
-    )
+    new_text = proposal.new_skill_text
+    text_problems = skill_text_defects(new_text, base_text=base_text, skill_id=group.skill_id)
     if text_problems:
         raise RecordDefect(
             "proposed replacement text is unsafe: " + "; ".join(text_problems),
             record_id=group.skill_id,
         )
-    if 0 < cfg.max_skill_text_chars < len(proposal.new_skill_text):
+    if 0 < cfg.max_skill_text_chars < len(new_text):
         # The replay scores the candidate arm with this text and the judge
         # reads it as one blind option, both clipped at the same cap. Measured
         # before this check: a 1,120-char replacement under a 500-char cap was
         # scored and judged from its first 500 chars and the gate passed with
         # no note, so the approval token would have covered text no model read.
         raise RecordDefect(
-            f"improver returned a {len(proposal.new_skill_text)}-char replacement for skill "
+            f"improver returned a {len(new_text)}-char replacement for skill "
             f"{group.skill_id!r}, above [prompt].max_skill_text_chars = "
             f"{cfg.max_skill_text_chars}: the scorer, and the judge when the gate requires one, "
             "would see it clipped at the cap, and a gate pass would certify text no model read "
@@ -338,7 +337,7 @@ def propose_candidate(
             record_id=group.skill_id,
         )
 
-    patch = make_patch(base_text, proposal.new_skill_text, path_label=str(canonical.path))
+    patch = make_patch(base_text, new_text, path_label=str(canonical.path))
     from ..domain.candidate import TargetRef
 
     target = TargetRef(

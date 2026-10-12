@@ -734,6 +734,40 @@ class RunDayTests(unittest.TestCase):
         self.assertNotIn("spelled with hyphens", str(ctx.exception), "no hint it cannot keep")
 
 
+class PatchLineCountTests(unittest.TestCase):
+    """The added and removed counts are read by a reviewer deciding whether a
+    diff is small enough to read; they must count every changed line. Measured
+    before: the two file headers were recognised by prefix, so a removed line
+    that itself began with two dashes (a frontmatter delimiter, rendered as
+    ``----``) or an added one beginning with two pluses was not counted, and a
+    replacement that dropped both delimiters reported 0 removed."""
+
+    def test_removed_frontmatter_delimiters_are_counted(self):
+        new = BASE_TEXT.replace("---\n", "", 2)
+        self.assertEqual(BASE_TEXT.count("---\n"), 2)
+        patch = make_patch(BASE_TEXT, new, path_label="x")
+        self.assertEqual((patch.added_lines, patch.removed_lines), (0, 2))
+
+    def test_lines_beginning_with_two_dashes_or_two_pluses_are_counted(self):
+        base = BASE_TEXT + "-- a line that begins with two dashes\n"
+        new = BASE_TEXT + "++ a line that begins with two pluses\n"
+        patch = make_patch(base, new, path_label="x")
+        self.assertEqual((patch.added_lines, patch.removed_lines), (1, 1))
+        # Three dashes and three pluses: the very shape of the file headers.
+        self.assertIn("\n--- a line", patch.unified_diff)
+        self.assertIn("\n+++ a line", patch.unified_diff)
+
+    def test_the_control_an_unchanged_document_has_no_diff_and_zero_counts(self):
+        patch = make_patch(BASE_TEXT, BASE_TEXT, path_label="x")
+        self.assertEqual(patch.unified_diff, "")
+        self.assertEqual((patch.added_lines, patch.removed_lines), (0, 0))
+
+    def test_the_control_the_headers_themselves_are_not_counted(self):
+        patch = make_patch(BASE_TEXT, NEW_TEXT, path_label="x")
+        self.assertTrue(patch.unified_diff.startswith("--- a/x\n+++ b/x\n"))
+        self.assertEqual((patch.added_lines, patch.removed_lines), (1, 0))
+
+
 class DerivedPatchFieldTests(unittest.TestCase):
     """One derived patch field per test, each with the clean control beside it."""
 

@@ -1017,6 +1017,91 @@ class AMisnamedCandidateRecordIsUnreachableAndSaysSoTests(unittest.TestCase):
         self.assertEqual(review.returncode, RC_OK, review.stderr)
 
 
+class ACrlfDocumentIsAppliedAndRolledBackInItsOwnConventionTests(unittest.TestCase):
+    """Measured before: a CRLF ``tdd`` was proposed and validated from its folded
+    text, ``review`` printed the token, and ``apply`` refused every time with
+    "The skill changed since the proposal was made": the on-disk hash was taken
+    over the raw bytes while every other hash folds line endings. Nothing had
+    changed. Now apply compares under one identity, writes the content change
+    in the document's own line endings, and rollback restores the bytes."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, dry_run=False, seed="crlf"))]
+        self.skill = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        for path in (self.skill, self.base / "skills-mirror" / "tdd" / "SKILL.md"):
+            if path.exists():
+                text = path.read_text(encoding="utf-8")
+                path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+        self.original = self.skill.read_bytes()
+        assert b"\r\n" in self.original and self.original.count(b"\n") == self.original.count(
+            b"\r\n"
+        )
+
+    def _validated_candidate_id(self) -> str:
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        rows = [c for c in json.loads(daily.stdout)["candidates"] if c["skill_id"] == "tdd"]
+        self.assertEqual([c["status"] for c in rows], ["validated"], rows)
+        return rows[0]["candidate_id"]
+
+    def test_apply_succeeds_keeps_crlf_and_rollback_restores_the_bytes(self):
+        candidate_id = self._validated_candidate_id()
+        review = run_cli([*self.cfg, "--json", "review", candidate_id])
+        self.assertEqual(review.returncode, RC_OK, review.stderr)
+        report = json.loads(review.stdout)
+        self.assertEqual(
+            sha256_file(self.skill), report["base_sha256"], "one identity for the document"
+        )
+        apply = run_cli(
+            [
+                *self.cfg,
+                "apply",
+                candidate_id,
+                "--approve",
+                report["approval_token"],
+                "--i-reviewed-this",
+                "--operator",
+                "test",
+            ]
+        )
+        self.assertEqual(apply.returncode, RC_OK, apply.stderr)
+        written = self.skill.read_bytes()
+        self.assertIn(FIX_MARKER.encode("utf-8"), written)
+        self.assertEqual(written.count(b"\n"), written.count(b"\r\n"), "CRLF throughout")
+        self.assertTrue(
+            written.replace(b"\r\n", b"\n").startswith(
+                self.original.replace(b"\r\n", b"\n").rstrip(b"\n")
+            ),
+            "the document's own lines come first, unchanged",
+        )
+        rollback = run_cli([*self.cfg, "rollback", candidate_id])
+        self.assertEqual(rollback.returncode, RC_OK, rollback.stderr)
+        self.assertEqual(self.skill.read_bytes(), self.original, "byte-for-byte")
+
+    def test_the_control_an_lf_document_is_still_written_as_lf(self):
+        lf = self.original.replace(b"\r\n", b"\n")
+        for path in (self.skill, self.base / "skills-mirror" / "tdd" / "SKILL.md"):
+            if path.exists():
+                path.write_bytes(lf)
+        candidate_id = self._validated_candidate_id()
+        report = json.loads(run_cli([*self.cfg, "--json", "review", candidate_id]).stdout)
+        apply = run_cli(
+            [
+                *self.cfg,
+                "apply",
+                candidate_id,
+                "--approve",
+                report["approval_token"],
+                "--i-reviewed-this",
+            ]
+        )
+        self.assertEqual(apply.returncode, RC_OK, apply.stderr)
+        self.assertNotIn(b"\r", self.skill.read_bytes())
+
+
 class TwoRootsTiedOnPrecedenceAreRefusedNotPickedByIdTests(unittest.TestCase):
     """Measured before: the harness mirror root renamed ``alpha`` and made
     canonical and editable at the canonical root's precedence had its ``tdd``
