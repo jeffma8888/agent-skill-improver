@@ -12,9 +12,11 @@ The receipt has two dated snapshots and says which is which. The sections headed
 *at original publication* are the record of the build that first published this
 tree and are kept as written, because a receipt that is quietly rewritten to match
 the present is not a receipt. The section headed **Current snapshot** was measured
-again, with the same commands, on the tree committed by the commit that introduced
-it; its parent was `fe12960`. Where the two disagree, the newer number is the one
-to check against.
+again, with the same commands, on the tree committed by the commit that refreshed
+it; its parent was `a577bf7` (the section was first measured at parent `fe12960`,
+when it read 597 tests; the note under it about what that first refresh found
+keeps its findings as written, with its heading dated). Where the two disagree,
+the newer number is the one to check against.
 
 ## Provenance
 
@@ -316,8 +318,8 @@ on purpose.
 
 ## Current snapshot
 
-Measured on the tree as committed by the commit that introduced this section
-(parent `fe12960`, 30 commits scanned before it), from the repository root, with
+Measured on the tree as committed by the commit that refreshed this section
+(parent `a577bf7`, 62 commits scanned before it), from the repository root, with
 `uv run --extra dev` supplying the two dev extras. Every exit code was read from
 the process, unpiped. The two `daily` passes ran against a copy of
 `config/example.config.toml` whose `state_dir` pointed at an empty temporary
@@ -325,14 +327,14 @@ directory, so nothing in the repository's own gitignored `state/` influenced the
 
 | Command | Exit | What it reported |
 | --- | --- | --- |
-| `python -m unittest discover -s tests -t .` | **0** | `Ran 597 tests` / `OK`, 0 skipped |
+| `python -m unittest discover -s tests -t .` | **0** | `Ran 693 tests` / `OK`, 0 skipped |
 | `python -m compileall -q src tests examples tools` | **0** | silent |
 | `black --check .` | **0** | `69 files would be left unchanged` |
 | `mypy` | **0** | `Success: no issues found in 42 source files` |
 | `python tools/leakscan.py --selftest` | **0** | 27 rules, each fires on its positive sample and stays silent on its negative one |
-| `python tools/leakscan.py .` | **0** | `clean`: 116 tracked files, 30 commits scanned, 0 allowlist entries, `origin` fetch and push URLs checked |
+| `python tools/leakscan.py .` | **0** | `clean`: 116 tracked files, 62 commits scanned, 0 allowlist entries, `origin` fetch and push URLs checked |
 | `python examples/build_fixtures.py --check` | **0** | `8 fixture(s) match the builder exactly` |
-| `asi --config config/example.config.toml doctor` | **0** | `verdict: ready`; `isolation mode=none verified=False required=False satisfied=True`; `state perms dirs 0o700 / files 0o600, 0 repaired, 0 still wrong` |
+| `asi --config config/example.config.toml doctor` | **0** | `verdict: ready`; `isolation mode=none verified=False required=False satisfied=True`; `state perms dirs 0o700 / files 0o600, 0 repaired, 0 still wrong, 0 not a real directory, 0 left alone` |
 | `asi --config config/example.config.toml selftest` | **0** | 20 architectural checks, all `ok`, `selftest: passed` |
 | `asi --config <empty-state copy> daily --commit --day 2026-01-02 --seed t1` | **0** | the first-pass line quoted above |
 | the same command again | **0** | the second-pass line quoted above |
@@ -341,17 +343,17 @@ directory, so nothing in the repository's own gitignored `state/` influenced the
 | Thing | Count |
 | --- | --- |
 | Tracked files | 116 |
-| Source modules (`src/`) | 42, 11,690 lines |
-| Test files | 23, 9,836 lines, of which 20 are test modules |
-| Test methods collected by discovery | 597 |
-| Documentation files under `docs/` | 6, 1,534 lines |
+| Source modules (`src/`) | 42, 12,311 lines |
+| Test files | 23, 11,955 lines, of which 20 are test modules |
+| Test methods collected by discovery | 693 |
+| Documentation files under `docs/` | 6, 1,661 lines |
 | Leak scanner | 784 lines, 27 rules, 0 allowances, configured remote URLs checked |
 | Rubrics | 5 (2 enabled in the example configuration) |
 | Synthetic conversation fixtures | 8 |
 | Example skills | 4 across 2 roots, 1 carrying an executable payload |
 | `asi selftest` structural checks | 20 |
 
-### What the refresh found, and what was done
+### What the first refresh (parent `fe12960`) found, and what was done
 
 Counting definitions against collections for the table above turned up two tests
 that were **written but never run**. `tests/test_candidate_integrity.py` carried a
