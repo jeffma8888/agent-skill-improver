@@ -217,7 +217,14 @@ records_scored                what actually got a verdict
 records_quarantined           malformed or unverifiable, one file each with a reason
 records_deferred              retryable, e.g. the source was unreachable
 skills_quarantined            a proposal target that is defective (implicated but absent,
-                              or not valid UTF-8: `UndecodableDocument`, byte named), or
+                              or not valid UTF-8: `UndecodableDocument`, byte named), one
+                              longer than [prompt].max_skill_text_chars (the improver would
+                              see it clipped and its replacement would drop the rest, so it
+                              is refused before the improver runs: raise the cap or split
+                              the skill), a replacement that fails a structural check (lost
+                              frontmatter, a rename, more than triple the base, or less than
+                              half of a base of 2,000+ chars: a truncated output or a
+                              large deletion), or
                               a skill that kept deferring past caps.max_defer_attempts
 skills_deferred               a proposal that could not be made, e.g. the improver timed out
 failure_cases                 FAIL verdicts with resolvable evidence

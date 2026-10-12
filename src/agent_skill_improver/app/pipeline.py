@@ -36,6 +36,13 @@ from . import prompts
 
 MAX_GROWTH_FACTOR = 3.0
 MAX_ABSOLUTE_GROWTH_CHARS = 20_000
+#: A replacement that keeps less than this share of a base at least
+#: ``SHRINK_RULE_MIN_BASE_CHARS`` long is a truncation or a wholesale rewrite,
+#: not a targeted fix. A model that hits its output limit returns the first
+#: part of the document and stops; measured before this rule, such a
+#: replacement passed every structural check with thousands of removed lines.
+MIN_RETAINED_FRACTION = 0.5
+SHRINK_RULE_MIN_BASE_CHARS = 2_000
 
 
 @dataclass(frozen=True)
@@ -160,6 +167,15 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
             f"replacement is {len(new_text)} chars against a {len(base_text)}-char base; a rewrite "
             "that large cannot be reviewed as a targeted fix"
         )
+    if (
+        len(base_text) >= SHRINK_RULE_MIN_BASE_CHARS
+        and len(new_text) < len(base_text) * MIN_RETAINED_FRACTION
+    ):
+        problems.append(
+            f"replacement is {len(new_text)} chars against a {len(base_text)}-char base: more "
+            "than half the document is gone; a truncated or wholesale rewrite cannot be "
+            "reviewed as a targeted fix"
+        )
     # The transcript the model saw was redacted and a base skill holding a
     # credential was refused before the model ran, so a credential shape in the
     # output can only have come from the model. It must not become a candidate,
@@ -243,6 +259,21 @@ def propose_candidate(
             f"skill {group.skill_id!r} contains a credential ({', '.join(found)}) at "
             f"{canonical.path}; refusing to show it to any model role. Remove the "
             "credential from the skill file and the next pass will propose normally."
+        )
+    if 0 < cfg.max_skill_text_chars < len(base_text):
+        # The improver rewrites the document whole from the text it is shown,
+        # and the prompt clips that text at the cap. Measured before this check:
+        # a document past the cap was clipped in the prompt, the improver
+        # returned a replacement built from the clipped view, and the candidate
+        # dropped every line past the cap, passing the structural checks.
+        raise RecordDefect(
+            f"skill {group.skill_id!r} is {len(base_text)} chars, above "
+            f"[prompt].max_skill_text_chars = {cfg.max_skill_text_chars}: the improver would see "
+            f"the first {cfg.max_skill_text_chars} chars and rewrite the document from that view, "
+            "dropping the rest. Raise the cap to cover the document, or split the skill; nothing "
+            "is proposed against it this run, and neither the improver nor the judge was called "
+            "for it.",
+            record_id=group.skill_id,
         )
     base_sha = sha256_text(base_text)
     if base_sha != canonical.sha256:

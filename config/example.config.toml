@@ -131,6 +131,9 @@ max_open_candidates_per_skill = 1
 # truncation would systematically grade only the opening of a conversation.
 max_transcript_chars = 24000
 max_message_chars = 4000
+# Also the longest skill document the improver is asked to rewrite: a document
+# past this cap is quarantined at propose with the cap named, because the
+# improver would see it clipped and return a replacement missing the rest.
 max_skill_text_chars = 24000
 # Best-effort secret redaction before anything leaves the machine. A reduction of
 # risk, not a guarantee; see docs/PRIVACY_AND_THREAT_MODEL.md.

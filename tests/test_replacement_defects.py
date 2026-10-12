@@ -57,6 +57,35 @@ class ExistingStructuralRulesTests(unittest.TestCase):
         self.assertTrue(any("cannot be reviewed" in p for p in problems), problems)
 
 
+class TruncatedReplacementTests(unittest.TestCase):
+    """A model that hits its output limit, or that was shown a clipped base,
+    returns the first part of the document and stops. Measured before this
+    rule: a replacement that removed 6006 of a base's lines and added 3 passed
+    every structural check and became a candidate."""
+
+    LARGE = BASE + ("- a line of guidance that is part of the skill\n" * 200)
+
+    def test_a_replacement_that_drops_more_than_half_of_a_large_base_is_a_defect(self):
+        self.assertGreaterEqual(len(self.LARGE), 2000)
+        new = self.LARGE[: len(self.LARGE) // 3] + "\n- Ask first, every time.\n"
+        problems = skill_text_defects(new, base_text=self.LARGE, skill_id="example")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("more than half the document is gone", problems[0])
+        self.assertIn(f"{len(self.LARGE)}-char base", problems[0])
+
+    def test_the_control_a_large_base_cut_to_sixty_percent_is_still_reviewable(self):
+        keep = self.LARGE.split("\n")
+        new = "\n".join(keep[: int(len(keep) * 0.6)]) + "\n- Ask first, every time.\n"
+        self.assertGreater(len(new), len(self.LARGE) * 0.5)
+        self.assertEqual(skill_text_defects(new, base_text=self.LARGE, skill_id="example"), [])
+
+    def test_the_control_a_base_under_the_floor_may_lose_more_than_half(self):
+        self.assertLess(len(BASE), 2000)
+        new = "---\nname: example\ndescription: A.\n---\n"
+        self.assertLess(len(new), len(BASE) * 0.5)
+        self.assertEqual(skill_text_defects(new, base_text=BASE, skill_id="example"), [])
+
+
 class ByteOrderMarkTests(unittest.TestCase):
     """A UTF-8 byte-order mark before the frontmatter is read past by this
     tool's parser. Measured before: a base carrying one was

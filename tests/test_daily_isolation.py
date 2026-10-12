@@ -1153,6 +1153,70 @@ class CredentialBearingSkillTests(DailyHarness):
         self.assertIn("credential", refused[0]["reason"].lower())
 
 
+class ADocumentPastThePromptCapIsNotProposedAgainstTests(DailyHarness):
+    """The improver rewrites the document whole from the text it is shown, and
+    the prompt clips that text at ``[prompt].max_skill_text_chars``. Measured
+    before this check, with a 300,000-char ``tdd``: the prompt was clipped at
+    24,000 chars, the improver returned a replacement built from the clipped
+    view, and the candidate removed 6006 lines and added 3, passing every
+    structural check (it then failed the gate for unrelated reasons)."""
+
+    def _env_with_cap(self, cap: int):
+        from tests.support import build_env
+
+        config_path = build_env(self.base, dry_run=False, use_subprocess_model=False)
+        text = config_path.read_text(encoding="utf-8")
+        assert text.count("max_skill_text_chars = 24000\n") == 1, text
+        config_path.write_text(
+            text.replace("max_skill_text_chars = 24000\n", f"max_skill_text_chars = {cap}\n"),
+            encoding="utf-8",
+        )
+        return load_config(config_path)
+
+    def _lengthen(self, skill_id: str, chars: int) -> int:
+        path = self.base / "skills-canonical" / skill_id / "SKILL.md"
+        text = path.read_text(encoding="utf-8") + (
+            "- a line of guidance in this skill\n" * (chars // 36)
+        )
+        path.write_text(text, encoding="utf-8")
+        mirror = self.base / "skills-mirror" / skill_id / "SKILL.md"
+        if mirror.exists():
+            mirror.write_text(text, encoding="utf-8")
+        return len(text)
+
+    def test_the_skill_is_quarantined_at_propose_and_the_improver_never_runs(self):
+        config = self._env_with_cap(500)
+        length = self._lengthen("tdd", 3000)
+        self.assertGreater(length, 500)
+        runner = InProcessRunner()
+        receipt, state, _ = self.run_pass(config, runner=runner)
+        payload = receipt.to_dict()
+        self.assertGreater(payload["counts"]["records_scored"], 0, "scoring is untouched")
+        self.assertEqual(payload["counts"]["candidates_proposed"], 0)
+        row = payload["skills"]["tdd"]
+        self.assertEqual((row["status"], row["stage"]), ("quarantined", "propose"))
+        self.assertIn(
+            f"is {length} chars, above [prompt].max_skill_text_chars = 500", row["reason"]
+        )
+        self.assertIn("Raise the cap to cover the document, or split the skill", row["reason"])
+        self.assertEqual(
+            [c for c in runner.calls if c[0] in ("improver", "judge")],
+            [],
+            "a document the improver could only see clipped is never sent to it",
+        )
+        self.assertEqual(self._candidate_files(state), [])
+
+    def test_the_control_a_document_within_the_cap_is_proposed_against(self):
+        config = self._env_with_cap(500_000)
+        self._lengthen("tdd", 3000)
+        receipt, _, _ = self.run_pass(config)
+        payload = receipt.to_dict()
+        self.assertGreaterEqual(payload["counts"]["candidates_proposed"], 1, payload["skills"])
+
+    def _candidate_files(self, state):
+        return sorted(p.name for p in state.dir("candidates").glob("*.json"))
+
+
 class ACanonicalDocumentUnreadableAtProposeTests(DailyHarness):
     """A document discovery read but the propose stage cannot is one skill's defect.
 
