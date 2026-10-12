@@ -1194,6 +1194,138 @@ class ARootHoldingSeveralMirrorCopiesNamesEachByPathTests(unittest.TestCase):
         self.assertEqual(_root_labels([]), "")
 
 
+class ReviewAsksTheQuestionTheWriteWillAskTests(unittest.TestCase):
+    """Measured before: with the canonical root re-pointed at a copy of the
+    tree and the old directory left on disk outside every root, ``review`` of
+    a candidate recorded against the old path printed a diff, a token and an
+    apply command; ``apply`` then refused the unrecognised target. Review and
+    apply disagreed, and a reviewer was handed a command that would not work.
+    With the root merely moved, the read failure was reported as "refusing to
+    apply" by the review command. ``review`` now runs the store's canonical
+    check (mirror copy, copy with no canonical, no skill document in any root)
+    before it shows anything, and names itself in a read failure.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path = Path(build_env(self.base, seed="review-asks"))
+        self.cfg = ["--config", str(self.config_path)]
+        self.text = self.config_path.read_text(encoding="utf-8")
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.cid = next(c["candidate_id"] for c in receipt["candidates"] if c["skill_id"] == "tdd")
+        self.old_file = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        self.before = sha256_file(self.old_file)
+
+    def _rewrite_config(self, old: str, new: str) -> None:
+        assert self.text.count(old) >= 1, old
+        self.config_path.write_text(self.text.replace(old, new), encoding="utf-8")
+
+    def _review(self, *extra: str):
+        return run_cli([*self.cfg, *extra, "review", self.cid])
+
+    def _real_token(self) -> str:
+        proc = self._review("--json")
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        return str(json.loads(proc.stdout)["approval_token"])
+
+    def test_a_target_outside_every_configured_root_gets_no_token_in_text_or_json(self):
+        token = self._real_token()
+        shutil.copytree(self.base / "skills-canonical", self.base / "skills-main")
+        self._rewrite_config("skills-canonical", "skills-main")
+        for extra in ((), ("--json",)):
+            with self.subTest(json=bool(extra)):
+                proc = self._review(*extra)
+                self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
+                self.assertIn(f"refusing to review {self.old_file}", proc.stderr)
+                self.assertIn("not a skill document in any configured root", proc.stderr)
+                self.assertNotIn("--approve", proc.stdout + proc.stderr)
+                self.assertNotIn("approval_token", proc.stdout)
+        # The token is the real one, so apply reaches the same question and
+        # answers it in its own voice: the write refuses, by the same rule.
+        applied = run_cli([*self.cfg, "apply", self.cid, "--approve", token, "--i-reviewed-this"])
+        self.assertEqual(applied.returncode, RC_REFUSED, applied.stderr)
+        self.assertIn(f"refusing to write {self.old_file}", applied.stderr)
+        self.assertIn("not a skill document in any configured root", applied.stderr)
+        self.assertEqual(sha256_file(self.old_file), self.before, "nothing written anywhere")
+        self.assertEqual(
+            sha256_file(self.base / "skills-main" / "tdd" / "SKILL.md"), self.before, "nor here"
+        )
+
+    def test_a_skill_that_lost_its_canonical_copy_gets_no_token(self):
+        # A second document claiming the skill in the editable root: the skill
+        # now has no canonical copy, and review says so in its own voice.
+        newcomer = self.base / "skills-canonical" / "group" / "tdd" / "SKILL.md"
+        newcomer.parent.mkdir(parents=True)
+        shutil.copy(self.old_file, newcomer)
+        proc = self._review()
+        self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
+        self.assertIn(
+            f"refusing to review {self.old_file}: skill 'tdd' has no canonical copy", proc.stderr
+        )
+        self.assertIn("holds 2 copies of this skill", proc.stderr)
+        self.assertIn("that must be settled before anything is written", proc.stderr)
+        self.assertNotIn("--approve", proc.stdout)
+
+    def test_a_closed_candidate_is_named_as_closed_before_its_target_is_judged(self):
+        # The same order apply asks its questions in: the record first, the
+        # tree after. An applied candidate whose root was then re-pointed is a
+        # closed candidate, not an unrecognised target.
+        token = self._real_token()
+        applied = run_cli([*self.cfg, "apply", self.cid, "--approve", token, "--i-reviewed-this"])
+        self.assertEqual(applied.returncode, RC_OK, applied.stderr)
+        shutil.copytree(self.base / "skills-canonical", self.base / "skills-main")
+        self._rewrite_config("skills-canonical", "skills-main")
+        proc = self._review()
+        self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
+        self.assertIn("status is 'applied'", proc.stderr)
+        self.assertNotIn("not a skill document", proc.stderr)
+        self.assertNotIn("--approve", proc.stdout)
+
+    def test_a_target_that_became_a_mirror_copy_gets_no_token(self):
+        # The two roots swap roles: the recorded target is now a mirror copy.
+        swapped = (
+            self.text.replace("precedence = 10\ncanonical = true\neditable = true", "@A@")
+            .replace("precedence = 90\ncanonical = false\neditable = false", "@B@")
+            .replace("@A@", "precedence = 90\ncanonical = false\neditable = false")
+            .replace("@B@", "precedence = 10\ncanonical = true\neditable = true")
+            .replace('kind = "custom"', "@K@")
+            .replace('kind = "mirror"', 'kind = "custom"')
+            .replace("@K@", 'kind = "mirror"')
+        )
+        self.assertNotEqual(swapped, self.text)
+        self.config_path.write_text(swapped, encoding="utf-8")
+        proc = self._review()
+        self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
+        self.assertIn(f"refusing to review {self.old_file}: it is a mirror copy", proc.stderr)
+        self.assertIn(str(self.base / "skills-mirror" / "tdd" / "SKILL.md"), proc.stderr)
+        self.assertNotIn("--approve", proc.stdout)
+
+    def test_a_moved_root_is_reported_by_the_reviewing_command_with_the_remedy(self):
+        shutil.move(self.base / "skills-canonical", self.base / "skills-main")
+        self._rewrite_config("skills-canonical", "skills-main")
+        proc = self._review()
+        self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
+        self.assertIn(f"refusing to review {self.cid}", proc.stderr)
+        self.assertNotIn("refusing to apply", proc.stderr)
+        self.assertIn("could not be read", proc.stderr)
+        self.assertIn("moved or re-pointed", proc.stderr)
+        applied = run_cli(
+            [*self.cfg, "apply", self.cid, "--approve", "0123456789abcdef", "--i-reviewed-this"]
+        )
+        self.assertEqual(applied.returncode, RC_REFUSED, applied.stderr)
+        self.assertIn(f"refusing to apply {self.cid}", applied.stderr)
+
+    def test_the_control_an_unchanged_tree_still_reviews_with_a_token(self):
+        proc = self._review()
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        self.assertIn("--approve", proc.stdout)
+        self.assertIn("--i-reviewed-this", proc.stdout)
+
+
 class TwoRootsTiedOnPrecedenceAreRefusedNotPickedByIdTests(unittest.TestCase):
     """Measured before: the harness mirror root renamed ``alpha`` and made
     canonical and editable at the canonical root's precedence had its ``tdd``

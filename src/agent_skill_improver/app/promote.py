@@ -228,20 +228,23 @@ def apply_candidate(
     return out
 
 
-def read_live_base_text(skill_store: Any, candidate: Candidate) -> str:
+def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str = "apply") -> str:
     """Read the canonical file the candidate claims to patch.
 
     A read failure here is a base mismatch, not an internal error: the candidate
     describes a file this store cannot read, so nothing about the recorded diff
-    can be checked and the write must not proceed.
+    can be checked and the write must not proceed. ``action`` names the command
+    refusing, so ``review`` does not report itself as ``apply``.
     """
     path = Path(candidate.target.canonical_path)
     try:
         return str(skill_store.read_text(path))
     except OSError as exc:
         raise BaseHashMismatch(
-            f"refusing to apply {candidate.id}: its canonical target {path} could not be read "
-            f"({exc}), so the recorded base hash and diff cannot be verified."
+            f"refusing to {action} {candidate.id}: its canonical target {path} could not be read "
+            f"({exc}), so the recorded base hash and diff cannot be verified. If the skill root "
+            "was moved or re-pointed, the candidate describes a file at its old path; re-run "
+            "`asi daily --commit` to propose against the configured tree."
         ) from exc
 
 

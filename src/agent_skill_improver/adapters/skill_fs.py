@@ -973,6 +973,9 @@ class FilesystemSkillStore:
         return b"".join(chunks), stat.S_IMODE(info.st_mode)
 
     def _assert_canonical(self, target: Path) -> None:
+        self.assert_canonical_target(target, action="write")
+
+    def assert_canonical_target(self, target: Path, *, action: str) -> None:
         """Refuse a mirror copy, and refuse anything we cannot identify at all.
 
         Resolution happens HERE because this is the adapter layer; the domain
@@ -984,6 +987,12 @@ class FilesystemSkillStore:
         state -- every legitimate apply targets a path that came from a snapshot --
         and treating "I do not recognise this file" as permission is how an
         interlock becomes decorative.
+
+        ``review`` asks the same question with ``action="review"`` so that it
+        never shows a token for a target the write would refuse. Measured
+        before: with the canonical root re-pointed at a copy of the tree, the
+        old file still on disk outside every root, ``review`` printed a token
+        and an apply command, and ``apply`` refused the unrecognised target.
         """
         resolved = Path(target).resolve()
         kind, group = classify_target(self.groups(refresh=True), resolved)
@@ -992,19 +1001,19 @@ class FilesystemSkillStore:
             # mirror, but calling it one, of an unknown source, misdescribes
             # it: the resolver's own reason says what is unsettled.
             raise MirrorEditRefused(
-                f"refusing to write {target}: skill {group.skill_id!r} has no canonical copy "
-                f"({group.canonical_reason}); nothing is written until that is settled."
+                f"refusing to {action} {target}: skill {group.skill_id!r} has no canonical copy "
+                f"({group.canonical_reason}); that must be settled before anything is written."
             )
         if kind == "mirror":
             canonical = group.canonical.path if group and group.canonical else "<unknown>"
             raise MirrorEditRefused(
-                f"refusing to write {target}: it is a mirror copy. The canonical source is "
+                f"refusing to {action} {target}: it is a mirror copy. The canonical source is "
                 f"{canonical}. Editing a mirror either gets overwritten by the next sync or "
                 "never reaches the agent that loads the canonical file."
             )
         if kind == "unknown":
             raise MirrorEditRefused(
-                f"refusing to write {target}: it is not a skill document in any configured "
+                f"refusing to {action} {target}: it is not a skill document in any configured "
                 "root, so this tool cannot tell whether it is canonical. An unrecognised "
                 "target is refused rather than assumed safe."
             )

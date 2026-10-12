@@ -851,9 +851,16 @@ def cmd_review(args: argparse.Namespace) -> int:
     # itself, and a diff or its line counts edited to agree with each other but
     # not with the file they claim to describe would still print a token.
     store = build_skill_store(config, writable=False)
-    base_text = read_live_base_text(store, candidate)
+    base_text = read_live_base_text(store, candidate, action="review")
     rubrics = {r.id: r for r in config.rubrics}
     report = review_report(candidate, base_text=base_text, rubrics=rubrics)
+    # The question the write will ask, asked before anything is shown: a target
+    # that is a mirror copy, a copy of a skill with no canonical, or no skill
+    # document in any configured root gets no token here, because `apply` would
+    # refuse it. It comes after the record's own checks, in the order `apply`
+    # asks them (status, integrity, base, then the target), so a closed or
+    # tampered candidate is named as that first.
+    store.assert_canonical_target(Path(candidate.target.canonical_path), action="review")
     if args.json:
         _say_json(report)
         return 0
