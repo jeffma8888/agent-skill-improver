@@ -1068,6 +1068,45 @@ class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
         self.assertEqual([c["canonical_path"] for c in receipt["candidates"]], [str(self.real)])
 
 
+class AnUnlistableFixturesDirectoryIsRefusedNotAnEmptyWindowTests(unittest.TestCase):
+    """Measured before: with the exports directory at mode 000, ``doctor``
+    reported the source ok and ``daily`` stood down with zero ingested,
+    ``is_total`` true, no error and no note, exit 0: a directory the process
+    could not open was indistinguishable from an empty one.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.exports = self.base / "exports"
+        shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "exports", self.exports)
+        self.cfg = [
+            "--config",
+            str(build_env(self.base, seed="unlistable-exports", fixtures_dir=self.exports)),
+        ]
+
+    @unittest.skipIf(os.geteuid() == 0, "root lists a mode-000 directory")
+    def test_doctor_finds_the_problem_and_daily_refuses_instead_of_standing_down(self):
+        os.chmod(self.exports, 0o000)
+        try:
+            doctor = run_cli([*self.cfg, "--json", "doctor"])
+            self.assertEqual(doctor.returncode, 1, doctor.stdout)
+            payload = json.loads(doctor.stdout)
+            self.assertNotEqual(payload["source"]["status"], "ok")
+            self.assertTrue(
+                any("cannot be listed (Permission denied)" in p for p in payload["problems"]),
+                payload["problems"],
+            )
+            daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+            self.assertEqual(daily.returncode, RC_REFUSED, daily.stdout)
+            self.assertIn("SourceUnavailable", daily.stderr)
+            self.assertIn("cannot be listed", daily.stderr)
+            self.assertIn("not an empty window", daily.stderr)
+        finally:
+            os.chmod(self.exports, 0o755)
+
+
 class AnExportThatDoesNotReadAsAThreadIsNamedTests(unittest.TestCase):
     """Measured before: a non-JSON export and a JSON array beside the five good
     ones gave ``doctor`` a clean source and ``daily`` a receipt of five ingested

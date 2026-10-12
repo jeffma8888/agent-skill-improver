@@ -14,6 +14,7 @@ construction. Truncating a sorted list is a permanent filter, not a sample.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,27 @@ class FixtureConversationSource:
     def preflight(self) -> None:
         if not self.directory.is_dir():
             raise SourceUnavailable(f"fixtures_dir {self.directory} is not a directory")
+        # Listing it is the question the run will ask; asked here so ``doctor``
+        # and the daily preflight refuse before anything is spent.
+        self._entries()
+
+    def _entries(self) -> list[Path]:
+        """Every ``*.json`` entry of the directory, or the source is unavailable.
+
+        Measured before: ``Path.glob`` swallows the error of a directory this
+        process cannot list (mode 000), so a run over one reported an empty
+        window with ``is_total`` true, zero passed over and a clean ``doctor``,
+        indistinguishable from a directory with nothing in it.
+        """
+        try:
+            with os.scandir(self.directory) as it:
+                names = [entry.name for entry in it if entry.name.endswith(".json")]
+        except OSError as exc:
+            raise SourceUnavailable(
+                f"fixtures_dir {self.directory} cannot be listed ({exc.strerror or exc}); "
+                "nothing in it can be discovered, so this is not an empty window"
+            ) from exc
+        return sorted(self.directory / name for name in names)
 
     def _scan(self) -> tuple[list[tuple[Path, dict[str, Any]]], list[tuple[str, str]]]:
         """Every export in the directory that reads as a thread, and every entry
@@ -58,7 +80,7 @@ class FixtureConversationSource:
         """
         accepted: list[tuple[Path, dict[str, Any]]] = []
         passed_over: list[tuple[str, str]] = []
-        for path in sorted(self.directory.glob("*.json")):
+        for path in self._entries():
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError as exc:

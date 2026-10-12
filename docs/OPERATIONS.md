@@ -210,8 +210,12 @@ process cannot read, one that is not UTF-8 or not JSON, a JSON value that is not
 an object, an object with no thread or a thread without an id; `doctor` lists the
 same entries as `WARN` lines under the source, and a fetch that cannot find a
 discovered thread while such entries exist quarantines the record as "no readable
-fixture" naming them, not as a thread that was never there. For the command-line source: a
-listed "Thread:" line whose id is option-shaped, empty, over-long or carries
+fixture" naming them, not as a thread that was never there. A directory the
+process cannot list is not an empty window: `doctor` reports it as a `PROBLEM`
+and `daily` refuses with `SourceUnavailable`, since zero ingested with `is_total`
+true would otherwise be the same receipt as a directory with nothing in it. For
+the command-line source: a listed "Thread:" line whose id is option-shaped,
+empty, over-long or carries
 whitespace or control characters (shown as a cut-short repr, since a listing is
 derived from conversation content and can carry a forged line), a listed entry
 with no "Thread:" line the parser could read, or one whose "Thread:" line is

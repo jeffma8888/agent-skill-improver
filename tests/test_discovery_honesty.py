@@ -260,6 +260,30 @@ class FixtureSourcePassedOverTests(unittest.TestCase):
         self.assertIn(f"{victim} cannot be read (Permission denied)", message)
         self.assertEqual(caught.exception.record_id, thread_id)
 
+    @unittest.skipIf(os.geteuid() == 0, "root lists a mode-000 directory")
+    def test_a_directory_this_process_cannot_list_is_unavailable_not_an_empty_window(self):
+        # Measured before: preflight ok, discovery an empty total page with
+        # nothing passed over, fetch "no fixture for thread": a directory the
+        # process could not open looked exactly like one with nothing in it.
+        os.chmod(self.exports, 0o000)
+        try:
+            with self.assertRaises(SourceUnavailable) as ctx:
+                self.source().preflight()
+            message = str(ctx.exception)
+            self.assertIn(
+                f"fixtures_dir {self.exports} cannot be listed (Permission denied)", message
+            )
+            self.assertIn("not an empty window", message)
+            with self.assertRaises(SourceUnavailable):
+                self.source().discover_page(since="", limit=50)
+            with self.assertRaises(SourceUnavailable):
+                self.source().passed_over()
+            with self.assertRaises(SourceUnavailable):
+                self.source().fetch("1700000000001-1")
+        finally:
+            os.chmod(self.exports, 0o755)
+        self.assertEqual(len(self.source().discover_page(since="", limit=50).threads), 5)
+
     def test_a_thread_never_in_a_clean_directory_is_still_simply_absent(self):
         with self.assertRaises(RecordDefect) as caught:
             self.source().fetch("1700000000999-9")
