@@ -1068,6 +1068,65 @@ class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
         self.assertEqual([c["canonical_path"] for c in receipt["candidates"]], [str(self.real)])
 
 
+class ARoleCommandThatCannotStartIsAConfigProblemTests(unittest.TestCase):
+    """Measured before: with ``[model.scorer].argv`` pointing at a mode-644
+    file, ``doctor`` exited 0 with no problem and ``daily`` exited 70 with a
+    PermissionError traceback.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.exports = self.base / "exports"
+        shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "exports", self.exports)
+        config_path = build_env(self.base, seed="unstartable-scorer", fixtures_dir=self.exports)
+        self.scorer = self.base / "scorer-644"
+        self.scorer.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        os.chmod(self.scorer, 0o644)
+        text = config_path.read_text(encoding="utf-8")
+        head, _, rest = text.partition("[model.scorer]\nargv = ")
+        _, _, after = rest.partition("\n")
+        config_path.write_text(
+            f"{head}[model.scorer]\nargv = [{json.dumps(str(self.scorer))}]\n{after}",
+            encoding="utf-8",
+        )
+        self.cfg = ["--config", str(config_path)]
+
+    @unittest.skipIf(os.geteuid() == 0, "root may execute a mode-644 file")
+    def test_doctor_reports_the_problem_and_daily_refuses_before_any_model_call(self):
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        problems = [p for p in json.loads(doctor.stdout)["problems"] if p.startswith("model role")]
+        self.assertEqual(len(problems), 1, json.loads(doctor.stdout)["problems"])
+        self.assertIn(
+            f"model role 'scorer' command {str(self.scorer)!r} exists but is not executable "
+            "(mode 644); chmod +x it",
+            problems[0],
+        )
+        # The source is made unusable too: the refusal must name the role, not
+        # the source, because the model check is answered before the source is
+        # touched (no subprocess, no file read).
+        os.chmod(self.exports, 0o000)
+        try:
+            daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        finally:
+            os.chmod(self.exports, 0o755)
+        self.assertEqual(daily.returncode, RC_REFUSED, daily.stderr)
+        self.assertIn("ConfigError: model role 'scorer' command", daily.stderr)
+        self.assertNotIn("cannot be listed", daily.stderr, "the source was never asked")
+        self.assertNotIn("Traceback", daily.stderr)
+        self.assertFalse(
+            list((self.base / "state" / "receipts").glob("*.json")),
+            "refused before the run started, so no receipt",
+        )
+        os.chmod(self.scorer, 0o755)
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(
+            [p for p in json.loads(doctor.stdout)["problems"] if p.startswith("model role")], []
+        )
+
+
 class ADirectoryThePayloadInventoryCannotListIsReportedTests(unittest.TestCase):
     """Measured before: ``scripts/`` at mode 000 beside ``tdd/SKILL.md`` gave
     ``skills`` a document with no payload warning and ``doctor`` a report of

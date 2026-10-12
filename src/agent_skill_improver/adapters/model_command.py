@@ -64,6 +64,7 @@ from .bounded_process import (
     QUOTED_TAIL_CHARS,
     OutputOverflow,
     RunTimedOut,
+    program_problem,
     quotable,
     run_bounded,
 )
@@ -188,6 +189,21 @@ class CommandModelRunner:
             "per_call_workdir_mode": oct(WORKDIR_MODE),
         }
 
+    def program_problems(self) -> list[str]:
+        """Why each configured role's program could not be started, if it cannot.
+
+        Asked of the program itself, not the sandbox wrapper around it: a
+        confined command still has to exist and be executable. Empty when every
+        role can start.
+        """
+        out: list[str] = []
+        for role in sorted(self._commands):
+            program = self._commands[role].argv[0] if self._commands[role].argv else ""
+            problem = program_problem(program) if program else "has an empty argv"
+            if problem:
+                out.append(f"role {role!r} command {program!r} {problem}")
+        return out
+
     def command_id(self, role: str) -> str:
         mode = self._isolation.mode
         cmd = self._commands.get(role)
@@ -228,8 +244,13 @@ class CommandModelRunner:
                 timeout_seconds=cmd.timeout_seconds,
                 max_output_bytes=cmd.max_output_bytes,
             )
-        except FileNotFoundError as exc:
-            raise TransientFailure(f"role {role!r} command not executable: {exc}") from exc
+        except OSError as exc:
+            # Not found, not executable, a directory, a wrong binary format:
+            # the command could not be started. Measured before: only
+            # not-found was caught, and a role command at mode 644 ended the
+            # run as an internal error with a traceback after ``doctor`` had
+            # said ready.
+            raise TransientFailure(f"role {role!r} command cannot be started: {exc}") from exc
         except RunTimedOut as exc:
             raise TransientFailure(f"role {role!r} timed out after {cmd.timeout_seconds}s") from exc
         except OutputOverflow as exc:

@@ -94,7 +94,10 @@ command and why, for the discovery program and the export program alike. Not on
 PATH, not executable or a directory is caught by the source preflight, so
 `doctor` reports it (exit 1, its negative verdict) with the file mode when the
 executable bit is what is missing; a wrong binary format is only seen when the
-start itself fails, and is the same 3.
+start itself fails, and is the same 3. A model role command that cannot be
+started is reported the same way: `doctor` lists it as a `PROBLEM`, `daily`
+refuses with `ConfigError` before any model call, and a start that fails
+mid-run is a transient failure of that role, never an internal error.
 
 ## The daily pass
 

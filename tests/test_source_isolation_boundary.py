@@ -1176,5 +1176,81 @@ class TheDeployedSourceIsCheckedByTheSelftestCommand(unittest.TestCase):
         return [(c["name"], c["passed"], c["requirement"]) for c in payload["checks"]]
 
 
+class ARoleCommandThatCannotStartIsNamedNotACrashTests(unittest.TestCase):
+    """Measured before: a scorer command at mode 644 passed ``doctor`` as ready
+    (nothing asked whether the program could start) and the first model call
+    ended ``daily`` with a PermissionError traceback, exit 70, for what is a
+    configuration problem. Only not-found was caught.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.not_executable = root / "scorer"
+        self.not_executable.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        os.chmod(self.not_executable, 0o644)
+        self.a_directory = root / "judge.d"
+        self.a_directory.mkdir()
+
+    @staticmethod
+    def _cmd(role: str, program: str) -> RoleCommand:
+        return RoleCommand(
+            role=role,
+            argv=(program, "--role", role),
+            env={},
+            max_output_bytes=1 << 20,
+            timeout_seconds=10,
+            model_label=f"fake-{role}",
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root may execute a mode-644 file")
+    def test_program_problems_names_each_role_whose_program_cannot_start(self):
+        runner = CommandModelRunner(
+            {
+                "scorer": self._cmd("scorer", str(self.not_executable)),
+                "improver": self._cmd("improver", sys.executable),
+                "judge": self._cmd("judge", str(self.a_directory)),
+            },
+            isolation=NoSandbox(),
+            parent_env=dict(os.environ),
+        )
+        problems = runner.program_problems()
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn(
+            f"role 'judge' command {str(self.a_directory)!r} is a directory, not a program",
+            problems[0],
+        )
+        self.assertIn(
+            f"role 'scorer' command {str(self.not_executable)!r} exists but is not executable "
+            "(mode 644); chmod +x it",
+            problems[1],
+        )
+        self.assertNotIn("improver", " ".join(problems), "a program that can start is not named")
+
+    def test_a_runner_whose_programs_all_start_reports_nothing(self):
+        runner = CommandModelRunner(
+            {"scorer": self._cmd("scorer", sys.executable)},
+            isolation=NoSandbox(),
+            parent_env=dict(os.environ),
+        )
+        self.assertEqual(runner.program_problems(), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root may execute a mode-644 file")
+    def test_a_start_that_fails_is_a_transient_failure_of_the_role_not_a_crash(self):
+        # The preflight is skipped on purpose: the file may lose its bit
+        # between the check and the call.
+        runner = CommandModelRunner(
+            {"scorer": self._cmd("scorer", str(self.not_executable))},
+            isolation=NoSandbox(),
+            parent_env=dict(os.environ),
+        )
+        with self.assertRaises(TransientFailure) as ctx:
+            runner.run(role="scorer", system="s", user="u", response_schema="x")
+        message = str(ctx.exception)
+        self.assertIn("role 'scorer' command cannot be started", message)
+        self.assertIn("Permission denied", message)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

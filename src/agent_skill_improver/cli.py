@@ -404,6 +404,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"isolation not satisfied for a {isolation.source_class} source: "
             + "; ".join(isolation.reasons)
         )
+    # A role whose program cannot start is a problem this report can see
+    # without running a model. Measured before: a scorer at mode 644 read as
+    # ready here and ended `daily` as an internal error.
+    for problem in runner.program_problems():
+        problems.append(f"model {problem}; set [model.<role>].argv in your config")
 
     # Existing state may predate the permission policy, or have been created
     # under a permissive umask. Repair it here rather than only checking, because
@@ -670,6 +675,11 @@ def cmd_daily(args: argparse.Namespace) -> int:
         config.require_roles("scorer", "improver", "judge")
     state = build_state(config)
     runner = build_runner(config, state)
+    unstartable = runner.program_problems()
+    if unstartable:
+        raise ConfigError(
+            "model " + "; model ".join(unstartable) + "; set [model.<role>].argv in your config"
+        )
     # run_daily enforces this too -- that is the load-bearing check, since it is
     # the one a library caller cannot skip. Enforcing here as well means the CLI
     # refuses before `source.preflight()` runs a subprocess.

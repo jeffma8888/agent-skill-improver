@@ -33,11 +33,13 @@ from __future__ import annotations
 
 import os
 import selectors
+import shutil
 import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Sequence
 
 from ..domain.redaction import redact
@@ -84,6 +86,34 @@ class RunTimedOut(Exception):
 
 class OutputOverflow(Exception):
     """The child wrote more than ``max_output_bytes`` to stdout. It has been killed."""
+
+
+def program_problem(program: str) -> str:
+    """Why ``program`` could not be started as a subprocess, or "" when it can.
+
+    Mirrors how the process will be started: a bare name is looked up on PATH
+    and nowhere else (a file of that name in the working directory does not
+    count); a path is taken as given and must be a regular file this user may
+    execute. Measured before: a conversation command at mode 644, and a directory
+    given by mistake, both passed a preflight that asked only whether the path
+    existed, and the run then died as an internal error; a model role command
+    at mode 644 passed ``doctor`` as ready and did the same.
+    """
+    if shutil.which(program) is not None:
+        return ""
+    path = Path(program)
+    if os.sep not in program:
+        return "not found on PATH"
+    if not path.exists():
+        return "not found"
+    if path.is_dir():
+        return "is a directory, not a program"
+    if not path.is_file():
+        return "is not a regular file"
+    if not os.access(path, os.X_OK):
+        mode = path.stat().st_mode & 0o777
+        return f"exists but is not executable (mode {mode:03o}); chmod +x it"
+    return ""
 
 
 @dataclass(frozen=True)

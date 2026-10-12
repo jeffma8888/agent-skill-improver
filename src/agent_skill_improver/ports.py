@@ -72,6 +72,10 @@ class ModelRunner(Protocol):
         """What confinement is actually in force. Read, never configured."""
         ...
 
+    def program_problems(self) -> list[str]:  # pragma: no cover - protocol
+        """Why a configured role cannot be started, one line per role; empty when all can."""
+        ...
+
 
 class SkillStore(Protocol):
     """Reads skill roots; writes only when explicitly not read-only."""

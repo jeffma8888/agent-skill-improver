@@ -275,6 +275,10 @@ class InProcessRunner:
     def command_id(self, role: str) -> str:
         return f"{role}:in-process-fake:iso={self.isolation_mode}"
 
+    def program_problems(self) -> list[str]:
+        """Nothing to start: the fake runs in this process."""
+        return []
+
     def isolation(self) -> dict[str, Any]:
         """Deliberately NOT an OS sandbox.
 
