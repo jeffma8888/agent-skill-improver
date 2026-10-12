@@ -226,7 +226,16 @@ def run_daily(
     run_day = day or day_key(started)
     run_seed = seed or config.seed or run_day
     dry_run = config.dry_run if commit is None else not commit
-    # The newest daily receipt is read before anything is written. A run that
+    # Set on the shared store rather than on a copy: the source may hold this same
+    # object as its raw-export store, and a dry run must withhold that write too.
+    state.dry_run = dry_run
+    state.withheld_writes.clear()
+
+    # The layout and the owner-only mode repair every run performs come first,
+    # so a receipt whose mode merely drifted is repaired and then read, as
+    # ``doctor`` does, rather than refusing the run as unreadable.
+    state.ensure()
+    # The newest daily receipt is read before any record is written. A run that
     # recorded a skill tree mutation blocks the next one too: the operations doc
     # says do not re-run until you know what wrote to the tree, and a scheduler
     # that fires every morning would otherwise do exactly that. The operator
@@ -277,12 +286,6 @@ def run_daily(
             else "there is no daily receipt"
         )
         raise ConfigError(f"--mutation-reviewed {mutation_reviewed} names no blocked run: {newest}")
-    # Set on the shared store rather than on a copy: the source may hold this same
-    # object as its raw-export store, and a dry run must withhold that write too.
-    state.dry_run = dry_run
-    state.withheld_writes.clear()
-
-    state.ensure()
     receipt = RunReceipt(
         run_id=f"{run_day}:{iso(started)}",
         day=run_day,

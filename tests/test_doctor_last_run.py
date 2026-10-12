@@ -289,23 +289,47 @@ class DoctorAnswersTheHealthQuestionsTests(unittest.TestCase):
         payload["finished_at"] = three_days.strftime("%Y-%m-%dT%H:%M:%SZ")
         payload["dry_run"] = False
         receipt.write_text(json.dumps(payload), encoding="utf-8")
-        (receipt.parent / "torn.json").write_text("{", encoding="utf-8")
+        # A torn receipt is a problem, not a warning: `daily` refuses to run
+        # while it is there, and doctor must not say ready when daily would not.
+        torn = receipt.parent / "torn.json"
+        torn.write_text("{", encoding="utf-8")
         text, doc, line = self._doctor()
-        self.assertEqual(text.returncode, RC_OK, text.stdout)
+        self.assertEqual(text.returncode, RC_NEGATIVE, text.stdout)
         self.assertIn("2026-01-01", line, "the readable receipt still answers")
         self.assertEqual(
             [Path(u["path"]).name for u in doc["receipt_records_unreadable"]], ["torn.json"]
         )
-        self.assertTrue(
-            any(w.startswith("a receipt cannot be read (") for w in doc["warnings"]),
-            doc["warnings"],
+        problem = next(p for p in doc["problems"] if p.startswith("a receipt cannot be read ("))
+        self.assertIn(str(torn), problem)
+        self.assertIn(
+            "`daily` refuses to run while it is there. Read it, then move it aside", problem
         )
         self.assertTrue(
             any(
-                re.match(r"^WARN  a receipt cannot be read \(.*torn\.json\): ", ln)
+                re.match(r"^PROBLEM  a receipt cannot be read \(.*torn\.json\): ", ln)
                 for ln in text.stdout.splitlines()
-            )
+            ),
+            text.stdout,
         )
+        daily = run_cli([*self.cfg, "daily", "--commit", "--day", "2026-01-02"])
+        self.assertEqual(daily.returncode, 3, "doctor and daily agree")
+        torn.unlink()
+        self.assertEqual(self._doctor()[0].returncode, RC_OK)
+
+    @unittest.skipIf(os.geteuid() == 0, "root opens anything")
+    def test_a_receipt_whose_mode_drifted_is_repaired_and_read_in_the_same_visit(self) -> None:
+        proc = run_cli([*self.cfg, "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        (receipt,) = self._receipts()
+        receipt.chmod(0)
+        self.addCleanup(lambda: receipt.chmod(0o600))
+        text, doc, line = self._doctor()
+        self.assertEqual(text.returncode, RC_OK, text.stdout)
+        self.assertIn("2026-01-01 ok at ", line, "repaired first, then read")
+        self.assertEqual(doc["receipt_records_unreadable"], [])
+        self.assertEqual(doc["last_run"]["day"], "2026-01-01")
+        self.assertIn("1 repaired", text.stdout)
+        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":  # pragma: no cover

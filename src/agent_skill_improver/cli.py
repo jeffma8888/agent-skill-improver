@@ -460,57 +460,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"{'a symlink' if todays.is_symlink() else 'something that is not a regular file'}"
                 ", which `daily` refuses to read; remove it if you did not put it there"
             )
-    # The health questions the operations doc asks, answered from the newest
-    # daily receipt: is it recent, did it detect a skill tree mutation, does
-    # it name a confinement mode. Measured before: `doctor` said `ready` with
-    # the schedule silent for a week and a mutation in the last receipt.
-    last_run = None
-    last_run_age: int | None = None
-    unreadable_receipts: list[dict[str, str]] = []
-    if state_present and not layout_problems:
-        receipts = state.scan_receipts()
-        last_run = receipts.last_run
-        unreadable_receipts = [u.to_dict() for u in receipts.unreadable]
-        for record in unreadable_receipts:
-            warnings.append(f"a receipt cannot be read ({record['path']}): {record['reason']}")
-        if last_run is not None and last_run.mutation_detected:
-            problems.append(
-                f"the last run ({one_line(last_run.day)}) detected a skill tree mutation; "
-                f"`daily` refuses to run again until you have read skill_tree.changes in "
-                f"{one_line(str(last_run.path))} and start one run with "
-                f"--mutation-reviewed {one_line(last_run.day)}"
-            )
-        if last_run is not None and last_run.mutation_detected is None:
-            warnings.append(
-                f"the last run's receipt ({last_run.path}) does not say whether the skill tree "
-                "was mutated; it was edited or written by an older build"
-            )
-        # Question 1 is judged, not only printed: a stale, future or unreadable
-        # finish time each gets its own warning, so a clock-skewed or hand-edited
-        # stamp cannot answer "is it recent" with a silent yes.
-        if last_run is not None:
-            last_run_age = _age_in_days(last_run.finished_at, SystemClock().now())
-            if not last_run.finished_at:
-                warnings.append(
-                    f"the last run's receipt ({last_run.path}) records no finish time; "
-                    "it was edited or written by an older build"
-                )
-            elif last_run_age is None:
-                warnings.append(
-                    f"the last run's receipt ({last_run.path}) carries a finish time that does "
-                    f"not parse: {quoted_value(last_run.finished_at)}; it was edited"
-                )
-            elif last_run_age < 0:
-                warnings.append(
-                    f"the last run's receipt ({last_run.path}) says it finished in the future "
-                    f"({last_run.finished_at}); the clock or the receipt was edited"
-                )
-            elif last_run_age > STALE_RUN_DAYS:
-                warnings.append(
-                    f"the last run finished {last_run_age} day(s) ago; a daily schedule that is "
-                    "firing leaves a receipt every day, so check the scheduler, not the job"
-                )
-
     # The run lock is the first thing `daily` touches. A link, a directory or a
     # fifo there is refused by name (a directory is not even a foreign entry,
     # so the left-alone warning would not mention it). Measured before: both
@@ -599,6 +548,63 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"{left_alone[0]}. This tool refuses to read such entries and replaces "
                     "rather than follows one it writes to; remove them if you did not put "
                     "them there."
+                )
+
+    # The health questions the operations doc asks, answered from the newest
+    # daily receipt: is it recent, did it detect a skill tree mutation, does
+    # it name a confinement mode. Measured before: `doctor` said `ready` with
+    # the schedule silent for a week and a mutation in the last receipt.
+    # Read after the mode repair above, so a receipt whose mode drifted is
+    # repaired and read in this same visit rather than reported as unreadable.
+    last_run = None
+    last_run_age: int | None = None
+    unreadable_receipts: list[dict[str, str]] = []
+    if state_present and not layout_problems:
+        receipts = state.scan_receipts()
+        last_run = receipts.last_run
+        unreadable_receipts = [u.to_dict() for u in receipts.unreadable]
+        for record in unreadable_receipts:
+            # A problem, not a warning: `daily` refuses to run while it is there.
+            problems.append(
+                f"a receipt cannot be read ({record['path']}): {record['reason']}; `daily` "
+                "refuses to run while it is there. Read it, then move it aside"
+            )
+        if last_run is not None and last_run.mutation_detected:
+            problems.append(
+                f"the last run ({one_line(last_run.day)}) detected a skill tree mutation; "
+                f"`daily` refuses to run again until you have read skill_tree.changes in "
+                f"{one_line(str(last_run.path))} and start one run with "
+                f"--mutation-reviewed {one_line(last_run.day)}"
+            )
+        if last_run is not None and last_run.mutation_detected is None:
+            warnings.append(
+                f"the last run's receipt ({last_run.path}) does not say whether the skill tree "
+                "was mutated; it was edited or written by an older build"
+            )
+        # Question 1 is judged, not only printed: a stale, future or unreadable
+        # finish time each gets its own warning, so a clock-skewed or hand-edited
+        # stamp cannot answer "is it recent" with a silent yes.
+        if last_run is not None:
+            last_run_age = _age_in_days(last_run.finished_at, SystemClock().now())
+            if not last_run.finished_at:
+                warnings.append(
+                    f"the last run's receipt ({last_run.path}) records no finish time; "
+                    "it was edited or written by an older build"
+                )
+            elif last_run_age is None:
+                warnings.append(
+                    f"the last run's receipt ({last_run.path}) carries a finish time that does "
+                    f"not parse: {quoted_value(last_run.finished_at)}; it was edited"
+                )
+            elif last_run_age < 0:
+                warnings.append(
+                    f"the last run's receipt ({last_run.path}) says it finished in the future "
+                    f"({last_run.finished_at}); the clock or the receipt was edited"
+                )
+            elif last_run_age > STALE_RUN_DAYS:
+                warnings.append(
+                    f"the last run finished {last_run_age} day(s) ago; a daily schedule that is "
+                    "firing leaves a receipt every day, so check the scheduler, not the job"
                 )
 
     source = build_source(config, state)

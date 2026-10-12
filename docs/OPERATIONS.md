@@ -98,7 +98,7 @@ the remedy in each reason is to move it aside or repair it by hand.
 | 2 | usage error: an unknown subcommand or flag, or a value argparse refuses before any config is read (a `--day` that could not name a candidate, a `--limit` below 1); argparse's code, never returned by a command |
 | 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, `ConfigError`, ...) |
 | 4 | a required file was missing |
-| 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree. The next `daily` exits 5 as well (`BlockedRunUnreviewed`, before the lock, any write or any conversation) until one is started with `--mutation-reviewed 2026-01-01` naming the blocked run's day |
+| 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree. The next `daily` exits 5 as well (`BlockedRunUnreviewed`, before the lock, any record written or any conversation read) until one is started with `--mutation-reviewed 2026-01-01` naming the blocked run's day |
 | 70 | an exception no command anticipated, with its traceback on stderr. A bug report, never a negative answer; 70 is `EX_SOFTWARE` from `sysexits.h` |
 
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
@@ -457,8 +457,9 @@ receipt says a candidate could NOT be rewritten, its file may still read
 
 "Do not re-run" is enforced, not only asked: while the newest daily receipt
 records a mutation, the next `daily` refuses with `BlockedRunUnreviewed` and the
-same exit 5, before the lock is taken, before anything under `state/` is written
-and before a conversation is read (the source is only preflighted), so a scheduler
+same exit 5, before the lock is taken, before any record under `state/` is written
+and before a conversation is read (the source is only preflighted; the layout and
+mode repair every run performs come first), so a scheduler
 that fires every morning keeps paging instead of quietly running again. The signal
 is the receipt's own `skill_tree.mutation_detected`, not its `status`: a status is a
 word anyone can edit, and a receipt without the field (an older build, a hand edit)
@@ -467,7 +468,8 @@ does not block; `doctor` is what warns about such a receipt. A receipt under
 exit 3), and that includes a torn `apply` or `rollback` receipt, which shares the
 directory: which run was newest cannot be known while any one is unreadable, and the
 blocked receipt is the one most worth truncating; read it, then move it aside.
-`doctor` names such a file in a warning. When you know what wrote to the tree, start one
+`doctor` names such a file as a problem, so it never says ready when `daily` would
+refuse; a receipt whose mode merely drifted is repaired and read in the same visit. When you know what wrote to the tree, start one
 run by hand naming the blocked run's day, `asi daily --commit --mutation-reviewed 2026-01-01`;
 its receipt records that statement and becomes the newest, and the schedule resumes
 on its own. The flag names a day, so one left behind in a cron line can waive only
@@ -517,8 +519,8 @@ last run     2026-10-11 ok at 2026-10-11T09:00:12Z (1 day(s) ago); skill tree mu
 A detected mutation is a problem (exit 1, with the receipt path to read and the
 `--mutation-reviewed 2026-01-01` run that lets `daily` continue); a receipt
 that does not say whether the tree was mutated prints `mutation=unknown` with a
-warning; a receipt that does not read as one is a warning with its reason, never a
-silent skip. Recency is judged, not only printed: a finish time more than two whole
+warning; a receipt that does not read as one is a problem (exit 1) with its reason,
+never a silent skip, because `daily` refuses to run while it is there. Recency is judged, not only printed: a finish time more than two whole
 days old warns that the scheduler, not the job, is what to check; one in the future or
 one that does not parse warns that the clock or the receipt was edited, rather than
 reading as today. Dry runs write no receipt, so they do not count as a run here. With

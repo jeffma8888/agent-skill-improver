@@ -39,8 +39,8 @@ def _clock() -> FrozenClock:
     return FrozenClock(datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc))
 
 
-def _blocked_receipt(day: str = BLOCKED_DAY) -> dict:
-    return {
+def _blocked_receipt(day: str = BLOCKED_DAY, **edits) -> dict:
+    payload = {
         "schema": SCHEMA_RECEIPT,
         "day": day,
         "status": "blocked",
@@ -53,18 +53,23 @@ def _blocked_receipt(day: str = BLOCKED_DAY) -> dict:
         },
         "isolation": {"mode": "none"},
     }
+    payload.update(edits)
+    return payload
 
 
 def _tree_fingerprint(root: Path) -> dict[str, str]:
+    """Every entry with its kind, mode and content: a mode repair counts as a write."""
     out: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel = str(path.relative_to(root))
         if path.is_symlink():
             out[rel] = "link"
-        elif path.is_dir():
-            out[rel] = "dir"
+            continue
+        mode = oct(path.stat().st_mode & 0o777)
+        if path.is_dir():
+            out[rel] = f"dir {mode}"
         else:
-            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+            out[rel] = f"{mode} {hashlib.sha256(path.read_bytes()).hexdigest()}"
     return out
 
 
@@ -99,6 +104,9 @@ class TheRunAfterABlockedOneTests(unittest.TestCase):
         payload = _blocked_receipt(day)
         payload.update(edits)
         path.write_text(json.dumps(payload), encoding="utf-8")
+        # Owner-only, as the tool writes it, so the run's mode repair has
+        # nothing to do and "nothing was written" can include modes.
+        path.chmod(0o600)
         return path
 
     def _run(self, *, source=None, day="2026-01-02", commit=True, reviewed=None):
@@ -190,17 +198,31 @@ class TheRunAfterABlockedOneTests(unittest.TestCase):
         self.assertIn("move it aside", str(caught.exception))
         self.assertEqual(_tree_fingerprint(self.config.state_dir), before)
         if os.geteuid() != 0:
+            # The scan itself (no repair in between) lists a file it cannot
+            # open instead of raising; the run repairs the mode first, which
+            # the next test pins.
             path.write_text(json.dumps(_blocked_receipt()), encoding="utf-8")
             path.chmod(0)
             self.addCleanup(path.chmod, 0o600)
-            with self.assertRaises(StateUnreadable) as denied:
-                self._run(source=_Untouched())
-            self.assertIn("cannot be opened: ", str(denied.exception))
-            self.assertEqual(
-                [u.path for u in self.state.scan_receipts().unreadable],
-                [path],
-                "the scan lists it instead of raising through doctor as a 70",
-            )
+            unreadable = self.state.scan_receipts().unreadable
+            self.assertEqual([u.path for u in unreadable], [path])
+            self.assertTrue(unreadable[0].reason.startswith("cannot be opened: "), unreadable)
+
+    @unittest.skipIf(os.geteuid() == 0, "root opens anything")
+    def test_a_receipt_whose_mode_drifted_is_repaired_then_read_not_refused(self) -> None:
+        # The scheduler may fire before anyone ran doctor: the run's own mode
+        # repair comes before the scan, so the blocked receipt is still read
+        # (and still blocks) rather than refusing the run as unreadable.
+        path = self._write_blocked()
+        path.chmod(0)
+        self.addCleanup(lambda: path.chmod(0o600))
+        with self.assertRaises(BlockedRunUnreviewed):
+            self._run(source=_Untouched())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600, "repaired on the way")
+        path.write_text(json.dumps(_blocked_receipt(skill_tree={"mutation_detected": False})))
+        path.chmod(0)
+        receipt = self._run()
+        self.assertEqual(receipt.status, "ok", "an ok receipt with a drifted mode does not refuse")
 
     def test_a_dry_run_is_refused_too_and_its_statement_does_not_persist(self) -> None:
         self._write_blocked()
