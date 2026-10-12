@@ -777,6 +777,85 @@ class PassedOverDocumentsReachTheOperatorTests(unittest.TestCase):
         self.assertNotIn("alias", [ln.split("  ")[0] for ln in lines], "the link was not taken")
 
 
+class AnUnreadableCandidateRecordIsNamedNotDroppedTests(unittest.TestCase):
+    """One validated candidate, then its record is truncated on disk.
+
+    Measured before: ``candidates --all`` printed ``0 candidate(s)``, ``doctor``
+    reported nothing, and the next ``daily --commit`` counted zero open
+    candidates for ``tdd`` and proposed ``CAND-...-02-tdd`` beside the broken
+    record, the duplicate the per-skill cap exists to prevent. Now the record
+    is named by the listings, is a ``PROBLEM`` for ``doctor``, and stands
+    ``daily`` down with the queue uncounted; the file itself is not touched.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name).resolve()
+        cls.cfg = ["--config", str(build_env(cls.base, dry_run=False, seed="unreadable"))]
+        proc = run_cli([*cls.cfg, "--json", "daily", "--commit", "--day", "2026-05-01"])
+        assert proc.returncode == RC_OK, proc.stderr
+        validated = [c for c in json.loads(proc.stdout)["candidates"] if c["status"] == "validated"]
+        assert validated and validated[0]["skill_id"] == "tdd", proc.stdout
+        cls.record = cls.base / "state" / "candidates" / f"{validated[0]['candidate_id']}.json"
+        cls.intact = cls.record.read_bytes()
+        cls.record.write_bytes(cls.intact[: len(cls.intact) // 2])
+        cls.truncated_sha = sha256_file(cls.record)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_candidates_names_the_record_as_unreadable_in_json_and_text(self):
+        as_json = run_cli([*self.cfg, "--json", "candidates", "--all"])
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual(payload["candidates"], [])
+        self.assertEqual([u["path"] for u in payload["unreadable"]], [str(self.record)])
+        self.assertIn("could not be read", payload["unreadable"][0]["reason"])
+        as_text = run_cli([*self.cfg, "candidates", "--all"])
+        lines = as_text.stdout.split("\n")
+        self.assertTrue(
+            any(ln.startswith(f"UNREADABLE  {self.record.name}  ") for ln in lines), as_text.stdout
+        )
+        self.assertIn("0 candidate(s); 1 unreadable record(s)", lines)
+
+    def test_doctor_reports_it_as_a_problem_and_exits_nonzero(self):
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, 1, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual(
+            [u["path"] for u in payload["candidate_records_unreadable"]], [str(self.record)]
+        )
+        self.assertTrue(any("candidate record cannot be read" in p for p in payload["problems"]))
+        as_text = run_cli([*self.cfg, "doctor"])
+        self.assertIn("PROBLEM  candidate record cannot be read", as_text.stdout)
+        self.assertIn("verdict: problems found", as_text.stdout)
+
+    def test_daily_stands_down_proposes_nothing_and_leaves_the_record_as_it_is(self):
+        proc = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-05-02"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        receipt = json.loads(proc.stdout)
+        self.assertEqual(receipt["status"], "stood-down", receipt)
+        self.assertIn("queue guard", receipt["stand_down_reason"])
+        self.assertIn(self.record.name, receipt["stand_down_reason"])
+        self.assertEqual(receipt["candidates"], [])
+        self.assertEqual(receipt["counts"]["candidate_records_unreadable"], 1)
+        self.assertEqual(
+            sorted(p.name for p in self.record.parent.glob("*.json")), [self.record.name]
+        )
+        self.assertEqual(sha256_file(self.record), self.truncated_sha, "left exactly as found")
+
+    def test_zz_the_control_the_restored_record_counts_toward_the_per_skill_cap(self):
+        self.record.write_bytes(self.intact)
+        proc = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-05-03"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        receipt = json.loads(proc.stdout)
+        self.assertEqual(receipt["counts"]["candidate_records_unreadable"], 0)
+        self.assertEqual(receipt["counts"]["skills_with_open_candidate"], 1, receipt["counts"])
+        self.assertEqual(receipt["candidates"], [], "no competitor for tdd")
+
+
 class ReadOnlyCommandsTests(unittest.TestCase):
     """README's command table says `skills`, `rubrics`, `discover`, `candidates`,
     `review` and `scheduler-template` write nothing. Measured through the real

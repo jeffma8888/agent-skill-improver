@@ -65,7 +65,7 @@ from ..ports import ModelRunner
 from .lock import RunLock
 from .pipeline import propose_candidate, score_and_isolate
 from .receipt import KIND_CONVERSATION, KIND_SKILL, STATUS_STOOD_DOWN, RunReceipt
-from .state import StateStore, safe_name
+from .state import OPEN_STATUSES, StateStore, safe_name
 from .validate import validate_candidate
 
 STAGE_INGEST = "ingest"
@@ -236,7 +236,26 @@ def run_daily(
                 "not independent evidence"
             )
 
-        open_candidates = state.open_candidates()
+        # A record under candidates/ that cannot be read is a queue this run
+        # cannot count: it may be an open candidate for any skill, so neither the
+        # backlog cap nor the per-skill cap can be applied honestly. Measured
+        # before: a half-written record for `tdd` counted as nothing and the run
+        # proposed a second `tdd` candidate, the duplicate the per-skill cap
+        # exists to prevent. The file is left exactly as it is.
+        scan = state.scan_candidates()
+        receipt.counts["candidate_records_unreadable"] = len(scan.unreadable)
+        if scan.unreadable:
+            first = scan.unreadable[0]
+            receipt.stand_down(
+                f"queue guard: {len(scan.unreadable)} candidate record(s) under "
+                f"{state.dir('candidates')} cannot be read, so the open queue cannot be counted "
+                f"and nothing is proposed. First: {first.path.name}: {first.reason} Move or "
+                "repair the record(s) and the next run resumes; nothing was changed."
+            )
+            return _finish(
+                receipt, state, skill_store, digest_before, clock, dry_run, run_day, {}, []
+            )
+        open_candidates = [c for c in scan.readable if c.status in OPEN_STATUSES]
         if len(open_candidates) >= config.caps.max_open_candidates:
             receipt.stand_down(
                 f"backlog guard: {len(open_candidates)} candidate(s) already awaiting review, "

@@ -128,8 +128,12 @@ candidates_gate_passed        proposals with no-regression evidence
 candidates_gate_failed        kept, with reasons, for a human to read
 proposals_refused_by_policy   targets declined by a guard rule (includes the next line)
 skills_with_open_candidate    implicated skills skipped because a candidate of theirs awaits review
+candidate_records_unreadable  files under state/candidates/ that do not parse as a candidate; one
+                              or more stands the run down (`queue guard`) because the open queue
+                              cannot be counted, and the file is left exactly as found
 open_candidates_after         open-status candidate files on disk, what a bare `asi review`
-                              lists; a dry run's own proposals are never in it
+                              lists; a dry run's own proposals are never in it, and neither
+                              is an unreadable record (see candidate_records_unreadable)
 state_quarantine_files        files under state/quarantine/ after the run, ALL days, so this
 state_refusal_files           and the two beside it are cumulative backlog rather than
 state_deferred_files          this run's work; in a dry run they reflect earlier commits only

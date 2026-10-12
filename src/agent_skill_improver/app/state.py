@@ -119,6 +119,32 @@ def keyed_name(value: str) -> str:
 
 
 @dataclass(frozen=True)
+class UnreadableRecord:
+    """A candidate record on disk that could not be read as one, with why.
+
+    The listing used to drop these in silence. Measured: with one half-written
+    record under ``candidates/``, ``asi candidates --all`` printed ``0
+    candidate(s)``, ``doctor`` reported nothing, and the next ``daily`` run
+    counted zero open candidates for that skill and proposed a competitor,
+    which is the duplicate the per-skill cap exists to prevent.
+    """
+
+    path: Path
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"path": str(self.path), "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class CandidateScan:
+    """Every record under ``candidates/``: the ones that read, and the ones that did not."""
+
+    readable: tuple[Candidate, ...]
+    unreadable: tuple[UnreadableRecord, ...]
+
+
+@dataclass(frozen=True)
 class RecordStatus:
     record_id: str
     status: str
@@ -446,20 +472,37 @@ class StateStore:
             )
         return candidate
 
-    def list_candidates(self) -> list[Candidate]:
-        """Every readable candidate record. Unreadable ones are skipped, not fatal.
+    def scan_candidates(self) -> CandidateScan:
+        """Every candidate record, readable or not, each unreadable one with its reason.
 
-        Skipping is safe here and only here: this is a listing, and nothing it
-        returns authorises a write. ``read_candidate`` is the path promotion uses,
-        and that one refuses instead of skipping.
+        A record that does not parse is never guessed at and never acted on
+        (``read_candidate`` refuses it by name), but it is not nothing either:
+        it may be an open candidate whose skill the queue caps are counting, so
+        the caller decides what an unreadable record means for it. ``daily``
+        treats one as a queue it cannot measure and stands down; the listings
+        name it.
         """
-        out: list[Candidate] = []
+        readable: list[Candidate] = []
+        unreadable: list[UnreadableRecord] = []
         for path in sorted(self.dir("candidates").glob("*.json")):
-            try:
-                out.append(_candidate_from_file(path))
-            except StateUnreadable:
+            # A link or any other non-file is not a record at all: this tool never
+            # writes one, it is already named by ``foreign_entries`` and left
+            # alone, and ``read_candidate`` refuses it by name. An unreadable
+            # record is a regular file that does not parse.
+            if path.is_symlink() or not path.is_file():
                 continue
-        return out
+            try:
+                readable.append(_candidate_from_file(path))
+            except StateUnreadable as exc:
+                unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
+        return CandidateScan(readable=tuple(readable), unreadable=tuple(unreadable))
+
+    def list_candidates(self) -> list[Candidate]:
+        """Every readable candidate record. See ``scan_candidates`` for the rest."""
+        return list(self.scan_candidates().readable)
+
+    def unreadable_candidates(self) -> list[UnreadableRecord]:
+        return list(self.scan_candidates().unreadable)
 
     def open_candidates(self) -> list[Candidate]:
         return [c for c in self.list_candidates() if c.status in OPEN_STATUSES]

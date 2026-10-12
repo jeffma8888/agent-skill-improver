@@ -48,7 +48,7 @@ from .domain.isolation import (
 )
 from .errors import AsiError, ConfigError
 from .jsonio import dumps
-from .app.state import DIR_MODE, STATE_FILE_MODE, StateStore
+from .app.state import DIR_MODE, OPEN_STATUSES, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
 ENV_CONFIG = "ASI_CONFIG"
@@ -309,6 +309,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     state_present = config.state_dir.exists() or config.state_dir.is_symlink()
     if state_present:
         layout_problems = state.layout_problems()
+    # A candidate record that does not read stands `daily` down (the queue
+    # cannot be counted), so it is a problem for this report, not a warning.
+    # Read only from a tree that is sound and already has the directory: this
+    # report creates nothing on the way to its verdict.
+    unreadable_candidates: list[dict[str, str]] = []
+    # The literal name rather than ``state.dir("candidates")``: that call would
+    # create the directory, and this report creates nothing.
+    if state_present and not layout_problems and (config.state_dir / "candidates").is_dir():
+        unreadable_candidates = [u.to_dict() for u in state.unreadable_candidates()]
+        for record in unreadable_candidates:
+            problems.append(
+                "candidate record cannot be read and `daily` will stand down until it is moved "
+                f"or repaired: {record['reason']}"
+            )
 
     # The isolation decision comes BEFORE anything touches the source, so
     # `doctor` on a host with no sandbox mechanism reports the refusal rather
@@ -405,6 +419,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "skills_discovered": len(store.known_skill_ids()),
         "skills_that_do_not_load": [{"skill_id": s.skill_id, "path": str(s.path)} for s in broken],
         "skill_documents_passed_over": [d.to_dict() for d in passed_over],
+        "candidate_records_unreadable": unreadable_candidates,
         "skills_with_executable_payloads": [
             {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
             for s in snapshots
@@ -593,8 +608,12 @@ def cmd_daily(args: argparse.Namespace) -> int:
 def cmd_candidates(args: argparse.Namespace) -> int:
     config = _load(args)
     state = StateStore(config.state_dir)
-    items = state.list_candidates() if args.all else state.open_candidates()
+    scan = state.scan_candidates()
+    items = (
+        list(scan.readable) if args.all else [c for c in scan.readable if c.status in OPEN_STATUSES]
+    )
     payload = {
+        "unreadable": [u.to_dict() for u in scan.unreadable],
         "candidates": [
             {
                 "id": c.id,
@@ -607,7 +626,7 @@ def cmd_candidates(args: argparse.Namespace) -> int:
                 "created_at": c.created_at,
             }
             for c in items
-        ]
+        ],
     }
     lines = [
         f"{c.id}  {c.status:<12} {c.target.skill_id:<28} "
@@ -616,7 +635,11 @@ def cmd_candidates(args: argparse.Namespace) -> int:
         f"+{c.patch.added_lines}/-{c.patch.removed_lines}"
         for c in items
     ]
-    lines.append(f"{len(items)} candidate(s)")
+    # A record that did not read is listed by name: dropping it made a corrupt
+    # queue look like an empty one (see ``UnreadableRecord``).
+    for record in scan.unreadable:
+        lines.append(f"UNREADABLE  {record.path.name}  {record.reason}")
+    lines.append(f"{len(items)} candidate(s); {len(scan.unreadable)} unreadable record(s)")
     _emit(payload, as_json=args.json, lines=lines)
     return 0
 

@@ -42,6 +42,7 @@ from agent_skill_improver.app.state import (
     STATE_FILE_MODE,
     SUBDIRS,
     StateStore,
+    UnreadableRecord,
 )
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.errors import SafetyRefusal
@@ -658,6 +659,52 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
 
         self.assertEqual(store.count("quarantine"), 1)
         self._assert_outside_untouched(outside)
+
+
+class UnreadableCandidateRecordsAreNamedTests(StateTreeHarness):
+    """``scan_candidates`` returns what read and what did not; nothing is dropped."""
+
+    def test_a_truncated_record_is_returned_as_unreadable_with_its_reason(self):
+        store = self.store()
+        store.ensure()
+        folder = store.dir("candidates")
+        write_text_atomic(
+            folder / "CAND-2026-01-01-01-tdd.json", '{"id": "CAND-2026-01-01-01-tdd", "sta'
+        )
+        write_text_atomic(folder / "CAND-2026-01-01-02-tdd.json", "[]")
+        scan = store.scan_candidates()
+        self.assertEqual(scan.readable, ())
+        self.assertEqual(
+            [u.path.name for u in scan.unreadable],
+            ["CAND-2026-01-01-01-tdd.json", "CAND-2026-01-01-02-tdd.json"],
+        )
+        self.assertIsInstance(scan.unreadable[0], UnreadableRecord)
+        self.assertIn("could not be read", scan.unreadable[0].reason)
+        self.assertIn("not a JSON object", scan.unreadable[1].reason)
+        self.assertEqual(store.list_candidates(), [], "the readable listing is unchanged")
+        self.assertEqual(
+            [u.to_dict()["path"] for u in store.unreadable_candidates()],
+            [
+                str(folder / "CAND-2026-01-01-01-tdd.json"),
+                str(folder / "CAND-2026-01-01-02-tdd.json"),
+            ],
+        )
+
+    def test_a_link_in_the_directory_is_a_foreign_entry_not_an_unreadable_record(self):
+        store = self.store()
+        store.ensure()
+        outside = self.root.parent / "keep.txt"
+        outside.write_text("keep me", encoding="utf-8")
+        (store.dir("candidates") / "planted.json").symlink_to(outside)
+        scan = store.scan_candidates()
+        self.assertEqual((scan.readable, scan.unreadable), ((), ()))
+        self.assertEqual(store.foreign_entries(), ["candidates/planted.json is a symlink"])
+
+    def test_the_control_an_empty_queue_scans_to_nothing_on_either_side(self):
+        store = self.store()
+        store.ensure()
+        scan = store.scan_candidates()
+        self.assertEqual((scan.readable, scan.unreadable), ((), ()))
 
 
 class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
