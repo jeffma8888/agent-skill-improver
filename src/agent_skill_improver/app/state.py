@@ -554,14 +554,38 @@ class StateStore:
         }
         return self._persist(path, lambda: write_json(path, payload))
 
+    def _deferred_path(self, record_id: str) -> Path:
+        return self.dir("deferred") / f"{keyed_name(record_id)}.json"
+
+    @staticmethod
+    def _read_deferred_attempts(path: Path) -> int:
+        """The attempt count a deferral file holds; 0 for anything that is not ours to read.
+
+        A link, a non-file or a record that does not parse is read as no
+        streak at all. Measured before: a link planted at the path made
+        ``defer`` raise ``StateUnreadable`` from inside the ingest handler,
+        which ended the whole run with no receipt; and a fresh deferral then
+        wrote through ``_persist``, which replaces the link rather than
+        following it, so the streak restarts in a file of our own.
+        """
+        if path.is_symlink() or not path.is_file():
+            return 0
+        try:
+            raw = _read_state_json(path)
+        except (ValueError, StateUnreadable):
+            return 0
+        if not isinstance(raw, dict):
+            # Valid JSON that is not an object (``[]``, ``"x"``, ``5``,
+            # ``null``) has no attempts to read; it is rewritten, not followed.
+            return 0
+        try:
+            return int(raw.get("attempts", 0))
+        except (ValueError, TypeError):
+            return 0
+
     def defer(self, record_id: str, *, stage: str, reason: str) -> Path:
-        path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
-        attempts = 1
-        if path.is_file():
-            try:
-                attempts = int(_read_state_json(path).get("attempts", 0)) + 1
-            except (ValueError, KeyError, TypeError):
-                attempts = 1
+        path = self._deferred_path(record_id)
+        attempts = self._read_deferred_attempts(path) + 1
         payload = {
             "schema": "asi.deferred.v1",
             "record_id": record_id,
@@ -574,26 +598,28 @@ class StateStore:
 
     def deferred_attempts(self, record_id: str) -> int:
         """How many consecutive runs have deferred this record; 0 when none has."""
-        path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
-        if not path.is_file():
-            return 0
-        try:
-            return int(_read_state_json(path).get("attempts", 0))
-        except (ValueError, KeyError, TypeError):
-            return 0
+        return self._read_deferred_attempts(self._deferred_path(record_id))
 
     def clear_deferred(self, record_id: str) -> None:
-        path = self.dir("deferred") / f"{keyed_name(record_id)}.json"
-        if path.is_file():
+        path = self._deferred_path(record_id)
+        # Only a regular file of our own is removed. A link at this path is a
+        # foreign entry: ``doctor`` names it and leaves it alone, and so does
+        # this (``is_file`` follows a link, so it is asked second).
+        if not path.is_symlink() and path.is_file():
             self._persist(path, path.unlink)
 
     def deferred_ids(self) -> list[str]:
         out: list[str] = []
         for path in sorted(self.dir("deferred").glob("*.json")):
-            try:
-                out.append(str(_read_state_json(path)["record_id"]))
-            except (ValueError, KeyError, StateUnreadable):
+            if path.is_symlink() or not path.is_file():
                 continue
+            try:
+                raw = _read_state_json(path)
+            except (ValueError, StateUnreadable):
+                continue
+            if not isinstance(raw, dict) or "record_id" not in raw:
+                continue
+            out.append(str(raw["record_id"]))
         return out
 
     def count(self, name: str) -> int:

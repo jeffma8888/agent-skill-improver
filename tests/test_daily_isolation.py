@@ -1367,6 +1367,85 @@ def _state_snapshot(root: Path) -> dict[str, str]:
     }
 
 
+class APlantedLinkInDeferredDoesNotEndTheRunTests(DailyHarness):
+    """Measured before: with the source down, run one deferred five records;
+    one deferral file replaced by a link to a file outside the tree made run
+    two raise ``StateUnreadable`` out of ``run_daily`` with no receipt written.
+    """
+
+    class Unreachable(FixtureConversationSource):
+        def fetch(self, thread_id):
+            raise SourceUnavailable("network is down")
+
+    def test_the_next_run_completes_writes_its_receipt_and_replaces_the_link(self):
+        config = self.env(max_defer_attempts=3)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str) -> dict:
+            return run_daily(
+                config,
+                source=self.Unreachable(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        first = run("2026-01-02")
+        deferred = sorted((config.state_dir / "deferred").glob("*.json"))
+        self.assertEqual(len(deferred), first["counts"]["records_deferred"])
+        self.assertGreater(len(deferred), 0)
+        victim = deferred[0]
+        outside = self.base / "keep.json"
+        outside.write_text(json.dumps({"record_id": "x", "attempts": 99}), encoding="utf-8")
+        victim.unlink()
+        victim.symlink_to(outside)
+
+        second = run("2026-01-03")
+        self.assertEqual(second["counts"]["records_deferred"], first["counts"]["records_deferred"])
+        self.assertEqual(len(list((config.state_dir / "receipts").glob("2026-01-03--*.json"))), 1)
+        self.assertFalse(victim.is_symlink(), "the write replaced the link with our own file")
+        self.assertEqual(json.loads(victim.read_text(encoding="utf-8"))["attempts"], 1)
+        self.assertEqual(json.loads(outside.read_text(encoding="utf-8"))["attempts"], 99)
+
+    def test_a_counter_holding_a_json_array_does_not_end_the_next_run(self):
+        # Measured by the cycle-67 audit: ``[]`` at a counter path raised
+        # ``AttributeError`` out of ``defer`` and the run ended with no receipt.
+        config = self.env(max_defer_attempts=3)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+
+        def run(day: str) -> dict:
+            return run_daily(
+                config,
+                source=self.Unreachable(config.source.fixtures_dir),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            ).to_dict()
+
+        first = run("2026-01-02")
+        deferred = sorted((config.state_dir / "deferred").glob("*.json"))
+        self.assertGreater(len(deferred), 0)
+        victim = deferred[0]
+        victim.write_text("[]", encoding="utf-8")
+
+        second = run("2026-01-03")
+        self.assertEqual(second["counts"]["records_deferred"], first["counts"]["records_deferred"])
+        self.assertEqual(len(list((config.state_dir / "receipts").glob("2026-01-03--*.json"))), 1)
+        self.assertEqual(json.loads(victim.read_text(encoding="utf-8"))["attempts"], 1)
+
+
 class DryRunPersistsNothingTests(DailyHarness):
     """``asi daily`` without ``--commit`` is documented as persisting nothing.
 

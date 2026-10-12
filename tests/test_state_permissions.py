@@ -43,6 +43,7 @@ from agent_skill_improver.app.state import (
     SUBDIRS,
     StateStore,
     UnreadableRecord,
+    keyed_name,
 )
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.errors import SafetyRefusal, StateUnreadable
@@ -728,6 +729,93 @@ class UnreadableCandidateRecordsAreNamedTests(StateTreeHarness):
         store.ensure()
         scan = store.scan_candidates()
         self.assertEqual((scan.readable, scan.unreadable), ((), ()))
+
+
+class DeferralBookkeepingStepsOverForeignEntriesTests(StateTreeHarness):
+    """A link planted where a deferral counter lives is read as no streak,
+    written over (never through) and never removed.
+
+    Measured before: ``deferred_attempts`` and ``defer`` raised
+    ``StateUnreadable`` on the link, and ``clear_deferred`` unlinked it.
+    """
+
+    def plant(self, store: StateStore, record_id: str) -> tuple[Path, Path]:
+        outside = self.root.parent / "keep.json"
+        outside.write_text(json.dumps({"record_id": record_id, "attempts": 99}), encoding="utf-8")
+        path = store.dir("deferred") / f"{keyed_name(record_id)}.json"
+        path.symlink_to(outside)
+        return path, outside
+
+    def test_a_link_reads_as_no_streak_and_claims_no_priority(self):
+        store = self.store()
+        store.ensure()
+        path, outside = self.plant(store, "rec-1")
+        self.assertEqual(store.deferred_attempts("rec-1"), 0)
+        self.assertEqual(store.deferred_ids(), [])
+        self.assertTrue(path.is_symlink(), "a read changes nothing")
+
+    def test_a_fresh_deferral_replaces_the_link_with_a_file_of_our_own(self):
+        store = self.store()
+        store.ensure()
+        path, outside = self.plant(store, "rec-1")
+        store.defer("rec-1", stage="ingest", reason="down")
+        self.assertFalse(path.is_symlink())
+        self.assertTrue(path.is_file())
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["attempts"], 1)
+        self.assertEqual(
+            json.loads(outside.read_text(encoding="utf-8"))["attempts"], 99, "not followed"
+        )
+        self.assertEqual(store.deferred_attempts("rec-1"), 1)
+        self.assertEqual(store.deferred_ids(), ["rec-1"])
+
+    def test_clearing_a_deferral_leaves_a_link_where_it_found_it(self):
+        store = self.store()
+        store.ensure()
+        path, outside = self.plant(store, "rec-1")
+        store.clear_deferred("rec-1")
+        self.assertTrue(path.is_symlink(), "a foreign entry is not ours to remove")
+        self.assertTrue(outside.is_file())
+
+    def test_a_record_that_does_not_parse_reads_as_no_streak_and_is_rewritten(self):
+        store = self.store()
+        store.ensure()
+        store.defer("rec-1", stage="ingest", reason="down")
+        path = store.dir("deferred") / f"{keyed_name('rec-1')}.json"
+        path.write_text("{garbage", encoding="utf-8")
+        self.assertEqual(store.deferred_attempts("rec-1"), 0)
+        self.assertEqual(store.deferred_ids(), [])
+        store.defer("rec-1", stage="ingest", reason="down")
+        self.assertEqual(store.deferred_attempts("rec-1"), 1)
+
+    def test_a_counter_holding_json_that_is_not_an_object_reads_as_no_streak_and_is_rewritten(
+        self,
+    ):
+        # Valid JSON, wrong shape: ``.get`` on a list, a string, a number or
+        # ``null`` raised ``AttributeError`` out of ``defer`` (measured by the
+        # cycle-67 audit, end to end: the daily run ended with no receipt).
+        store = self.store()
+        store.ensure()
+        path = store.dir("deferred") / f"{keyed_name('rec-1')}.json"
+        for planted in ("[]", '"x"', "5", "null", '{"attempts": "many"}'):
+            with self.subTest(planted=planted):
+                path.write_text(planted, encoding="utf-8")
+                self.assertEqual(store.deferred_attempts("rec-1"), 0)
+                self.assertEqual(store.deferred_ids(), [])
+                store.defer("rec-1", stage="ingest", reason="down")
+                self.assertEqual(store.deferred_attempts("rec-1"), 1)
+                self.assertEqual(store.deferred_ids(), ["rec-1"])
+
+    def test_the_control_a_genuine_deferral_counts_clears_and_is_removed(self):
+        store = self.store()
+        store.ensure()
+        path = store.dir("deferred") / f"{keyed_name('rec-1')}.json"
+        store.defer("rec-1", stage="ingest", reason="down")
+        store.defer("rec-1", stage="ingest", reason="down")
+        self.assertEqual(store.deferred_attempts("rec-1"), 2)
+        self.assertEqual(store.deferred_ids(), ["rec-1"])
+        store.clear_deferred("rec-1")
+        self.assertFalse(path.exists())
+        self.assertEqual(store.deferred_attempts("rec-1"), 0)
 
 
 class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
