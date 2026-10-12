@@ -513,7 +513,10 @@ class DocumentedRefusalsExist(unittest.TestCase):
 
     def test_the_lock_path_in_the_docs_is_the_one_the_code_uses(self) -> None:
         daily = (self.SRC / "app" / "daily.py").read_text(encoding="utf-8")
-        self.assertIn('state.dir("locks") / "daily.lock"', daily)
+        self.assertIn("RunLock(state.lock_path())", daily)
+        state = (self.SRC / "app" / "state.py").read_text(encoding="utf-8")
+        self.assertIn('LOCK_NAME = "daily.lock"', state)
+        self.assertIn('self.dir("locks") / LOCK_NAME', state)
         ops = self.OPERATIONS.read_text(encoding="utf-8")
         self.assertIn("`state/locks/daily.lock`", ops)
         self.assertNotIn("`state/lock`", ops, "the old, wrong lock path")

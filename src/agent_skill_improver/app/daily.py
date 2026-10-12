@@ -210,7 +210,7 @@ def run_daily(
     receipt.caps = config.caps.to_dict()
     receipt.isolation = isolation.to_dict()
 
-    with RunLock(state.dir("locks") / "daily.lock"), AutomationMarker():
+    with RunLock(state.lock_path()), AutomationMarker():
         digest_before = skill_store.tree_digest()
         rubrics: dict[str, Rubric] = {r.id: r for r in config.rubrics}
         known_skill_ids = skill_store.known_skill_ids()

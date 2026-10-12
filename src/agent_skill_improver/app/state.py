@@ -163,6 +163,9 @@ class RecordStatus:
         }
 
 
+#: The single run lock ``daily`` takes, under the ``locks`` subdirectory.
+LOCK_NAME = "daily.lock"
+
 # Field and expected type; a missing field defaults to the type's empty value.
 # The shapes ``run_daily`` relies on when it merges a day's checkpoint; anything
 # else is refused by name in ``read_checkpoint``.
@@ -638,6 +641,29 @@ class StateStore:
         # Only what a read would return: a symlinked leaf is refused by every
         # reader, so counting it would promise a record no command can show.
         return sum(1 for p in self.dir(name).glob("*.json") if p.is_file() and not p.is_symlink())
+
+    # -- run lock --------------------------------------------------------
+    def lock_path(self) -> Path:
+        return self.dir("locks") / LOCK_NAME
+
+    def lock_entry_problem(self) -> str | None:
+        """Why ``daily`` would refuse what sits at the lock path, or None.
+
+        None for an absent path or a regular file (the lock is taken with
+        ``flock``, so a file left by a finished run is not a problem). Measured
+        before: a link or a directory at the path left ``doctor`` at ``ready``
+        (a directory is not even a foreign entry) while the next run refused.
+        """
+        path = self.lock_path()
+        if path.is_symlink():
+            return f"the run lock path {path} is a symlink"
+        if not path.exists():
+            return None
+        if path.is_dir():
+            return f"the run lock path {path} is a directory"
+        if not path.is_file():
+            return f"the run lock path {path} is not a regular file"
+        return None
 
     # -- checkpoints -----------------------------------------------------
     def checkpoint_path(self, day: str) -> Path:

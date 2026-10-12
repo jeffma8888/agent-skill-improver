@@ -352,6 +352,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"{'a symlink' if todays.is_symlink() else 'something that is not a regular file'}"
                 ", which `daily` refuses to read; remove it if you did not put it there"
             )
+    # The run lock is the first thing `daily` touches. A link, a directory or a
+    # fifo there is refused by name (a directory is not even a foreign entry,
+    # so the left-alone warning would not mention it). Measured before: both
+    # left the verdict at ready while the next run exited 3.
+    # Order matters: ``is_dir`` follows a symlinked ``locks``, and only the
+    # ``layout_problems`` term before it keeps ``lock_entry_problem`` (whose
+    # ``dir()`` refuses a symlinked ancestor) from being asked through one.
+    if state_present and not layout_problems and (config.state_dir / "locks").is_dir():
+        lock_problem = state.lock_entry_problem()
+        if lock_problem:
+            problems.append(
+                f"{lock_problem}, which `daily` refuses to use as its lock; remove the entry "
+                "if you did not put it there"
+            )
 
     # The isolation decision comes BEFORE anything touches the source, so
     # `doctor` on a host with no sandbox mechanism reports the refusal rather

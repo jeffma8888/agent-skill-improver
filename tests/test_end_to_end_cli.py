@@ -1009,6 +1009,63 @@ class ACheckpointDailyWouldRefuseIsNamedByDoctorTests(unittest.TestCase):
         self.assertFalse(any("checkpoint" in w for w in payload["warnings"] + payload["problems"]))
 
 
+class AForeignEntryAtTheLockPathIsNamedByDoctorTests(unittest.TestCase):
+    """The run lock is the first thing ``daily`` touches. Measured before: a
+    link at ``state/locks/daily.lock`` left ``doctor`` at ``ready`` (one
+    left-alone WARN) and a directory there was not even a warning, while the
+    next ``daily --commit`` exited 3 for the link and 70, with a traceback,
+    for the directory.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.cfg = ["--config", str(build_env(self.base, seed="lock-doctor"))]
+        ready = run_cli([*self.cfg, "--json", "doctor"])
+        assert ready.returncode == RC_OK, ready.stderr
+        self.lock = self.base / "state" / "locks" / "daily.lock"
+        self.lock.parent.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def assert_problem_then_refusal(self, expect: str) -> None:
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, 1, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertTrue(
+            any(f"the run lock path {self.lock} is {expect}" in p for p in payload["problems"]),
+            payload["problems"],
+        )
+        as_text = run_cli([*self.cfg, "doctor"])
+        self.assertIn(f"PROBLEM  the run lock path {self.lock} is {expect}", as_text.stdout)
+        daily = run_cli([*self.cfg, "daily", "--commit"])
+        self.assertEqual(daily.returncode, RC_REFUSED, daily.stderr)
+        self.assertIn(str(self.lock), daily.stderr)
+        self.assertNotIn("Traceback", daily.stderr)
+
+    def test_a_link_at_the_lock_path(self):
+        outside = self.base / "keep"
+        outside.write_text("", encoding="utf-8")
+        self.lock.symlink_to(outside)
+        self.assert_problem_then_refusal("a symlink")
+        self.assertTrue(self.lock.is_symlink(), "neither command touched it")
+
+    def test_a_directory_at_the_lock_path(self):
+        self.lock.mkdir()
+        self.assert_problem_then_refusal("a directory")
+        self.assertTrue(self.lock.is_dir(), "neither command touched it")
+
+    def test_the_control_the_lock_file_a_finished_run_leaves_is_not_reported(self):
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        self.assertTrue(self.lock.is_file())
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertFalse(any("run lock" in p for p in payload["problems"] + payload["warnings"]))
+
+
 class ReadOnlyCommandsTests(unittest.TestCase):
     """README's command table says `skills`, `rubrics`, `discover`, `candidates`,
     `review` and `scheduler-template` write nothing. Measured through the real

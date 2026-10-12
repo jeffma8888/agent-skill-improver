@@ -62,8 +62,11 @@ does not parse, or parses to the wrong shape, is listed under
 refuses by name before it scores anything, and another day's is a `WARN`, because
 only `daily --day` for that day would. A foreign entry at today's checkpoint path
 is a `PROBLEM` for the same reason: it is the next run's first read, and a read
-refuses it. Both reads leave the file as found; the remedy in each reason is to
-move it aside or repair it by hand.
+refuses it. The run lock, `state/locks/daily.lock`, is the very first thing `daily`
+touches, so a link, a directory or a fifo at that path is a `PROBLEM` too (`daily`
+refuses it by name; a regular file a finished run left behind is not a problem, the
+lock is `flock`, not the file). Every one of these reads leaves the entry as found;
+the remedy in each reason is to move it aside or repair it by hand.
 
 ## Exit codes
 
@@ -269,10 +272,11 @@ second run finds the previous text already in place and reports
 **A run crashed mid-pass.** Re-run it. The day key makes the pass idempotent:
 existing records are re-used rather than re-scored. Nothing needs cleaning up.
 
-**A stale lock.** `state/locks/daily.lock` is released when the process exits. If
-a machine died hard, remove the file — but check first that no `asi` process is
-running, because two concurrent runs interleaving writes is exactly what the lock
-exists to prevent.
+**A stale lock.** `state/locks/daily.lock` is an `flock`, released by the kernel
+when the process exits, however it exits; the file that remains is inert and
+`doctor` does not flag it. If `daily` reports `LockHeld`, another `asi` process is
+alive and holds it: find it before anything else, because two concurrent runs
+interleaving writes is exactly what the lock exists to prevent.
 
 **The queue is full and runs keep standing down.** That is the backlog guard
 working. Review or discard candidates, or raise `max_open_candidates` if you have

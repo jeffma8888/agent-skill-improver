@@ -8,6 +8,7 @@ thing that grants or denies the lock.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import stat
@@ -30,18 +31,31 @@ class RunLock:
         # fifo precreated at the path would otherwise park the process here.
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NONBLOCK", 0)
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        if not nofollow and self.path.is_symlink():
+        # ``os.path.islink`` rather than ``Path.is_symlink``: the latter raises on
+        # an unreadable parent, and this is asked inside an error handler.
+        if not nofollow and os.path.islink(self.path):
             raise SafetyRefusal(
                 f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
             )
         try:
             fd = os.open(str(self.path), flags | nofollow, 0o600)
         except OSError as exc:
-            if self.path.is_symlink():
+            if os.path.islink(self.path):
                 raise SafetyRefusal(
                     f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
                 ) from exc
-            raise
+            # A directory at the path (``IsADirectoryError``) is the same refusal
+            # as a fifo: not this tool's file, and the advice is to remove it. A
+            # path this process cannot open for another reason (no space, a
+            # read-only or unreadable directory) is refused by name too, with
+            # no advice to remove anything, since nothing foreign is there.
+            # Measured before: a directory escaped as the bare ``OSError`` and
+            # the run ended with exit 70 and a traceback.
+            foreign = exc.errno in (errno.EISDIR, errno.ENOTDIR, errno.ELOOP)
+            raise SafetyRefusal(
+                f"refusing to use {self.path} as a run lock: it could not be opened ({exc})."
+                + (" Remove the entry at that path if you did not put it there." if foreign else "")
+            ) from exc
         # Judged before anything is done to it: a fifo or a device at the lock
         # path is not this tool's file, so its mode is not ours to set, a read
         # of it could wait forever and a write to it would go who knows where.

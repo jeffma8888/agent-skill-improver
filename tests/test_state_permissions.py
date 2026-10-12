@@ -30,6 +30,7 @@ the target is not a refusal.
 from __future__ import annotations
 
 import datetime
+import errno
 import json
 import os
 import stat
@@ -1144,6 +1145,70 @@ class LockFileTests(StateTreeHarness):
         self.assertIn("not a regular file", str(ctx.exception))
         self.assertTrue(stat.S_ISFIFO(os.lstat(path).st_mode), "the entry was not replaced")
         self.assertEqual(oct(mode_of(path)), oct(0o644), "the fifo's mode is not ours to set")
+
+    def test_a_directory_at_the_lock_path_is_refused_by_name_not_a_traceback(self):
+        # Measured before: os.open on the directory raised IsADirectoryError,
+        # re-raised bare, and `daily` ended with exit 70 and a traceback.
+        from agent_skill_improver.app.lock import RunLock
+
+        store = self.store()
+        store.ensure()
+        path = store.lock_path()
+        path.mkdir()
+        with self.assertRaises(SafetyRefusal) as ctx:
+            with RunLock(path):
+                pass
+        self.assertIn(str(path), str(ctx.exception))
+        self.assertIn("could not be opened", str(ctx.exception))
+        self.assertIn("Remove the entry", str(ctx.exception), "a directory is foreign")
+        self.assertTrue(path.is_dir(), "the entry was not replaced")
+
+    def test_a_lock_path_that_cannot_be_opened_for_another_reason_is_refused_without_that_advice(
+        self,
+    ):
+        # No space, a read-only or unreadable directory: refused by name, but
+        # nothing foreign sits at the path, so nobody is told to remove it.
+        from unittest.mock import patch
+
+        from agent_skill_improver.app.lock import RunLock
+
+        store = self.store()
+        store.ensure()
+        path = store.lock_path()
+        for code in (errno.ENOSPC, errno.EROFS, errno.EACCES):
+            with self.subTest(errno=errno.errorcode[code]):
+                with patch(
+                    "agent_skill_improver.app.lock.os.open",
+                    side_effect=OSError(code, os.strerror(code), str(path)),
+                ):
+                    with self.assertRaises(SafetyRefusal) as ctx:
+                        with RunLock(path):
+                            pass
+                self.assertIn(str(path), str(ctx.exception))
+                self.assertIn("could not be opened", str(ctx.exception))
+                self.assertNotIn("Remove the entry", str(ctx.exception))
+                self.assertFalse(path.exists(), "nothing was created")
+
+    def test_lock_entry_problem_names_what_daily_would_refuse_and_nothing_else(self):
+        store = self.store()
+        store.ensure()
+        path = store.lock_path()
+        self.assertEqual(path, store.root / "locks" / "daily.lock")
+        self.assertIsNone(store.lock_entry_problem(), "absent is fine")
+        path.write_text("pid=1\n", encoding="utf-8")
+        self.assertIsNone(store.lock_entry_problem(), "a file left by a finished run is fine")
+        path.unlink()
+        path.symlink_to(self.root.parent / "nowhere")
+        self.assertEqual(store.lock_entry_problem(), f"the run lock path {path} is a symlink")
+        path.unlink()
+        path.mkdir()
+        self.assertEqual(store.lock_entry_problem(), f"the run lock path {path} is a directory")
+        path.rmdir()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(path)
+            self.assertEqual(
+                store.lock_entry_problem(), f"the run lock path {path} is not a regular file"
+            )
 
     def test_the_run_lock_is_0600_even_when_it_already_existed_wider(self):
         from agent_skill_improver.app.lock import RunLock
