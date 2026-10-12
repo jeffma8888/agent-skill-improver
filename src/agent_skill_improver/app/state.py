@@ -162,6 +162,17 @@ class RecordStatus:
         }
 
 
+# Field and expected type; a missing field defaults to the type's empty value.
+# The shapes ``run_daily`` relies on when it merges a day's checkpoint; anything
+# else is refused by name in ``read_checkpoint``.
+CHECKPOINT_FIELDS: tuple[tuple[str, type], ...] = (
+    ("runs", int),
+    ("records", dict),
+    ("skills", dict),
+    ("candidates", list),
+)
+
+
 class StateStore:
     """Owns the state directory layout. Every write is atomic.
 
@@ -644,11 +655,37 @@ class StateStore:
                 "completed": False,
             }
         data = _read_state_object(path, what="checkpoint")
-        data.setdefault("records", {})
-        data.setdefault("skills", {})
-        data.setdefault("candidates", [])
-        data.setdefault("runs", 0)
+        # A parsed object whose fields have the wrong shape is refused by name
+        # like a truncated one. Measured before: ``"records": []`` escaped as
+        # ``AttributeError`` from ``processed_record_ids`` at the top of the
+        # pass, ``"skills": 5`` as ``TypeError`` from the checkpoint update at
+        # its end; a traceback either way, and no file named.
+        for key, kind in CHECKPOINT_FIELDS:
+            value = data.setdefault(key, kind())
+            if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+                raise self._checkpoint_shape_refusal(
+                    path, key, f"holds {type(value).__name__}, not {kind.__name__}"
+                )
+        # The candidate ids are sorted and set-merged at the end of the pass, after
+        # the receipt is on disk; an entry that is not a string failed there as a
+        # bare ``TypeError``. Checked here, with the container, before anything runs.
+        odd = [c for c in data["candidates"] if not isinstance(c, str)]
+        if odd:
+            raise self._checkpoint_shape_refusal(
+                path,
+                "candidates",
+                f"holds {len(odd)} entr{'y' if len(odd) == 1 else 'ies'} that are not "
+                f"strings (first: {type(odd[0]).__name__})",
+            )
         return data
+
+    @staticmethod
+    def _checkpoint_shape_refusal(path: Path, key: str, what: str) -> StateUnreadable:
+        return StateUnreadable(
+            f"refusing to use the checkpoint record {path}: field {key!r} {what}. A "
+            "hand-edited state file is never guessed at; move it aside to start the day "
+            "from a fresh checkpoint."
+        )
 
     def write_checkpoint(self, day: str, payload: dict[str, Any]) -> Path:
         path = self.checkpoint_path(day)

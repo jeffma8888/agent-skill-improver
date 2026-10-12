@@ -818,6 +818,92 @@ class DeferralBookkeepingStepsOverForeignEntriesTests(StateTreeHarness):
         self.assertEqual(store.deferred_attempts("rec-1"), 0)
 
 
+class CheckpointShapeIsCheckedOnReadTests(StateTreeHarness):
+    """``read_checkpoint`` hands back only the shapes ``run_daily`` merges:
+    ``runs`` an int, ``records`` and ``skills`` objects, ``candidates`` a list.
+    A missing field is filled with the empty value; a present field of another
+    shape is refused by name, like a truncated record.
+    """
+
+    def test_missing_fields_are_filled_with_empty_values(self):
+        store = self.store()
+        store.ensure()
+        store.checkpoint_path("2026-01-02").write_text('{"schema": "asi.checkpoint.v1"}')
+        data = store.read_checkpoint("2026-01-02")
+        self.assertEqual(data["runs"], 0)
+        self.assertEqual(data["records"], {})
+        self.assertEqual(data["skills"], {})
+        self.assertEqual(data["candidates"], [])
+
+    def test_each_default_is_a_fresh_object_not_shared_between_reads(self):
+        store = self.store()
+        store.ensure()
+        store.checkpoint_path("2026-01-02").write_text("{}")
+        store.checkpoint_path("2026-01-03").write_text("{}")
+        first = store.read_checkpoint("2026-01-02")
+        first["records"]["x"] = {"status": "scored"}
+        first["candidates"].append("c")
+        second = store.read_checkpoint("2026-01-03")
+        self.assertEqual(second["records"], {})
+        self.assertEqual(second["candidates"], [])
+
+    def test_a_field_of_the_wrong_shape_is_refused_naming_file_and_field(self):
+        store = self.store()
+        store.ensure()
+        path = store.checkpoint_path("2026-01-02")
+        for field, planted in (
+            ("runs", "1"),
+            ("runs", True),
+            ("records", []),
+            ("skills", 5),
+            ("candidates", {}),
+            ("candidates", None),
+        ):
+            with self.subTest(field=field, planted=planted):
+                path.write_text(json.dumps({field: planted}), encoding="utf-8")
+                with self.assertRaises(StateUnreadable) as caught:
+                    store.read_checkpoint("2026-01-02")
+                message = str(caught.exception)
+                self.assertIn(str(path), message)
+                self.assertIn(repr(field), message)
+                self.assertIn(type(planted).__name__, message)
+                with self.assertRaises(StateUnreadable):
+                    store.processed_record_ids("2026-01-02")
+
+    def test_a_candidate_entry_that_is_not_a_string_is_refused_with_the_container(self):
+        # The ids are sorted and set-merged at the end of a pass; measured by the
+        # cycle-68 audit: [1, "a"] and [null] raised TypeError there, after the
+        # receipt was on disk, and [{"id": "a"}] was unhashable.
+        store = self.store()
+        store.ensure()
+        path = store.checkpoint_path("2026-01-02")
+        for planted in ([1, "a"], [None], [{"id": "a"}], ["a", 2, 3]):
+            with self.subTest(planted=planted):
+                path.write_text(json.dumps({"candidates": planted}), encoding="utf-8")
+                with self.assertRaises(StateUnreadable) as caught:
+                    store.read_checkpoint("2026-01-02")
+                message = str(caught.exception)
+                self.assertIn(str(path), message)
+                self.assertIn("'candidates'", message)
+                self.assertIn("not strings", message)
+        path.write_text(json.dumps({"candidates": ["a", "b"]}), encoding="utf-8")
+        self.assertEqual(store.read_checkpoint("2026-01-02")["candidates"], ["a", "b"])
+
+    def test_the_control_a_well_formed_checkpoint_reads_back_as_written(self):
+        store = self.store()
+        store.ensure()
+        payload = {
+            "schema": "asi.checkpoint.v1",
+            "runs": 2,
+            "records": {"a": {"status": "scored"}},
+            "skills": {"tdd": {"status": "proposed"}},
+            "candidates": ["c1"],
+        }
+        store.write_checkpoint("2026-01-02", payload)
+        self.assertEqual(store.read_checkpoint("2026-01-02"), payload)
+        self.assertEqual(store.processed_record_ids("2026-01-02"), {"a"})
+
+
 class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
     """``doctor`` runs on a tree nobody has ensured yet, so it is the command most
     likely to meet this layout first. It must report it and repair nothing."""

@@ -830,7 +830,7 @@ def _finish(
     # single gate is the store, not a flag check at each call site.
     state.write_receipt(run_day, receipt.to_dict(), dry_run=dry_run)
     checkpoint = state.read_checkpoint(run_day)
-    checkpoint["runs"] = int(checkpoint.get("runs", 0)) + 1
+    checkpoint["runs"] = checkpoint["runs"] + 1  # read_checkpoint guarantees an int
     records = dict(checkpoint.get("records", {}))
     records.update(receipt.records)
     checkpoint["records"] = records

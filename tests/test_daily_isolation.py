@@ -1176,6 +1176,51 @@ class StateCorruptionTests(DailyHarness):
             "the corrupt file is left for the operator, never overwritten",
         )
 
+    def test_a_checkpoint_whose_fields_have_the_wrong_shape_is_refused_by_name(self):
+        """A checkpoint that parses but holds ``"records": []`` used to escape as
+        ``AttributeError`` from ``processed_record_ids`` at the top of the pass;
+        ``"skills": 5`` as ``TypeError`` from the checkpoint update at its end.
+        Same remedy as a truncated one: a refusal naming the file and the field.
+        """
+        from agent_skill_improver.errors import StateUnreadable
+
+        for field, planted in (
+            ("records", []),
+            ("skills", 5),
+            ("candidates", "x"),
+            ("candidates", [1, "a"]),
+            ("runs", "1"),
+        ):
+            with self.subTest(field=field, planted=planted):
+                config = self.env()
+                state = StateStore(config.state_dir, clock=frozen_clock())
+                state.ensure()
+                bad = state.checkpoint_path(DAY)
+                text = json.dumps({"schema": "asi.checkpoint.v1", "day": DAY, field: planted})
+                bad.write_text(text, encoding="utf-8")
+                store = FilesystemSkillStore(
+                    config.skill_roots, read_only=True, protected_paths=config.protected_paths
+                )
+                with self.assertRaises(StateUnreadable) as caught:
+                    run_daily(
+                        config,
+                        source=FixtureConversationSource(config.source.fixtures_dir),
+                        runner=InProcessRunner(),
+                        skill_store=store,
+                        state=state,
+                        clock=frozen_clock(),
+                        day=DAY,
+                        commit=True,
+                    )
+                message = str(caught.exception)
+                self.assertIn(str(bad), message, "the refusal names the file")
+                self.assertIn(repr(field), message, "and the field")
+                self.assertEqual(bad.read_text(encoding="utf-8"), text, "left for the operator")
+                self.assertFalse(
+                    state.receipt_path(DAY, dry_run=False).exists(),
+                    "refused before anything was scored, so no receipt claims otherwise",
+                )
+
     def test_the_receipt_reaches_disk_before_the_checkpoint_is_touched(self):
         """If the checkpoint update fails, the run still fails, but the receipt
         describing what the run did is already on disk. The reverse order
