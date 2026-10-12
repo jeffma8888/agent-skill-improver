@@ -37,6 +37,7 @@ whole argument rather than passing an empty string.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -68,6 +69,7 @@ __all__ = [
     "DiscoveryPage",
     "parse_discovery",
     "parse_discovery_output",
+    "program_problem",
     "render_argv",
 ]
 
@@ -96,6 +98,33 @@ _HEADER_LINE = re.compile(
     r'^\s*(?P<number>\d+)\.\s+"(?P<title>.*)"\s*\((?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)'
 )
 _WORKSPACE_LINE = re.compile(r"^\s*Workspace:\s*(?P<path>.+?)\s*$")
+
+
+def program_problem(program: str) -> str:
+    """Why ``program`` could not be started as a subprocess, or "" when it can.
+
+    Mirrors how the process will be started: a bare name is looked up on PATH
+    and nowhere else (a file of that name in the working directory does not
+    count); a path is taken as given and must be a regular file this user may
+    execute. Measured before: a command at mode 644, and a directory given by
+    mistake, both passed a preflight that asked only whether the path existed,
+    and the run then died as an internal error.
+    """
+    if shutil.which(program) is not None:
+        return ""
+    path = Path(program)
+    if os.sep not in program:
+        return "not found on PATH"
+    if not path.exists():
+        return "not found"
+    if path.is_dir():
+        return "is a directory, not a program"
+    if not path.is_file():
+        return "is not a regular file"
+    if not os.access(path, os.X_OK):
+        mode = path.stat().st_mode & 0o777
+        return f"exists but is not executable (mode {mode:03o}); chmod +x it"
+    return ""
 
 
 def render_argv(template: Sequence[str], values: dict[str, str]) -> list[str]:
@@ -399,11 +428,18 @@ class ConversationCliSource:
             raise SourceUnavailable(
                 "[source].discovery_argv is empty, so there is no command to run"
             )
-        if shutil.which(exe) is None and not Path(exe).exists():
-            raise SourceUnavailable(
-                f"conversation command {exe!r} not found on PATH; set [source].discovery_argv "
-                "and [source].export_argv in your config"
-            )
+        if not self.export_argv:
+            raise SourceUnavailable("[source].export_argv is empty, so there is no command to run")
+        # Both programs are checked: the export command may be a different
+        # program from the discovery one, and a run that discovers and then
+        # cannot export has already spent the discovery.
+        for program in dict.fromkeys((exe, self.export_argv[0])):
+            problem = program_problem(program)
+            if problem:
+                raise SourceUnavailable(
+                    f"conversation command {program!r} {problem}; set [source].discovery_argv "
+                    "and [source].export_argv in your config"
+                )
 
     def _run(self, argv: Sequence[str], *, record_id: str | None = None) -> str:
         """Run the conversation command with its output bounded while read.
@@ -424,7 +460,12 @@ class ConversationCliSource:
                 timeout_seconds=self.timeout_seconds,
                 max_output_bytes=self.max_export_bytes,
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:
+            # Not found, not executable, a directory, a wrong binary format: the
+            # program could not be started, which is the source, not a record,
+            # and not a bug in this tool. Measured before: a configured command
+            # at mode 644 passed preflight (the file exists) and then ended the
+            # run as an internal error with a traceback.
             raise SourceUnavailable(f"cannot execute {argv[0]!r}: {exc}") from exc
         except RunTimedOut as exc:
             raise SourceUnavailable(f"{shown} timed out after {self.timeout_seconds}s") from exc

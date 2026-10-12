@@ -87,6 +87,12 @@ the remedy in each reason is to move it aside or repair it by hand.
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
 "the tool declined and told you why", and 70 as "file a bug": no crash inside a
 command borrows 1, so a negative answer from `doctor` or `selftest` stays unambiguous.
+A configured conversation command that cannot be started is a 3 naming the
+command and why, for the discovery program and the export program alike. Not on
+PATH, not executable or a directory is caught by the source preflight, so
+`doctor` reports it (exit 1, its negative verdict) with the file mode when the
+executable bit is what is missing; a wrong binary format is only seen when the
+start itself fails, and is the same 3.
 
 ## The daily pass
 

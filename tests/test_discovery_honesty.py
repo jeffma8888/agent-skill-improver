@@ -22,6 +22,7 @@ from agent_skill_improver.adapters.conversation_cli import (
     ConversationCliSource,
     parse_discovery,
     parse_discovery_output,
+    program_problem,
 )
 from agent_skill_improver.adapters.fixture_source import FixtureConversationSource
 from agent_skill_improver.app.state import StateStore
@@ -455,6 +456,82 @@ class SourceOutputBoundsTests(unittest.TestCase):
         source = self._source(program, str(fixture))
         conversation = source.fetch("thread-4")
         self.assertTrue(conversation.messages, "the fixture export must normalize to messages")
+
+
+class AProgramThatCannotStartIsTheSourceNotABugTests(unittest.TestCase):
+    """Measured before: a configured conversation command at mode 644, or a
+    directory given by mistake, passed ``preflight`` (the path existed) and the
+    run then ended with "internal error: this is a bug in asi" and a traceback,
+    exit 70, for what is a configuration problem. ``preflight`` now asks what
+    the subprocess start will ask, for both programs, and ``_run`` turns any
+    failure to start into the source being unavailable (exit 3, named).
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.not_executable = root / "conversation-cli"
+        self.not_executable.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+        os.chmod(self.not_executable, 0o644)
+        self.a_directory = root / "conversation-cli.d"
+        self.a_directory.mkdir()
+
+    @staticmethod
+    def _source(discovery_program: str, export_program: str) -> ConversationCliSource:
+        return ConversationCliSource(
+            discovery_argv=(discovery_program, "list", "{since}", "{limit}"),
+            export_argv=(export_program, "export", "{thread_id}"),
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root may execute a mode-644 file")
+    def test_a_program_that_is_not_executable_is_refused_at_preflight_with_its_mode(self):
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(str(self.not_executable), sys.executable).preflight()
+        message = str(ctx.exception)
+        self.assertIn(f"conversation command {str(self.not_executable)!r}", message)
+        self.assertIn("exists but is not executable (mode 644); chmod +x it", message)
+        self.assertIn("[source].discovery_argv", message)
+
+    def test_a_directory_given_as_the_program_is_refused_at_preflight(self):
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(str(self.a_directory), sys.executable).preflight()
+        self.assertIn("is a directory, not a program", str(ctx.exception))
+
+    def test_the_export_program_is_checked_too_not_only_discovery(self):
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(sys.executable, str(self.a_directory)).preflight()
+        message = str(ctx.exception)
+        self.assertIn(f"conversation command {str(self.a_directory)!r}", message)
+        self.assertIn("is a directory, not a program", message)
+        with self.assertRaises(SourceUnavailable) as ctx:
+            ConversationCliSource(
+                discovery_argv=(sys.executable, "{since}", "{limit}"), export_argv=()
+            ).preflight()
+        self.assertIn("[source].export_argv is empty", str(ctx.exception))
+
+    def test_a_bare_name_is_looked_up_on_path_and_nowhere_else(self):
+        self.assertEqual(program_problem("asi-no-such-program-cycle-81"), "not found on PATH")
+        self.assertEqual(program_problem(sys.executable), "")
+        self.assertEqual(program_problem(str(self.a_directory.parent / "missing")), "not found")
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source("asi-no-such-program-cycle-81", sys.executable).preflight()
+        self.assertIn("'asi-no-such-program-cycle-81' not found on PATH", str(ctx.exception))
+
+    @unittest.skipIf(os.geteuid() == 0, "root may execute a mode-644 file")
+    def test_a_start_that_fails_after_preflight_is_the_source_unavailable_not_a_crash(self):
+        # preflight skipped on purpose: the file may lose its bit between the
+        # check and the run, and the result must still be a named refusal.
+        source = self._source(str(self.not_executable), str(self.not_executable))
+        with self.assertRaises(SourceUnavailable) as ctx:
+            source.discover_page(since="1d", limit=5)
+        self.assertIn(f"cannot execute {str(self.not_executable)!r}", str(ctx.exception))
+        self.assertIn("Permission denied", str(ctx.exception))
+        with self.assertRaises(SourceUnavailable):
+            source.fetch("1700000000101-1")
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(str(self.a_directory), sys.executable).discover_page(since="1d", limit=5)
+        self.assertIn("cannot execute", str(ctx.exception))
 
 
 class ThreadIdIsAnArgumentNotAnOptionTests(unittest.TestCase):
