@@ -31,8 +31,9 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_JUDGEMENT, SCHEMA_VALIDATION
-from .redaction import quoted_value
+from .redaction import kept_prose, quoted_value
 from .rubric import Verdict
+from .scoring import MAX_RATIONALE_CHARS
 
 ARM_BASELINE = "baseline"
 ARM_CANDIDATE = "candidate"
@@ -219,12 +220,11 @@ def parse_judgement(payload: Any, *, case: ReplayCase, arms: Mapping[str, str]) 
             f"judgement 'preferred' must be 'A', 'B' or 'tie', got {quoted_value(label)}"
         )
     arm = "tie" if label == "tie" else arms[label]
-    rationale = payload.get("rationale")
     return Judgement(
         case=case,
         preferred_label=str(label),
         preferred_arm=arm,
-        rationale=rationale if isinstance(rationale, str) else "",
+        rationale=kept_prose(payload.get("rationale"), limit=MAX_RATIONALE_CHARS),
     )
 
 

@@ -18,7 +18,7 @@ from typing import Any, Mapping
 
 from .. import SCHEMA_SCORECARD
 from .conversation import EvidenceRef, NormalizedConversation
-from .redaction import quoted_value
+from .redaction import kept_prose, quoted_value
 from .rubric import Rubric, Verdict
 
 MAX_RATIONALE_CHARS = 2000
@@ -254,7 +254,4 @@ def _build_score(
 
 
 def _clip(value: Any) -> str:
-    text = value if isinstance(value, str) else ""
-    if len(text) > MAX_RATIONALE_CHARS:
-        return text[:MAX_RATIONALE_CHARS] + " ...[clipped]"
-    return text
+    return kept_prose(value, limit=MAX_RATIONALE_CHARS)

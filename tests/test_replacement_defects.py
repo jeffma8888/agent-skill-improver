@@ -160,3 +160,54 @@ class AProposalRefusalQuotesTheModelBoundedTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             parse_proposal({"schema": "asi.wrong.v1"})
         self.assertIn("got 'asi.wrong.v1'", str(ctx.exception))
+
+
+class ImproverProseACandidateKeepsIsMaskedTests(unittest.TestCase):
+    """The hypothesis, intended change, risks and rollback are the improver's
+    own words, persisted in the candidate and printed by review. They are kept
+    masked; the replacement text is not, because a masked replacement would be
+    a silently different document (one that introduces a credential is refused
+    in the pipeline instead)."""
+
+    def _proposal(self, **fields):
+        from agent_skill_improver import SCHEMA_PROPOSAL
+        from agent_skill_improver.domain.candidate import parse_proposal
+
+        payload = {
+            "schema": SCHEMA_PROPOSAL,
+            "target_skill_id": "tdd",
+            "hypothesis": "h",
+            "intended_change": "i",
+            "risks": ["r"],
+            "rollback": "b",
+            "new_skill_text": "---\nname: tdd\n---\nbody\n",
+        }
+        payload.update(fields)
+        return parse_proposal(payload)
+
+    def test_every_prose_field_is_kept_masked(self) -> None:
+        key = "gh" + "p_" + "L" * 24
+        proposal = self._proposal(
+            hypothesis=f"the transcript shows {key}",
+            intended_change=f"drop {key} from the example",
+            risks=["none", f"leaks {key}"],
+            rollback=f"restore {key}",
+            addressed_criterion_ids=["c1", key],
+        )
+        for text in (
+            proposal.hypothesis,
+            proposal.intended_change,
+            proposal.rollback,
+            *proposal.risks,
+            *proposal.addressed_criterion_ids,
+        ):
+            self.assertNotIn(key, text)
+        self.assertEqual(proposal.hypothesis, "the transcript shows [REDACTED:github-token]")
+        self.assertEqual(proposal.risks, ("none", "leaks [REDACTED:github-token]"))
+
+    def test_the_replacement_text_is_kept_as_the_model_wrote_it(self) -> None:
+        key = "AK" + "IA" + "M" * 16
+        text = f"---\nname: tdd\n---\nexample key {key}\n"
+        proposal = self._proposal(new_skill_text=text)
+        self.assertEqual(proposal.new_skill_text, text)
+        self.assertEqual(proposal.hypothesis, "h", "harmless prose is kept as it was")

@@ -156,6 +156,41 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class KeptProseTests(unittest.TestCase):
+    """``kept_prose`` is the one way a record keeps a model's own words."""
+
+    def test_harmless_prose_is_kept_as_it_was_and_a_non_string_as_nothing(self) -> None:
+        from agent_skill_improver.domain.redaction import kept_prose
+
+        self.assertEqual(
+            kept_prose("the skill never says when to stop"), "the skill never says when to stop"
+        )
+        self.assertEqual(kept_prose(None), "")
+        self.assertEqual(kept_prose(["a"]), "")
+        self.assertEqual(kept_prose("x" * 50, limit=50), "x" * 50, "fits: kept whole")
+
+    def test_a_credential_is_masked_whatever_the_flag_says(self) -> None:
+        from agent_skill_improver.domain.redaction import kept_prose
+
+        key = "gh" + "p_" + "F" * 24
+        text = kept_prose(f"I saw {key} in the transcript")
+        self.assertNotIn(key, text)
+        self.assertEqual(text, "I saw [REDACTED:github-token] in the transcript")
+
+    def test_masking_runs_before_the_clip(self) -> None:
+        from agent_skill_improver.domain.redaction import kept_prose
+
+        key = "AK" + "IA" + "G" * 16
+        # The cut at 17 falls inside the key (offsets 7 to 27): clipping first
+        # would keep an unrecognisable fragment of it; masking first leaves a
+        # (cut) placeholder and no fragment.
+        text = kept_prose("prefix " + key + " and a long tail " + "t" * 100, limit=17)
+        self.assertNotIn(key[:8], text, "no fragment of the key survives the cut")
+        self.assertEqual(text, "prefix [REDACTED: ...[clipped]")
+        whole = kept_prose("prefix " + key + " and a long tail " + "t" * 100, limit=40)
+        self.assertEqual(whole, "prefix [REDACTED:aws-access-key-id] and  ...[clipped]")
+
+
 class QuotedValueTests(unittest.TestCase):
     """``quoted_value`` is the one way a message quotes what a model sent."""
 

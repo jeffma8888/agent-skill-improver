@@ -270,6 +270,24 @@ class EvidenceTrustTests(unittest.TestCase):
         self.assertLess(len(score.downgrade_reason), QUOTED_VALUE_CHARS + 200)
         self.assertTrue(any("unknown verdict 'MAYBE" in n for n in result.notes), result.notes)
 
+    def test_a_rationale_that_pastes_a_key_is_kept_masked_and_still_clipped(self) -> None:
+        """The scorer's rationale is its own prose, persisted in the scorecard
+        and fed to the improver. The transcript it saw was masked; a model role
+        that can read more than its prompt gets the same mask on the way back."""
+        from agent_skill_improver.domain.scoring import MAX_RATIONALE_CHARS
+
+        key = "gh" + "p_" + "H" * 24
+        score = self._one(
+            verdict="PASS",
+            evidence=[good_ref(self.conv)],
+            rationale=f"saw {key} then " + "r" * 5_000,
+        )
+        self.assertIs(score.verdict, Verdict.PASS)
+        self.assertNotIn(key, score.rationale)
+        self.assertTrue(score.rationale.startswith("saw [REDACTED:github-token] then "))
+        self.assertTrue(score.rationale.endswith(" ...[clipped]"))
+        self.assertLessEqual(len(score.rationale), MAX_RATIONALE_CHARS + len(" ...[clipped]"))
+
     def test_fail_with_malformed_evidence_is_downgraded_with_a_reason(self) -> None:
         score = self._one(evidence=[{"element_id": "", "position": "nope"}])
         self.assertIs(score.verdict, Verdict.INSUFFICIENT)

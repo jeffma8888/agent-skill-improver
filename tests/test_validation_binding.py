@@ -450,6 +450,41 @@ class AJudgeRefusalQuotesTheModelBoundedTests(unittest.TestCase):
         self.assertIn("got 'both'", str(ctx.exception))
 
 
+class AJudgeRationaleIsKeptMaskedAndClippedTests(unittest.TestCase):
+    """The judge's rationale is persisted in the candidate's validation record.
+    Measured before: it was kept verbatim and unbounded,
+    while the scorer's rationale was clipped; both are now kept the same way."""
+
+    def _judge(self, rationale):
+        from agent_skill_improver import SCHEMA_JUDGEMENT
+        from agent_skill_improver.domain.validation import parse_judgement
+
+        case = ReplayCase("t1", "c1", CASE_TARGET)
+        arms = {"A": ARM_CANDIDATE, "B": "baseline"}
+        payload = {"schema": SCHEMA_JUDGEMENT, "preferred": "A", "rationale": rationale}
+        return parse_judgement(payload, case=case, arms=arms)
+
+    def test_a_key_is_masked_and_a_long_rationale_is_clipped(self):
+        from agent_skill_improver.domain.scoring import MAX_RATIONALE_CHARS
+
+        key = "AK" + "IA" + "J" * 16
+        judgement = self._judge(f"A cites {key}; " + "j" * 10_000)
+        self.assertEqual(judgement.preferred_arm, ARM_CANDIDATE)
+        self.assertNotIn(key, judgement.rationale)
+        self.assertTrue(judgement.rationale.startswith("A cites [REDACTED:aws-access-key-id]; "))
+        self.assertTrue(judgement.rationale.endswith(" ...[clipped]"))
+        self.assertLessEqual(len(judgement.rationale), MAX_RATIONALE_CHARS + len(" ...[clipped]"))
+        self.assertNotIn(key, json.dumps(judgement.to_dict()))
+
+    def test_the_control_short_prose_is_kept_whole_and_a_non_string_as_nothing(self):
+        self.assertEqual(
+            self._judge("A is clearer about when to stop").rationale,
+            "A is clearer about when to stop",
+        )
+        self.assertEqual(self._judge(None).rationale, "")
+        self.assertEqual(self._judge(["not", "prose"]).rationale, "")
+
+
 class EvidenceCallCountTests(unittest.TestCase):
     """The model-call count is derived from the record or it is not evidence."""
 

@@ -1398,6 +1398,102 @@ class AListingThatHidesRecordsSaysSoTests(unittest.TestCase):
         self.assertIn(self.cid, [c["id"] for c in payload["candidates"]])
 
 
+POISONING_MODEL = r"""
+import json, subprocess, sys
+# The fake model's answer, with a token pasted into every prose field a record
+# keeps: what a model role that can read more than its prompt could do. The
+# token is written into this file by the test; the role's env is scrubbed.
+TOKEN = "__TOKEN__"
+raw = sys.stdin.read()
+proc = subprocess.run(
+    [sys.executable, sys.argv[1], *sys.argv[2:]], input=raw, capture_output=True, text=True
+)
+out = proc.stdout
+payload = json.loads(out[out.index("{") : out.rindex("}") + 1])
+def poison(text):
+    return f"{text} (note {TOKEN})"
+for item in payload.get("criteria", []):
+    item["rationale"] = poison(item.get("rationale", ""))
+for key in ("rationale", "hypothesis", "intended_change", "rollback"):
+    if isinstance(payload.get(key), str):
+        payload[key] = poison(payload[key])
+if isinstance(payload.get("risks"), list):
+    payload["risks"] = [poison(r) for r in payload["risks"]]
+sys.stdout.write(json.dumps(payload))
+sys.exit(proc.returncode)
+"""
+
+
+class ModelProseARecordKeepsIsMaskedTests(unittest.TestCase):
+    """The scorer's and judge's rationale and the improver's hypothesis,
+    intended change, risks and rollback are the model's own words, persisted
+    in scorecards and candidates; review prints the improver's, and the
+    scorer's are fed back to the improver. Measured before: a token a model
+    role pasted into any of them was written verbatim to the state tree, and
+    review printed the improver's. Now every
+    one of them is masked on the way in, whatever ``redact_secrets`` says, and
+    the run itself is unaffected: the candidate is still proposed and passes
+    its gate.
+    """
+
+    def setUp(self) -> None:
+        import re
+
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path = Path(build_env(self.base, seed="prose", use_subprocess_model=True))
+        self.cfg = ["--config", str(self.config_path)]
+        self.token = "gh" + "p_" + "N" * 24
+        wrapper = self.base / "poisoning_model.py"
+        wrapper.write_text(POISONING_MODEL.replace("__TOKEN__", self.token), encoding="utf-8")
+        text = self.config_path.read_text(encoding="utf-8")
+        fake = str(REPO_ROOT / "tests" / "fake_model.py")
+        pattern = re.compile(r'argv = \["([^"]+)", "([^"]+)", "--role", "(\w+)"\]\n')
+        found = pattern.findall(text)
+        self.assertEqual([f[1] for f in found], [fake] * 3, text)
+        text = pattern.sub(
+            lambda m: f'argv = ["{m.group(1)}", "{wrapper}", "{m.group(2)}", "--role", "{m.group(3)}"]\n',
+            text,
+        )
+        self.config_path.write_text(text, encoding="utf-8")
+
+    def _files_holding(self, needle: str) -> list[str]:
+        state = self.base / "state"
+        return sorted(
+            str(path.relative_to(state))
+            for path in state.rglob("*")
+            if path.is_file() and needle in path.read_text(encoding="utf-8", errors="replace")
+        )
+
+    def test_nothing_the_run_keeps_or_prints_carries_the_token(self) -> None:
+        proc = run_cli([*self.cfg, "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        self.assertIn("status=ok", proc.stdout.splitlines()[0])
+        self.assertIn("candidates=1 gate_passed=1", proc.stdout.splitlines()[0])
+        self.assertNotIn(self.token, proc.stdout + proc.stderr)
+        self.assertEqual(self._files_holding(self.token), [])
+        masked = self._files_holding("[REDACTED:github-token]")
+        self.assertTrue(any(f.startswith("scorecards/") for f in masked), masked)
+        self.assertTrue(any(f.startswith("candidates/") for f in masked), masked)
+
+        candidate = "CAND-2026-01-01-01-tdd"
+        for args in (["review", candidate], ["--json", "review", candidate]):
+            review = run_cli([*self.cfg, *args])
+            self.assertEqual(review.returncode, RC_OK, review.stderr)
+            self.assertNotIn(self.token, review.stdout + review.stderr, args)
+        record = json.loads((self.base / "state" / "candidates" / f"{candidate}.json").read_text())
+        for key in ("hypothesis", "intended_change", "rollback"):
+            self.assertIn("[REDACTED:github-token]", record[key], key)
+        self.assertTrue(
+            all("[REDACTED:github-token]" in r for r in record["risks"]), record["risks"]
+        )
+        judgements = json.dumps(record["validation"]["judgements"])
+        self.assertIn(
+            "[REDACTED:github-token]", judgements, "the judge's rationale was kept, masked"
+        )
+
+
 class ACountIsNotAReasonTests(unittest.TestCase):
     """Measured before: with the improver exiting non-zero, ``asi daily``
     printed ``status=partial ... skills_deferred=1`` and nothing else about it;

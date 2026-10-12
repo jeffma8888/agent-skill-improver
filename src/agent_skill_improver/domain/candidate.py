@@ -28,7 +28,7 @@ from .. import SCHEMA_CANDIDATE, SCHEMA_PROPOSAL
 from ..hashing import sha256_text
 from .conversation import EvidenceRef
 from .failure import FailureCase
-from .redaction import quoted_value
+from .redaction import kept_prose, quoted_value
 
 STATUS_PROPOSED = "proposed"
 STATUS_VALIDATED = "validated"
@@ -509,14 +509,17 @@ def parse_proposal(payload: Any) -> Proposal:
     addressed = payload.get("addressed_criterion_ids", [])
     if not isinstance(addressed, list) or any(not isinstance(x, str) for x in addressed):
         raise ValueError("proposal field 'addressed_criterion_ids' must be a list of strings")
+    # The prose fields are kept masked (kept_prose); new_skill_text is not,
+    # because a masked replacement would be a silently different document.
+    # A replacement that introduces a credential is refused in the pipeline.
     return Proposal(
         target_skill_id=str(payload["target_skill_id"]).strip(),
-        hypothesis=str(payload["hypothesis"]).strip(),
-        intended_change=str(payload["intended_change"]).strip(),
-        risks=tuple(str(r).strip() for r in risks),
-        rollback=str(payload["rollback"]).strip(),
+        hypothesis=kept_prose(payload["hypothesis"]).strip(),
+        intended_change=kept_prose(payload["intended_change"]).strip(),
+        risks=tuple(kept_prose(r).strip() for r in risks),
+        rollback=kept_prose(payload["rollback"]).strip(),
         new_skill_text=str(payload["new_skill_text"]),
-        addressed_criterion_ids=tuple(str(x) for x in addressed),
+        addressed_criterion_ids=tuple(kept_prose(x) for x in addressed),
     )
 
 

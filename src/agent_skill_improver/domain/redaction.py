@@ -158,6 +158,25 @@ def quoted_value(value: object, *, limit: int = QUOTED_VALUE_CHARS) -> str:
     return f"{text[:limit]}... [{len(text) - limit} more chars not quoted]"
 
 
+def kept_prose(value: object, *, limit: int | None = None) -> str:
+    """Model prose a record keeps: a string or nothing, masked, then clipped.
+
+    A scorer's rationale, a judge's rationale and the improver's hypothesis,
+    intended change, risks and rollback are the model's own words, persisted
+    in scorecards and candidates, printed by ``review`` and fed back into the
+    improver prompt. The transcript the model saw was masked (when
+    ``redact_secrets`` says so); a model role is a child process that may be
+    able to read more than its prompt, so its prose gets the same masking
+    whatever the flag says, as the diagnostics' quotes do. Masking runs before
+    the clip so a key the cut would split is masked whole; the clip says it
+    clipped. A non-string is kept as nothing, as before.
+    """
+    text = redact(value).text if isinstance(value, str) else ""
+    if limit is not None and len(text) > limit:
+        return text[:limit] + " ...[clipped]"
+    return text
+
+
 def redact(text: str) -> RedactionResult:
     """Replace recognised secret shapes with labelled placeholders."""
     counts: dict[str, int] = {}
