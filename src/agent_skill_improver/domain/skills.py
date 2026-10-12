@@ -119,10 +119,19 @@ class SkillSnapshot:
     #: written: a "skill improvement" that could touch one of these would be a
     #: privileged change, not a docs change.
     payload_files: tuple[str, ...] = ()
+    #: Directories inside this skill's directory the inventory could not list,
+    #: each with the error. What they hold is unknown, so the payload list is
+    #: incomplete while this is non-empty; reported for the same reason the
+    #: payloads are.
+    unlistable_dirs: tuple[tuple[str, str], ...] = ()
 
     @property
     def payload_count(self) -> int:
         return len(self.payload_files)
+
+    @property
+    def payload_inventory_complete(self) -> bool:
+        return not self.unlistable_dirs
 
     @property
     def has_executable_payload(self) -> bool:
@@ -152,6 +161,8 @@ class SkillSnapshot:
             "loads": self.loads,
             "payload_files": list(self.payload_files),
             "payload_count": self.payload_count,
+            "unlistable_dirs": [{"path": d, "error": e} for d, e in self.unlistable_dirs],
+            "payload_inventory_complete": self.payload_inventory_complete,
             "warnings": list(self.warnings),
         }
 
@@ -204,11 +215,23 @@ class SkillGroup:
                     out.append(label)
         return tuple(out)
 
+    @property
+    def unlistable_dirs(self) -> tuple[str, ...]:
+        """Directories no copy's inventory could list, labelled by root."""
+        out: list[str] = []
+        for copy in self.all_copies:
+            for name, _ in copy.unlistable_dirs:
+                label = f"{copy.root_id}:{name}"
+                if label not in out:
+                    out.append(label)
+        return tuple(out)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "skill_id": self.skill_id,
             "canonical": self.canonical.to_dict() if self.canonical else None,
             "payload_files": list(self.payload_files),
+            "unlistable_dirs": list(self.unlistable_dirs),
             "canonical_reason": self.canonical_reason,
             "mirrors": [m.to_dict() for m in self.mirrors],
             "is_mirrored": self.is_mirrored,

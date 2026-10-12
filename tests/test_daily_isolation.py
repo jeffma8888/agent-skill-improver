@@ -1057,6 +1057,35 @@ class ReviewableTextTests(DailyHarness):
         self.assertEqual(payload["counts"]["skills_quarantined"], 0)
         self.assertEqual(len(self._candidate_files(state)), 1)
 
+    @unittest.skipIf(os.geteuid() == 0, "root lists a mode-000 directory")
+    def test_a_directory_the_inventory_could_not_list_puts_the_risk_note_on_the_candidate(self):
+        # Measured before: a scripts/ at mode 000 beside tdd/SKILL.md gave a
+        # candidate with no ELEVATED REVIEW RISK note at all, the same as a
+        # skill whose directory holds only documentation.
+        config = self.env()
+        hidden = self.base / "skills-canonical" / "tdd" / "scripts"
+        hidden.mkdir()
+        (hidden / "hook.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(hidden, 0o000)
+        try:
+            receipt, state, _ = self.run_pass(config)
+        finally:
+            os.chmod(hidden, 0o755)
+        payload = receipt.to_dict()
+        self.assertEqual(payload["counts"]["candidates_proposed"], 1)
+        self.assertEqual(payload["skill_tree"]["skills_with_unlistable_directories"], ["tdd"])
+        self.assertEqual(payload["skill_tree"]["executable_payload_files"], 0, "a floor")
+        (candidate,) = state.open_candidates()
+        risk = [n for n in candidate.notes if n.startswith("ELEVATED REVIEW RISK")]
+        self.assertEqual(len(risk), 1, candidate.notes)
+        self.assertIn("1 directory in this skill's directory could not be listed", risk[0])
+        self.assertIn("scripts (Permission denied)", risk[0])
+        self.assertIn("a floor, not an inventory", risk[0])
+        self.assertFalse(
+            any("executable payload file(s)" in n for n in candidate.notes),
+            "nothing was seen, so no payload count is claimed",
+        )
+
     def test_tabs_and_newlines_are_ordinary_text(self):
         config = self.env()
         runner = self._runner(

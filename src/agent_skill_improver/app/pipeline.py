@@ -304,6 +304,18 @@ def propose_candidate(
             "refuses any other filename -- but a reviewer should read the change knowing the "
             "surrounding directory is executable code, not documentation."
         )
+    if canonical.unlistable_dirs:
+        notes.append(
+            "ELEVATED REVIEW RISK: "
+            f"{len(canonical.unlistable_dirs)} director"
+            f"{'y' if len(canonical.unlistable_dirs) == 1 else 'ies'} in this skill's "
+            "directory could not be listed ("
+            + ", ".join(f"{d} ({e})" for d, e in canonical.unlistable_dirs[:5])
+            + (", ..." if len(canonical.unlistable_dirs) > 5 else "")
+            + "), so whether executable payloads live there is unknown and the payload "
+            "count above is a floor, not an inventory. The write path still refuses every "
+            "filename but SKILL.md; a reviewer should know the directory was not fully seen."
+        )
     if group.divergent_mirrors:
         notes.append(
             "mirror copies already differ from canonical ("

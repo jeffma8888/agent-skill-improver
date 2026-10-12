@@ -1068,6 +1068,67 @@ class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
         self.assertEqual([c["canonical_path"] for c in receipt["candidates"]], [str(self.real)])
 
 
+class ADirectoryThePayloadInventoryCannotListIsReportedTests(unittest.TestCase):
+    """Measured before: ``scripts/`` at mode 000 beside ``tdd/SKILL.md`` gave
+    ``skills`` a document with no payload warning and ``doctor`` a report of
+    zero payloads, the same as a documentation-only directory.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, seed="unlistable-scripts"))]
+        self.hidden = self.base / "skills-canonical" / "tdd" / "scripts"
+        self.hidden.mkdir()
+        (self.hidden / "hook.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    @unittest.skipIf(os.geteuid() == 0, "root lists a mode-000 directory")
+    def test_skills_and_doctor_both_say_the_inventory_is_a_floor(self):
+        os.chmod(self.hidden, 0o000)
+        try:
+            skills = run_cli([*self.cfg, "--json", "skills"])
+            self.assertEqual(skills.returncode, RC_OK, skills.stderr)
+            group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+            self.assertEqual(group["unlistable_dirs"], ["canonical:scripts"])
+            self.assertEqual(group["payload_files"], [])
+            self.assertFalse(group["canonical"]["payload_inventory_complete"])
+            text = run_cli([*self.cfg, "skills"])
+            self.assertIn(
+                "1 directory in this skill directory could not be listed "
+                "(scripts (Permission denied))",
+                text.stdout,
+            )
+            doctor = run_cli([*self.cfg, "--json", "doctor"])
+            self.assertEqual(doctor.returncode, RC_OK, doctor.stderr)
+            payload = json.loads(doctor.stdout)
+            self.assertEqual(
+                payload["skills_with_unlistable_directories"],
+                [
+                    {
+                        "skill_id": "tdd",
+                        "root_id": "canonical",
+                        "unlistable_dirs": [{"path": "scripts", "error": "Permission denied"}],
+                    }
+                ],
+            )
+            self.assertEqual(payload["skills_with_executable_payloads"], [])
+            warned = [w for w in payload["warnings"] if "payload inventory could not list" in w]
+            self.assertEqual(len(warned), 1, payload["warnings"])
+            self.assertIn("skill 'tdd' in root 'canonical' has 1 directory", warned[0])
+            self.assertIn("a floor, not an inventory", warned[0])
+        finally:
+            os.chmod(self.hidden, 0o755)
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        payload = json.loads(doctor.stdout)
+        self.assertEqual(payload["skills_with_unlistable_directories"], [])
+        self.assertEqual(
+            payload["skills_with_executable_payloads"],
+            [{"skill_id": "tdd", "payload_files": ["scripts/hook.sh"]}],
+            "listable again, the hook is inventoried",
+        )
+
+
 class AnUnlistableFixturesDirectoryIsRefusedNotAnEmptyWindowTests(unittest.TestCase):
     """Measured before: with the exports directory at mode 000, ``doctor``
     reported the source ok and ``daily`` stood down with zero ingested,

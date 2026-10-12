@@ -217,6 +217,62 @@ class PayloadDetectionTests(Harness):
         self.assertFalse(is_payload_name("notes.md"))
         self.assertTrue(PAYLOAD_EXTENSIONS, "the set must not be empty")
 
+    @unittest.skipIf(os.geteuid() == 0, "root lists a mode-000 directory")
+    def test_a_payload_in_a_directory_the_scan_cannot_list_is_an_unknown_not_an_absence(self):
+        # Measured before: rglob stepped over the directory without a word, the
+        # inventory read () and the document carried no warning, for a hook
+        # that still runs by name when the directory is mode 111.
+        hidden = self.canonical_dir / "shared" / "scripts"
+        write(hidden / "hook.sh", "#!/bin/sh\n")
+        for mode in (0o000, 0o111):
+            os.chmod(hidden, mode)
+            try:
+                snap = self.canonical_snapshots()["shared"]
+            finally:
+                os.chmod(hidden, 0o755)
+            with self.subTest(mode=oct(mode)):
+                self.assertEqual(snap.payload_files, ())
+                self.assertEqual(snap.unlistable_dirs, (("scripts", "Permission denied"),))
+                self.assertFalse(snap.payload_inventory_complete)
+                warnings = [w for w in snap.warnings if "could not be listed" in w]
+                self.assertEqual(len(warnings), 1, snap.warnings)
+                self.assertIn(
+                    "1 directory in this skill directory could not be listed "
+                    "(scripts (Permission denied))",
+                    warnings[0],
+                )
+                self.assertIn("inventory above is incomplete", warnings[0])
+                shown = snap.to_dict()
+                self.assertEqual(
+                    shown["unlistable_dirs"], [{"path": "scripts", "error": "Permission denied"}]
+                )
+                self.assertFalse(shown["payload_inventory_complete"])
+        snap = self.canonical_snapshots()["shared"]
+        self.assertEqual(snap.payload_files, ("scripts/hook.sh",))
+        self.assertTrue(snap.payload_inventory_complete, "listable again, nothing unknown")
+
+    def test_a_listable_skill_directory_reports_a_complete_inventory(self):
+        write(self.canonical_dir / "shared" / "scripts" / "hook.sh", "#!/bin/sh\n")
+        snap = self.canonical_snapshots()["shared"]
+        self.assertEqual(snap.unlistable_dirs, ())
+        self.assertTrue(snap.payload_inventory_complete)
+        self.assertEqual(snap.to_dict()["unlistable_dirs"], [])
+        self.assertFalse(any("could not be listed" in w for w in snap.warnings))
+
+    @unittest.skipIf(os.geteuid() == 0, "root lists a mode-000 directory")
+    def test_the_group_rolls_unlistable_directories_up_by_root(self):
+        hidden = self.mirror_dir / "shared" / "bin"
+        hidden.mkdir()
+        os.chmod(hidden, 0o000)
+        try:
+            group = group_for(self.store().groups(refresh=True), "shared")
+        finally:
+            os.chmod(hidden, 0o755)
+        assert group is not None
+        self.assertEqual(group.unlistable_dirs, ("mirror:bin",))
+        self.assertEqual(group.to_dict()["unlistable_dirs"], ["mirror:bin"])
+        self.assertEqual(group.payload_files, ())
+
     def test_the_group_rolls_payloads_up_across_copies(self):
         write(self.canonical_dir / "shared" / "scripts" / "hook.sh", "#!/bin/sh\n")
         group = group_for(self.store().groups(refresh=True), "shared")

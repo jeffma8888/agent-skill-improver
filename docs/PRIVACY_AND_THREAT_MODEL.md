@@ -213,13 +213,17 @@ guardrail.
 What this repository does about it:
 
 - Payload files are inventoried at discovery and counted in the receipt
-  (`skills_with_executable_payloads`, `executable_payload_files`).
+  (`skills_with_executable_payloads`, `executable_payload_files`, and
+  `skills_with_unlistable_directories`, non-empty when those counts are a floor).
 - The only write path refuses any target whose filename is not `SKILL.md`
   (`NonDocumentWriteRefused`). This is a filename check on the resolved path, not
   a check on the extension of a caller-supplied string.
 - A proposal against a skill that carries payload files is annotated
   `ELEVATED REVIEW RISK` so a human reviewer knows the directory is more than
-  prose.
+  prose. A directory inside the skill's directory that the inventory could not list gets
+  the same annotation, naming the directory and the error: what it holds is
+  unknown, so the payload count is a floor, and a reviewer must not read the
+  candidate as one for a documentation-only directory.
 - Payload detection uses `pathlib` rather than shelling out, so filenames
   containing backslashes, spaces or quotes cannot become argument-splitting bugs.
   Filenames with embedded backslashes exist in the wild and break naive shell

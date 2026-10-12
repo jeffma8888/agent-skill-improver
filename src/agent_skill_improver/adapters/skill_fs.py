@@ -972,18 +972,38 @@ class FilesystemSkillStore:
             return None
         return rel.parts[-2]
 
-    def _payload_files(self, skill_dir: Path) -> tuple[str, ...]:
-        """Enumerate executable payloads beside a skill document.
+    def _payload_files(
+        self, skill_dir: Path
+    ) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+        """Enumerate executable payloads beside a skill document, and the
+        directories below it that could not be listed.
 
-        Pure ``pathlib``: filenames containing literal backslashes, spaces or
-        quotes are common in real skill trees and any shell-based scan mangles
-        them silently.
+        No shell: filenames containing literal backslashes, spaces or quotes
+        are common in real skill trees and any shell-based scan mangles them
+        silently. ``os.walk`` with ``onerror`` rather than ``rglob``: ``rglob``
+        steps over a directory it cannot open without a word, and measured
+        before this, a ``scripts/`` at mode 000 or 111 (its files still run by
+        name) made the hook inside it vanish from the inventory, so the
+        candidate lost its elevated-risk note and the receipt counted no
+        payload. What such a directory holds is unknown; it is named instead.
         """
         found: list[str] = []
-        try:
-            entries = sorted(skill_dir.rglob("*"))
-        except OSError:
-            return ()
+        unlistable: list[tuple[str, str]] = []
+
+        def could_not_list(error: OSError) -> None:
+            where = Path(error.filename) if error.filename else skill_dir
+            try:
+                rel = where.relative_to(skill_dir).as_posix()
+            except ValueError:
+                rel = str(where)
+            unlistable.append((rel or ".", error.strerror or type(error).__name__))
+
+        entries: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(
+            skill_dir, followlinks=False, onerror=could_not_list
+        ):
+            entries.extend(Path(dirpath) / name for name in (*dirnames, *filenames))
+        entries.sort()
         for entry in entries:
             try:
                 if entry.name == SKILL_FILENAME:
@@ -1009,7 +1029,7 @@ class FilesystemSkillStore:
                     found.append(rel)
             except (OSError, ValueError):
                 continue
-        return tuple(found)
+        return tuple(found), tuple(unlistable)
 
     def _snapshot(self, root: SkillRoot, base: Path, skill_file: Path, raw: bytes) -> SkillSnapshot:
         undecodable: list[str] = []
@@ -1039,13 +1059,22 @@ class FilesystemSkillStore:
                 "disable-model-invocation is true: the skill is hidden from the "
                 "auto-loaded listing and can only be invoked by name"
             ]
-        payloads = self._payload_files(skill_file.parent)
+        payloads, unlistable = self._payload_files(skill_file.parent)
         if payloads:
             warnings = warnings + [
                 f"{len(payloads)} executable payload file(s) live in this skill directory "
                 f"({', '.join(payloads[:5])}"
                 + (", ..." if len(payloads) > 5 else "")
                 + "): changes here are privileged, and this tool never writes them"
+            ]
+        if unlistable:
+            warnings = warnings + [
+                f"{len(unlistable)} director{'y' if len(unlistable) == 1 else 'ies'} in this "
+                "skill directory could not be listed ("
+                + ", ".join(f"{d} ({e})" for d, e in unlistable[:5])
+                + (", ..." if len(unlistable) > 5 else "")
+                + "): whether executable payloads live there is unknown, so the payload "
+                "inventory above is incomplete"
             ]
         return SkillSnapshot(
             skill_id=skill_id,
@@ -1058,5 +1087,6 @@ class FilesystemSkillStore:
             has_opening_delimiter=has_open,
             disable_model_invocation=disable,
             payload_files=payloads,
+            unlistable_dirs=unlistable,
             warnings=tuple(warnings),
         )

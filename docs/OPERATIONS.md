@@ -9,7 +9,9 @@ asi --config config/example.config.toml doctor
 `doctor` validates the configuration and reports what is actually wired: the
 **source class and isolation mode**, state-directory permissions, source
 reachability, model roles, skill roots present versus configured, how many skills
-were found, how many **do not load**, how many carry executable payloads, how
+were found, how many **do not load**, how many carry executable payloads (a
+`WARN` names any skill with a directory the payload inventory could not list,
+since its count is then a floor), how
 many `SKILL.md` files discovery **passed over** (each one a `WARN` line naming
 the path and the reason: a dangling link, a link while links are not followed,
 a link that leaves its root, a document deeper than `max_depth`, a directory,

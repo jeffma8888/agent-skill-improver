@@ -310,6 +310,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"root {group.ambiguous_copies[0].root_id!r} ({listed}); `daily` refuses to "
                 "propose for it until one copy remains"
             )
+    # A directory inside a skill's directory that the inventory could not list:
+    # what it holds is unknown, so "carry executable payloads" below is a floor.
+    for snapshot in snapshots:
+        if snapshot.unlistable_dirs:
+            listed = ", ".join(f"{d} ({e})" for d, e in snapshot.unlistable_dirs[:5])
+            warnings.append(
+                f"skill {snapshot.skill_id!r} in root {snapshot.root_id!r} has "
+                f"{len(snapshot.unlistable_dirs)} director"
+                f"{'y' if len(snapshot.unlistable_dirs) == 1 else 'ies'} the payload inventory "
+                f"could not list ({listed}); its payload count is a floor, not an inventory"
+            )
     state = build_state(config)
 
     # The layout is judged before anything touches the state tree, the runner's
@@ -495,6 +506,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
             for s in snapshots
             if s.payload_files
+        ],
+        "skills_with_unlistable_directories": [
+            {
+                "skill_id": s.skill_id,
+                "root_id": s.root_id,
+                "unlistable_dirs": [{"path": d, "error": e} for d, e in s.unlistable_dirs],
+            }
+            for s in snapshots
+            if s.unlistable_dirs
         ],
         "selection": config.selection.to_dict(),
         "evaluator_independence": independence,
