@@ -106,16 +106,56 @@ def render_argv(template: Sequence[str], values: dict[str, str]) -> list[str]:
     removed. Substituting an empty string instead would pass a bare ``""`` to
     the tool, which is a different request from not passing the argument at all
     -- and for a positional query it usually means "match nothing".
+
+    A literal flag (an argument beginning with ``-`` and carrying no
+    placeholder) immediately before a dropped argument is dropped with it.
+    Measured before: ``--after {since}`` with an empty window rendered as
+    ``--after -n 40``, so the flag took the limit's own flag as its value and
+    the limit became a positional, a request nobody configured.
+
+    The renderer cannot tell a flag that takes a value from one that does not,
+    so a valueless flag written directly before a placeholder (``--json
+    {query}``) goes with the empty value too; write such flags elsewhere in
+    the template. ``--`` (end of options), a bare ``-`` and a negative number
+    are literals that never introduce a value and are kept.
     """
     out: list[str] = []
+    sources: list[str] = []  # the template part each emitted argument came from
     for part in template:
         rendered = part
         for name, value in values.items():
             rendered = rendered.replace("{" + name + "}", value)
         if rendered == "" and part != "":
+            if sources and _is_literal_flag(sources[-1]):
+                out.pop()
+                sources.pop()
             continue
         out.append(rendered)
+        sources.append(part)
     return out
+
+
+def _is_literal_flag(template_part: str) -> bool:
+    """A template argument that is a flag as written, with no placeholder in it.
+
+    Judged on the template, not the rendered value: a rendered value that
+    happens to begin with ``-`` came from the operator's config, not the
+    template, and is not the flag introducing the next argument. ``--``, a
+    bare ``-`` and a negative number begin with a dash and introduce nothing.
+    """
+    if "{" in template_part or not template_part.startswith("-"):
+        return False
+    if template_part in ("-", "--"):
+        return False
+    return not _is_number(template_part)
+
+
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
 
 
 def parse_discovery_output(text: str) -> list[DiscoveredThread]:

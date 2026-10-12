@@ -268,6 +268,57 @@ class NoTrustLabelCanGrantTheExceptionTests(Harness):
         self.assertEqual(config.source.kind, SOURCE_FIXTURES)
 
 
+class ABlankWindowOrWorkspaceIsAConfigurationErrorTests(Harness):
+    """Measured before: ``since = ""`` loaded, and the discovery command was
+    rendered as ``--after -n 40``: the window flag took the limit's flag as
+    its value and the limit became a positional. A blank workspace entry was
+    either skipped (never searched) or sent as a name."""
+
+    def _config_with(self, old: str, new: str) -> Path:
+        path = build_env(self.base, use_subprocess_model=False)
+        text = path.read_text(encoding="utf-8")
+        assert text.count(old) == 1, (old, text)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+        return path
+
+    def test_an_empty_window_is_refused_at_load_with_the_consequence_named(self):
+        for value in ('""', '"   "'):
+            with self.subTest(value=value):
+                path = self._config_with('since = "7d"\n', f"since = {value}\n")
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(path)
+                message = str(ctx.exception)
+                self.assertIn("[source].since is empty or whitespace", message)
+                self.assertIn("no window", message)
+                self.assertIn('such as "1d"', message)
+
+    def test_a_blank_workspace_entry_is_refused_by_position(self):
+        path = self._config_with('since = "7d"\n', 'since = "7d"\nworkspaces = ["/w", "  "]\n')
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(path)
+        message = str(ctx.exception)
+        self.assertIn(
+            "[source].workspaces entry #1 (counting from 0, value '  ') is empty or whitespace",
+            message,
+        )
+        self.assertIn("never searched", message)
+
+    def test_a_padded_window_is_sent_trimmed(self):
+        path = self._config_with('since = "7d"\n', 'since = "  3d  "\n')
+        self.assertEqual(load_config(path).source.since, "3d")
+
+    def test_a_whitespace_query_is_no_query(self):
+        path = self._config_with('since = "7d"\n', 'since = "7d"\nquery = "   "\n')
+        self.assertEqual(load_config(path).source.query, "")
+
+    def test_the_control_a_window_a_workspace_and_a_query_load_as_written(self):
+        path = self._config_with(
+            'since = "7d"\n', 'since = "3d"\nworkspaces = ["/w"]\nquery = "gate"\n'
+        )
+        source = load_config(path).source
+        self.assertEqual((source.since, source.workspaces, source.query), ("3d", ("/w",), "gate"))
+
+
 class PromptFencingIsNotABoundaryTests(Harness):
     def test_a_fence_exists_and_still_does_not_satisfy_the_check(self):
         """Both halves in one test, because the pairing IS the claim.

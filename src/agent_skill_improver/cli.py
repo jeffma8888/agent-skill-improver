@@ -702,7 +702,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
     # original defect -- the honesty existed in the domain and never reached the
     # one command a human runs to ask the question.
     page = source.discover_page(
-        since=args.since or config.source.since,
+        since=(args.since or "").strip() or config.source.since,
         limit=args.limit or config.source.discovery_limit,
         workspace=args.workspace,
         query=config.source.query or None,

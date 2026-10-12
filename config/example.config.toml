@@ -55,7 +55,11 @@ fixtures_dir = "examples/fixtures"
 #
 # Placeholders: {since} {limit} {query} {workspace} {thread_id}. An argument that
 # is exactly one placeholder is DROPPED when its value is empty, so an unset
-# query does not become a bare "" that matches nothing.
+# query does not become a bare "" that matches nothing; a literal flag written
+# just before it (`--query`, `-w`) is dropped with it, so no flag is left to take
+# the next argument as its value. The renderer cannot tell a valueless flag from
+# one that takes a value, so do not write a flag like `--json` directly before a
+# placeholder that may be empty; `--`, `-` and negative numbers are kept.
 #
 # Your tool has to satisfy two documented contracts, both described in the
 # adapters: a discovery line grammar (numbered `N. "TITLE" (YYYY-MM-DD)`, an
@@ -67,7 +71,8 @@ discovery_argv = ["conversation-cli", "search", "--after", "{since}", "-n", "{li
 query_argv = ["{query}"]
 workspace_argv = ["-w", "{workspace}"]
 export_argv = ["conversation-cli", "export", "--thread", "{thread_id}"]
-# Discovery window. Always paired with an explicit limit below.
+# Discovery window. Always paired with an explicit limit below. Must not be
+# empty: an empty window would send the search with no window at all.
 since = "1d"
 # ALWAYS set explicitly. The interface's own default page size is small, so a
 # harvester that relies on it reads the most recently touched sliver of the
@@ -76,7 +81,7 @@ since = "1d"
 # as a total.
 discovery_limit = 40
 query = ""
-# Empty means "every workspace the source will return".
+# Empty means "every workspace the source will return". A blank entry is refused.
 workspaces = []
 # Keep the raw export under state/raw/ for auditing. Private content; gitignored.
 keep_raw = true

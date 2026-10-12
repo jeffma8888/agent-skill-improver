@@ -20,6 +20,7 @@ import shutil
 
 from agent_skill_improver.adapters.conversation_cli import (
     ConversationCliSource,
+    render_argv,
     parse_discovery,
     parse_discovery_output,
     program_problem,
@@ -862,6 +863,73 @@ class ExplicitLimitTests(unittest.TestCase):
         page = source.discover_page(since="1d", limit=40)
         self.assertEqual(page.returned, 0)
         self.assertTrue(page.is_total)
+
+
+class AFlagWhoseValueRenderedEmptyGoesWithItTests(unittest.TestCase):
+    """Measured before: ``--after {since}`` with an empty window rendered as
+    ``--after -n 40``, so ``--after`` took ``-n`` as its value and ``40`` became
+    a positional (for a search tool, the query), a request nobody configured
+    and one with no window on it. The config now refuses an empty window; this
+    is the renderer's own half, for every placeholder a flag introduces."""
+
+    VALUES = {"since": "1d", "limit": "40", "query": "", "workspace": ""}
+
+    def test_a_flag_introducing_an_empty_value_is_dropped_with_it(self):
+        template = ("cli", "search", "--query", "{query}", "--after", "{since}", "-n", "{limit}")
+        self.assertEqual(
+            render_argv(template, self.VALUES), ["cli", "search", "--after", "1d", "-n", "40"]
+        )
+
+    def test_the_window_flag_goes_with_an_empty_window(self):
+        template = ExplicitLimitTests.ARGV
+        argv = render_argv(template, dict(self.VALUES, since=""))
+        self.assertEqual(argv, ["probe-cli", "search", "-n", "40"])
+        self.assertNotIn(
+            "--after", argv, "a flag left dangling takes the next argument as its value"
+        )
+
+    def test_a_positional_placeholder_that_renders_empty_drops_nothing_else(self):
+        template = ("cli", "{query}", "-n", "{limit}")
+        self.assertEqual(render_argv(template, self.VALUES), ["cli", "-n", "40"])
+
+    def test_a_rendered_value_beginning_with_a_dash_is_not_a_flag(self):
+        # ``-x`` came from the config, not the template; it does not introduce
+        # the empty workspace after it and must stay.
+        template = ("cli", "{query}", "{workspace}", "-n", "{limit}")
+        argv = render_argv(template, dict(self.VALUES, query="-x"))
+        self.assertEqual(argv, ["cli", "-x", "-n", "40"])
+
+    def test_end_of_options_a_bare_dash_and_a_negative_number_are_kept(self):
+        # Dash-leading literals that never introduce a value stay put.
+        for literal in ("--", "-", "-1", "-2.5"):
+            with self.subTest(literal=literal):
+                template = ("cli", "search", literal, "{query}", "-n", "{limit}")
+                self.assertEqual(
+                    render_argv(template, self.VALUES), ["cli", "search", literal, "-n", "40"]
+                )
+
+    def test_a_valueless_flag_directly_before_an_empty_placeholder_goes_too_a_stated_limit(self):
+        # The renderer cannot tell --json from --query. This is the documented
+        # limit of the rule, measured here so the docs cannot drift from it:
+        # such a flag belongs elsewhere in the template.
+        template = ("cli", "search", "--json", "{query}", "-n", "{limit}")
+        self.assertEqual(render_argv(template, self.VALUES), ["cli", "search", "-n", "40"])
+        self.assertEqual(
+            render_argv(("cli", "search", "-n", "{limit}", "--json", "{query}"), self.VALUES),
+            ["cli", "search", "-n", "40"],
+        )
+        self.assertEqual(
+            render_argv(("cli", "--json", "search", "{query}", "-n", "{limit}"), self.VALUES),
+            ["cli", "--json", "search", "-n", "40"],
+            "written before a literal, the flag is kept",
+        )
+
+    def test_the_source_sends_no_window_flag_for_an_empty_window(self):
+        source = ExplicitLimitTests._Recorded(discovery_argv=ExplicitLimitTests.ARGV)
+        source.discover_page(since="", limit=40)
+        argv = source.argvs[0]
+        self.assertNotIn("--after", argv)
+        self.assertEqual(argv[argv.index("-n") + 1], "40")
 
 
 if __name__ == "__main__":  # pragma: no cover

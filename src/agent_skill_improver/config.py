@@ -613,6 +613,27 @@ def _load_source(table: Mapping[str, Any], *, base_dir: Path) -> SourceConfig:
     workspaces = table.get("workspaces", [])
     if not isinstance(workspaces, list) or any(not isinstance(x, str) for x in workspaces):
         raise ConfigError("[source].workspaces must be a list of strings")
+    for index, entry in enumerate(workspaces):
+        if entry.strip():
+            continue
+        # An empty entry is skipped by the renderer, so a configured workspace
+        # would silently never be searched; a blank one is sent as a name.
+        raise ConfigError(
+            f"[source].workspaces entry #{index} (counting from 0, value {entry!r}) is empty or "
+            "whitespace: it would either be skipped, so that workspace is never searched, or "
+            "sent to the discovery command as a workspace name. Remove it or name the workspace."
+        )
+    since = _str_field(table, "since", "1d", where="source").strip()
+    if not since:
+        # The renderer drops an argument that renders empty, and with it the
+        # flag that introduced it, so the request sent would carry no window at
+        # all: a different request from the one configured, and an unbounded one.
+        raise ConfigError(
+            "[source].since is empty or whitespace: the discovery command would be sent with no "
+            "window on it, a different request from the one configured (the limit still bounds "
+            "the page, the window no longer does). Set a window the discovery tool understands, "
+            'such as "1d".'
+        )
     max_messages = _int_field(table, "max_messages", 0, where="source")
     return SourceConfig(
         kind=kind,
@@ -634,9 +655,11 @@ def _load_source(table: Mapping[str, Any], *, base_dir: Path) -> SourceConfig:
         export_argv=_argv_field(
             table, "export_argv", DEFAULT_EXPORT_ARGV, required_placeholders=("{thread_id}",)
         ),
-        since=_str_field(table, "since", "1d", where="source"),
+        since=since,
         discovery_limit=_int_field(table, "discovery_limit", 40, where="source", minimum=1),
-        query=_str_field(table, "query", "", where="source"),
+        # A query of only whitespace is no query; sent as written it would be
+        # a positional that matches nothing.
+        query=_str_field(table, "query", "", where="source").strip(),
         workspaces=tuple(workspaces),
         keep_raw=_bool_field(table, "keep_raw", True, where="source"),
         fixtures_dir=fixtures_dir,
