@@ -438,7 +438,10 @@ class DocumentedRefusalsExist(unittest.TestCase):
     ROOTS = ("SafetyRefusal", "LockHeld")
     #: CamelCase code spans in OPERATIONS that are not error classes, each with
     #: the reason, so this cannot quietly become an allowance list for typos.
-    NOT_A_CLASS = {"PROBLEM": "the word `asi doctor` prints for a failed check"}
+    NOT_A_CLASS = {
+        "PROBLEM": "the word `asi doctor` prints for a failed check",
+        "WARN": "the word `asi doctor` prints for a finding that does not fail the check",
+    }
 
     @staticmethod
     def error_classes(source: str) -> dict[str, str | None]:

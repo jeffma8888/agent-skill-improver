@@ -177,6 +177,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     permissions_repaired: list[str] = []
     permission_problems: list[str] = []
     layout_problems: list[str] = []
+    left_alone: list[str] = []
     if config.state_dir.exists() or config.state_dir.is_symlink():
         layout_problems = state.layout_problems()
         if layout_problems:
@@ -191,6 +192,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 problems.append(
                     f"{len(permission_problems)} path(s) under {config.state_dir} are not "
                     f"owner-only even after an attempted repair: {permission_problems[0]}"
+                )
+            # A link below the mandatory layout is stepped over, not repaired:
+            # its mode is not ours to set and a write replaces it rather than
+            # following it. It is still not this tool's entry, so the tree is
+            # not called clean while it is there.
+            left_alone = state.foreign_entries()
+            if len(left_alone) == 1:
+                warnings.append(
+                    f"1 entry under {config.state_dir} is not a regular file or directory and "
+                    f"was left alone, neither repaired nor removed: {left_alone[0]}. This tool "
+                    "refuses to read such an entry and replaces rather than follows one it "
+                    "writes to; remove it if you did not put it there."
+                )
+            elif left_alone:
+                warnings.append(
+                    f"{len(left_alone)} entries under {config.state_dir} are not regular files "
+                    f"or directories and were left alone, neither repaired nor removed: "
+                    f"{left_alone[0]}. This tool refuses to read such entries and replaces "
+                    "rather than follows one it writes to; remove them if you did not put "
+                    "them there."
                 )
 
     source = build_source(config, state)
@@ -218,6 +239,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "repaired": permissions_repaired,
             "still_wrong": permission_problems,
             "unsafe_layout": layout_problems,
+            "left_alone": left_alone,
         },
         "roles_configured": sorted(config.model_roles),
         "skill_roots": [{**r.to_dict(), "exists": r.path.is_dir()} for r in config.skill_roots],
@@ -249,7 +271,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"required={isolation.required} satisfied={isolation.satisfied}",
         f"state perms  dirs {oct(DIR_MODE)} / files {oct(STATE_FILE_MODE)}, "
         f"{len(permissions_repaired)} repaired, {len(permission_problems)} still wrong, "
-        f"{len(layout_problems)} not a real directory",
+        f"{len(layout_problems)} not a real directory, {len(left_alone)} left alone",
         f"roles        {', '.join(sorted(config.model_roles)) or '<none configured>'}",
         f"skill roots  {len(config.skill_roots)} configured, {len(store.existing_roots())} present",
         f"skills       {len(store.known_skill_ids())} discovered, {len(broken)} do not load, "

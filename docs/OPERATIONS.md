@@ -33,7 +33,15 @@ package. The alternative, if you cannot install one, is to run against the
 synthetic fixture corpus, which classifies as synthetic and needs no sandbox.
 
 `doctor` also repairs `state/` permissions on the way through and reports what it
-changed. A repair that cannot take effect is a refusal, not a warning.
+changed. A repair that cannot take effect is a refusal, not a warning. An entry
+inside the tree that is not a regular file or directory (a symlink, a fifo or a
+socket some other tool left there) is neither repaired nor removed: this tool
+only creates regular files and directories, so its mode is not this tool's to
+set; every state record read, the backup manifest read and the run lock refuse
+such a leaf by name without blocking on it (the backup *file* is judged by its
+hash instead, so a link to the right bytes is harmless), and a write replaces
+rather than follows it. `doctor` lists such entries as `left_alone` and
+prints a `WARN`, so a tree is never called clean while a foreign entry sits in it.
 
 ## Exit codes
 

@@ -448,6 +448,42 @@ class RollbackSafetyTests(Harness):
         with self.assertRaises(BackupUnusable):
             self.store(read_only=False).rollback(manifest)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "fifos are POSIX")
+    def test_a_manifest_that_is_a_fifo_is_refused_rather_than_waited_on(self):
+        """``open`` on a fifo with no writer never returns. The manifest is judged
+        before it is opened, so a planted one is a refusal, not a hung rollback."""
+        import signal
+
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        manifest.unlink()
+        os.mkfifo(manifest)
+
+        def hung(signum, frame):  # pragma: no cover - only fires on regression
+            raise AssertionError("opening the fifo manifest blocked instead of refusing")
+
+        previous = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(5)
+        try:
+            with self.assertRaises(BackupUnusable) as ctx:
+                self.store(read_only=False).rollback(manifest)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertIn("not a regular file", str(ctx.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), applied, "no file was touched")
+
+    def test_a_manifest_that_is_a_symlink_is_refused_before_it_is_read(self):
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        real = manifest.with_name("real-manifest.json")
+        manifest.rename(real)
+        manifest.symlink_to(real)
+        with self.assertRaises(BackupUnusable) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("not a regular file", str(ctx.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), applied, "no file was touched")
+
     def test_a_manifest_pointing_at_a_payload_file_is_refused_on_its_filename(self):
         _target, manifest, _previous = self.apply_a_change()
         payload = json.loads(manifest.read_text(encoding="utf-8"))

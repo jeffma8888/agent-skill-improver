@@ -376,6 +376,13 @@ class FilesystemSkillStore:
         from ..jsonio import read_json
 
         path = Path(manifest_path)
+        # Judged before it is opened: a symlink would be read through, and a
+        # fifo would hold the process until something wrote to it.
+        if path.is_symlink() or not path.is_file():
+            raise BackupUnusable(
+                f"refusing to roll back: backup manifest {path} is not a regular file "
+                "(a symlink, a fifo or a missing entry is never read). No file was touched."
+            )
         try:
             manifest = read_json(path)
         except (OSError, ValueError) as exc:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import stat
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -25,7 +26,9 @@ class RunLock:
 
     def __enter__(self) -> "RunLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_RDWR | os.O_CREAT
+        # O_NONBLOCK guards the open itself: a regular file ignores it, and a
+        # fifo precreated at the path would otherwise park the process here.
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NONBLOCK", 0)
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         if not nofollow and self.path.is_symlink():
             raise SafetyRefusal(
@@ -39,6 +42,22 @@ class RunLock:
                     f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
                 ) from exc
             raise
+        # Judged before anything is done to it: a fifo or a device at the lock
+        # path is not this tool's file, so its mode is not ours to set, a read
+        # of it could wait forever and a write to it would go who knows where.
+        try:
+            kind = os.fstat(fd).st_mode
+        except OSError as exc:
+            os.close(fd)
+            raise SafetyRefusal(
+                f"refusing to use {self.path} as a run lock: cannot stat it ({exc})"
+            ) from exc
+        if not stat.S_ISREG(kind):
+            os.close(fd)
+            raise SafetyRefusal(
+                f"refusing to use {self.path} as a run lock: the lock leaf is not a regular "
+                "file. Remove the entry at that path if you did not put it there."
+            )
         # The 0o600 above applies only when the file is CREATED, and it is
         # further masked by the umask. An existing lock file from a run under a
         # permissive umask keeps its old mode, so set it explicitly. It carries
@@ -70,9 +89,13 @@ class RunLock:
                 + (f" ({held})" if held else "")
                 + ". Overlapping runs would double-count records and race on the checkpoint."
             ) from exc
-        os.ftruncate(fd, 0)
-        os.write(fd, f"{self.owner}\n".encode("utf-8"))
-        os.fsync(fd)
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{self.owner}\n".encode("utf-8"))
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            raise
         self._fd = fd
         return self
 

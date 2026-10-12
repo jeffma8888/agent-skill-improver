@@ -261,7 +261,7 @@ class StateStore:
         if self.root.exists() and _chmod_to(self.root, DIR_MODE) and "." not in changed:
             changed.append(".")
         for path in sorted(self.root.rglob("*")):
-            if path.is_symlink():
+            if _foreign_reason(path):
                 continue
             want = DIR_MODE if path.is_dir() else STATE_FILE_MODE
             rel = str(path.relative_to(self.root))
@@ -277,13 +277,38 @@ class StateStore:
         if not _mode_ok(self.root, DIR_MODE):
             problems.append(f". is {_mode_of(self.root)}, want {oct(DIR_MODE)}")
         for path in sorted(self.root.rglob("*")):
-            if path.is_symlink():
+            if _foreign_reason(path):
                 continue
             want = DIR_MODE if path.is_dir() else STATE_FILE_MODE
             if not _mode_ok(path, want):
                 rel = path.relative_to(self.root)
                 problems.append(f"{rel} is {_mode_of(path)}, want {oct(want)}")
         return problems
+
+    def foreign_entries(self) -> list[str]:
+        """Every entry under the root that the mode walk steps over, relative to it.
+
+        This tool only ever creates regular files and directories, so anything
+        else in the tree is somebody else's. A symlink's mode is not its own,
+        and a chmod through it would mutate whatever it points at; a fifo or a
+        socket carries no content whose mode could leak anything. So
+        ``repair_permissions`` and ``permission_problems`` skip every such
+        entry, by the same predicate used here. Skipping is safe: every state
+        record read, the backup manifest read and the run lock refuse a leaf
+        that is not a regular file, by name and without blocking on it, and a
+        write replaces the entry rather than following it. Saying nothing
+        about them is not safe, which is why ``doctor``
+        names them. Nothing here removes one; deleting an entry this tool did
+        not create is the operator's call.
+        """
+        if not self.root.exists() or self.layout_problems():
+            return []
+        found: list[str] = []
+        for path in sorted(self.root.rglob("*")):
+            reason = _foreign_reason(path)
+            if reason:
+                found.append(f"{path.relative_to(self.root)} {reason}")
+        return found
 
     def verify_permissions(self) -> None:
         """Fail closed when the tree is not private after repair."""
@@ -514,7 +539,9 @@ class StateStore:
         return out
 
     def count(self, name: str) -> int:
-        return len(list(self.dir(name).glob("*.json")))
+        # Only what a read would return: a symlinked leaf is refused by every
+        # reader, so counting it would promise a record no command can show.
+        return sum(1 for p in self.dir(name).glob("*.json") if p.is_file() and not p.is_symlink())
 
     # -- checkpoints -----------------------------------------------------
     def checkpoint_path(self, day: str) -> Path:
@@ -617,8 +644,14 @@ class StateStore:
 
 
 def _read_state_json(path: Path) -> Any:
-    """Read one state leaf without ever following a precreated symlink."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    """Read one state leaf without following a symlink or blocking on a fifo.
+
+    ``O_NONBLOCK`` is set only for the ``open``: a regular file ignores it, and a
+    fifo precreated at the path would otherwise park the process until something
+    writes to it. The descriptor is then checked with ``fstat`` so that whatever
+    the entry really is, only a regular file is ever read.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     if not getattr(os, "O_NOFOLLOW", 0) and path.is_symlink():
         raise StateUnreadable(f"refusing to read state artifact {path}: the leaf is a symlink")
     try:
@@ -630,16 +663,27 @@ def _read_state_json(path: Path) -> Any:
             ) from exc
         raise
     try:
-        with os.fdopen(fd, "r", encoding="utf-8") as handle:
-            import json
-
-            return json.load(handle)
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        os.close(fd)
         raise
+    if not regular:
+        os.close(fd)
+        raise StateUnreadable(
+            f"refusing to read state artifact {path}: the leaf is not a regular file"
+        )
+    # Ownership of the descriptor passes to the file object exactly once: if
+    # ``fdopen`` itself fails the raw descriptor is closed here, and from then
+    # on the ``with`` block is the only thing that closes it.
+    try:
+        handle = os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        import json
+
+        return json.load(handle)
 
 
 def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
@@ -787,6 +831,19 @@ def _mode_ok(path: Path, want: int) -> bool:
         return stat.S_IMODE(path.stat().st_mode) == want
     except OSError:
         return False
+
+
+def _foreign_reason(path: Path) -> str | None:
+    """Why an entry is not this tool's, or ``None`` for a regular file or directory.
+
+    Measured with ``lstat`` first so a symlink is judged as a symlink, never as
+    whatever it points at.
+    """
+    if path.is_symlink():
+        return "is a symlink"
+    if path.is_dir() or path.is_file():
+        return None
+    return "is not a regular file or directory"
 
 
 def _chmod_to(path: Path, want: int) -> bool:

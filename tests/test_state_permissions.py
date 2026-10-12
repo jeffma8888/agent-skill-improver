@@ -494,6 +494,77 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         store.verify_permissions()
         self.assertEqual(oct(mode_of(outside)), oct(0o644))
 
+    def test_every_entry_the_mode_walk_skips_is_named_rather_than_silently_passed(self):
+        """Skipping a link is the safe move; saying nothing about it is not. The
+        store names what it stepped over so ``doctor`` can, and names nothing on
+        a healthy tree."""
+        store = self.store()
+        store.ensure()
+        self.assertEqual(store.foreign_entries(), [])
+        outside = self._outside_dir()
+        (self.root / "raw" / "link.json").symlink_to(outside / "keep.txt")
+        (self.root / "receipts" / "elsewhere").symlink_to(outside)
+        (self.root / "receipts" / "real.json").write_text("{}", encoding="utf-8")
+
+        self.assertEqual(
+            store.foreign_entries(),
+            ["raw/link.json is a symlink", "receipts/elsewhere is a symlink"],
+        )
+        self.assertEqual(store.layout_problems(), [])
+        store.repair_permissions()
+        store.verify_permissions()
+        self._assert_outside_untouched(outside)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "fifos are POSIX")
+    def test_a_fifo_in_the_tree_is_named_left_alone_and_never_opened_for_long(self):
+        """The one shape of foreign entry that is not a link. Its mode is not
+        content, so the walk must not touch it, and a read must refuse it at
+        once: ``open`` on a fifo with no writer otherwise never returns."""
+        import signal
+
+        from agent_skill_improver.app.state import _read_state_json
+        from agent_skill_improver.errors import StateUnreadable
+
+        store = self.store()
+        store.ensure()
+        pipe = self.root / "deferred" / "conv-9.json"
+        os.mkfifo(pipe)
+        os.chmod(pipe, 0o644)
+
+        self.assertEqual(
+            store.foreign_entries(), ["deferred/conv-9.json is not a regular file or directory"]
+        )
+        self.assertEqual(store.repair_permissions(), [])
+        store.verify_permissions()
+        self.assertEqual(oct(mode_of(pipe)), oct(0o644), "the fifo's mode is not ours to set")
+        self.assertEqual(store.count("deferred"), 0)
+
+        def hung(signum, frame):  # pragma: no cover - only fires on regression
+            raise AssertionError("opening the fifo blocked instead of refusing")
+
+        previous = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(5)
+        try:
+            with self.assertRaises(StateUnreadable) as ctx:
+                _read_state_json(pipe)
+            self.assertEqual(store.deferred_attempts("conv-9"), 0)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertIn("not a regular file", str(ctx.exception))
+
+    def test_a_symlinked_leaf_is_not_counted_as_a_record(self):
+        """Every read refuses a symlinked leaf, so a count that includes one
+        promises a record no command will ever return."""
+        store = self.store()
+        store.ensure()
+        outside = self._outside_dir()
+        store.quarantine("conv-1", stage="scoring", reason="unit test")
+        (self.root / "quarantine" / "planted.json").symlink_to(outside / "keep.txt")
+
+        self.assertEqual(store.count("quarantine"), 1)
+        self._assert_outside_untouched(outside)
+
 
 class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
     """``doctor`` runs on a tree nobody has ensured yet, so it is the command most
@@ -525,6 +596,54 @@ class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
                 payload["problems"],
             )
             self.assertEqual(payload["state_permissions"]["repaired"], [])
+            self.assertEqual(oct(mode_of(outside)), oct(0o755))
+            self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
+
+    def test_doctor_names_a_link_inside_a_confined_tree_as_a_warning_not_a_problem(self):
+        """A link below the mandatory layout redirects nothing this tool writes
+        (a write replaces it, a read refuses it), so the tree is still usable.
+        It is still not this tool's entry, so ``doctor`` says it is there and
+        that it was left alone, instead of calling the tree clean."""
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            config = build_env(base, dry_run=True)
+            outside = base / "outside"
+            outside.mkdir()
+            os.chmod(outside, 0o755)
+            (outside / "keep.txt").write_text("keep me", encoding="utf-8")
+            os.chmod(outside / "keep.txt", 0o644)
+            state = base / "state"
+            StateStore(
+                state,
+                clock=FrozenClock(datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)),
+            ).ensure()
+            (state / "candidates" / "planted.json").symlink_to(outside / "keep.txt")
+            (state / "receipts" / "elsewhere").symlink_to(outside)
+
+            proc = run_cli(["--config", str(config), "--json", "doctor"])
+            text = run_cli(["--config", str(config), "doctor"])
+
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            payload = json.loads(proc.stdout)
+            perms = payload["state_permissions"]
+            self.assertEqual(
+                perms["left_alone"],
+                ["candidates/planted.json is a symlink", "receipts/elsewhere is a symlink"],
+            )
+            self.assertEqual(perms["unsafe_layout"], [])
+            self.assertEqual(perms["still_wrong"], [])
+            self.assertEqual(payload["problems"], [])
+            self.assertTrue(
+                any(
+                    "left alone" in w and "candidates/planted.json" in w
+                    for w in payload["warnings"]
+                ),
+                payload["warnings"],
+            )
+            self.assertIn("2 left alone", text.stdout)
+            self.assertIn("WARN", text.stdout)
+            self.assertIn("verdict: ready", text.stdout)
             self.assertEqual(oct(mode_of(outside)), oct(0o755))
             self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
             self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
@@ -583,6 +702,37 @@ class LockFileTests(StateTreeHarness):
         self.assertIn("0600", str(ctx.exception))
         self.assertEqual(path.read_text(encoding="utf-8"), "keep me\n")
         self.assertEqual(oct(mode_of(path)), oct(0o666))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "fifos are POSIX")
+    def test_a_fifo_at_the_lock_path_is_refused_without_being_waited_on(self):
+        """A fifo at the lock path used to be opened, chmodded and then read,
+        and the read never returned. It is judged first now: a named refusal,
+        its mode untouched, nothing written to it."""
+        import signal
+
+        from agent_skill_improver.app.lock import RunLock
+
+        store = self.store()
+        store.ensure()
+        path = store.dir("locks") / "daily.lock"
+        os.mkfifo(path)
+        os.chmod(path, 0o644)
+
+        def hung(signum, frame):  # pragma: no cover - only fires on regression
+            raise AssertionError("the lock blocked on the fifo instead of refusing")
+
+        previous = signal.signal(signal.SIGALRM, hung)
+        signal.alarm(5)
+        try:
+            with self.assertRaises(SafetyRefusal) as ctx:
+                with RunLock(path):
+                    pass
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertIn("not a regular file", str(ctx.exception))
+        self.assertTrue(stat.S_ISFIFO(os.lstat(path).st_mode), "the entry was not replaced")
+        self.assertEqual(oct(mode_of(path)), oct(0o644), "the fifo's mode is not ours to set")
 
     def test_the_run_lock_is_0600_even_when_it_already_existed_wider(self):
         from agent_skill_improver.app.lock import RunLock
