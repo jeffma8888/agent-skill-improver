@@ -95,6 +95,34 @@ class TheStoreReadsBackWhatItSetAsideTests(unittest.TestCase):
         self.assertIn("field 'reason' is not a string", reasons["nested-reason.json"])
         self.assertTrue(link.is_symlink(), "the planted link is left alone")
 
+    @unittest.skipIf(os.geteuid() == 0, "root opens anything")
+    def test_a_record_that_cannot_be_opened_is_listed_not_raised(self) -> None:
+        self.store.quarantine("conv-1", stage="score", reason="r")
+        self.store.defer("conv-2", stage="ingest", reason="later")
+        self.store.defer("conv-2", stage="ingest", reason="later")
+        locked = self.store.quarantine("conv-3", stage="score", reason="r")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        deferral = self.store.defer("conv-4", stage="ingest", reason="later")
+        deferral.chmod(0)
+        self.addCleanup(lambda: deferral.exists() and deferral.chmod(0o600))
+        scan = self.store.scan_set_aside()
+        self.assertEqual(sorted(r.record_id for r in scan.readable), ["conv-1", "conv-2"])
+        self.assertEqual(
+            sorted(u.path.name for u in scan.unreadable), sorted([locked.name, deferral.name])
+        )
+        for u in scan.unreadable:
+            self.assertTrue(u.reason.startswith("cannot be opened: "), u.reason)
+        # The daily pass reads deferrals too: one it cannot open is no streak,
+        # not a crash; a fresh deferral replaces it and the streak restarts.
+        self.assertEqual(self.store.deferred_ids(), ["conv-2"])
+        self.assertEqual(self.store.deferred_attempts("conv-4"), 0)
+        self.assertEqual(self.store.deferred_attempts("conv-2"), 2)
+        replaced = self.store.defer("conv-4", stage="ingest", reason="later")
+        self.assertEqual(replaced, deferral)
+        self.assertEqual(self.store.deferred_attempts("conv-4"), 1)
+        self.assertEqual(sorted(self.store.deferred_ids()), ["conv-2", "conv-4"])
+
     def test_an_empty_tree_is_an_empty_scan(self) -> None:
         scan = self.store.scan_set_aside()
         self.assertEqual(scan, type(scan)(readable=(), unreadable=()))
@@ -198,6 +226,14 @@ class TheListingSaysWhatTheRunsSetAsideTests(unittest.TestCase):
         self.assertEqual(
             [Path(u["path"]).name for u in payload["unreadable"]], ["half-written.json"]
         )
+        if os.geteuid() != 0:
+            # Measured before: exit 70 with a PermissionError traceback.
+            junk.chmod(0)
+            self.addCleanup(junk.chmod, 0o600)
+            proc = run_cli([*self.cfg, "set-aside"])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            self.assertIn("cannot be opened: ", proc.stdout)
+            self.assertTrue(proc.stdout.startswith("UNREADABLE  half-written.json  "), proc.stdout)
 
 
 if __name__ == "__main__":  # pragma: no cover

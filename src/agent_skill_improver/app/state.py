@@ -658,8 +658,8 @@ class StateStore:
     def _read_deferred_attempts(path: Path) -> int:
         """The attempt count a deferral file holds; 0 for anything that is not ours to read.
 
-        A link, a non-file or a record that does not parse is read as no
-        streak at all. Measured before: a link planted at the path made
+        A link, a non-file, a record that does not parse or one this process
+        cannot open is read as no streak at all. Measured before: a link planted at the path made
         ``defer`` raise ``StateUnreadable`` from inside the ingest handler,
         which ended the whole run with no receipt; and a fresh deferral then
         wrote through ``_persist``, which replaces the link rather than
@@ -669,7 +669,7 @@ class StateStore:
             return 0
         try:
             raw = _read_state_json(path)
-        except (ValueError, StateUnreadable):
+        except (ValueError, StateUnreadable, OSError):
             return 0
         if not isinstance(raw, dict):
             # Valid JSON that is not an object (``[]``, ``"x"``, ``5``,
@@ -726,6 +726,11 @@ class StateStore:
                 except (ValueError, StateUnreadable) as exc:
                     unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
                     continue
+                except OSError as exc:
+                    # Listed like a torn record: ``set-aside`` is a read-only
+                    # listing, so it repairs nothing and must not crash either.
+                    unreadable.append(UnreadableRecord(path=path, reason=_cannot_open(exc)))
+                    continue
                 problem = _set_aside_shape_problem(raw)
                 if problem:
                     unreadable.append(
@@ -760,7 +765,7 @@ class StateStore:
                 continue
             try:
                 raw = _read_state_json(path)
-            except (ValueError, StateUnreadable):
+            except (ValueError, StateUnreadable, OSError):
                 continue
             if not isinstance(raw, dict) or "record_id" not in raw:
                 continue
@@ -886,9 +891,7 @@ class StateStore:
                 # A receipt this process cannot open (a mode someone changed, a
                 # vanished file) is listed like a torn one: the scan sits on the
                 # scheduled ``daily`` path, where a traceback is a 70, not an answer.
-                unreadable.append(
-                    UnreadableRecord(path=path, reason=f"cannot be opened: {exc.strerror or exc}")
-                )
+                unreadable.append(UnreadableRecord(path=path, reason=_cannot_open(exc)))
                 continue
             if not isinstance(raw, dict):
                 unreadable.append(
@@ -1144,6 +1147,11 @@ def _name_binding_problem(path: Path, candidate: Candidate) -> str | None:
         "by the id it claims is neither reviewable nor countable; rename it to "
         f"{candidate.id}.json if it is genuine, or move it out of the state tree."
     )
+
+
+def _cannot_open(exc: OSError) -> str:
+    """The one spelling every listing uses for a record this process cannot open."""
+    return f"cannot be opened: {exc.strerror or exc}"
 
 
 def _candidate_from_file(path: Path) -> Candidate:
