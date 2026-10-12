@@ -79,7 +79,10 @@ That caveat is not hypothetical. A calendar-interval job on a laptop that sleeps
 can miss many consecutive intervals while reporting no error anywhere, because
 there is nothing to report: the interval simply never arrived. If continuous
 coverage matters to you, compare the newest receipt's timestamp against the clock
-rather than trusting the schedule.
+rather than trusting the schedule. `asi doctor` makes that comparison: its
+`last run` line gives the newest receipt's age in whole days and warns when it is
+more than two whole days old. That is a warning, not a problem, so if you
+deliberately run less often, read it as such.
 
 ## Standing down is a normal outcome
 

@@ -47,7 +47,13 @@
        missed while the machine was asleep is simply skipped rather than queued.
        That is the safer default here: the loop is idempotent per UTC day, so the
        next day's run picks up where this one left off, and deferred records are
-       retried by design. -->
+       retried by design. Whether the job actually fired is a question for
+       asi doctor, whose last run line gives the newest receipt's age and warns
+       once it is more than two whole days old. Exit status 5 means the skill
+       tree changed while the run was reading it; every committed run after that
+       exits 5 again, before taking the lock, until one run is started with the
+       mutation-reviewed flag naming the blocked run's day (a dry run writes no
+       receipt, so it neither blocks nor clears). This file needs no change. -->
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key><integer>3</integer>

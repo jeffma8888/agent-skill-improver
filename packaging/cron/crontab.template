@@ -12,7 +12,7 @@
 # under the automation marker that the daily driver always sets, so adding it
 # would not work anyway.
 #
-# Three practical notes, each earned the hard way:
+# Four practical notes, each earned the hard way:
 #
 #   * cron runs with a minimal environment. Use absolute paths for both the
 #     interpreter and the config, which is why this template substitutes them.
@@ -22,6 +22,16 @@
 #   * Redirect both streams. The output can contain excerpts of private
 #     conversation content, so it belongs in the configured state directory with
 #     everything else the loop reads, where the next run resets it to owner-only.
+#   * Read the exit status, not only the log. 0 is a run, including one that
+#     stood down for a stated reason; 3 is a refusal with the exception named on
+#     stderr; 5 means the skill tree changed while the run was reading it. Every
+#     committed run after a 5 exits 5 again, before taking the lock or reading a
+#     conversation, until one run is started with
+#     `--mutation-reviewed 2026-01-01` naming the blocked run's day (a dry run
+#     writes no receipt, so it neither blocks the next run nor clears a block).
+#     The daily line below needs no change for that. `asi doctor` prints the
+#     newest receipt's age and warns once it is more than two whole days old:
+#     it, not this crontab, says whether the schedule fires.
 # ---------------------------------------------------------------------------
 
 # m  h  dom mon dow   command
@@ -31,3 +41,7 @@
 # anything; if nobody runs `asi candidates` and `asi review`, nothing ever ships,
 # and that is the intended failure mode rather than an accident.
 #  0  9   *   *   1    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ candidates
+
+# Weekly health check. The `last run` line answers whether this schedule fired,
+# whether the last run saw the skill tree change, and under what confinement.
+#  5  9   *   *   1    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ doctor

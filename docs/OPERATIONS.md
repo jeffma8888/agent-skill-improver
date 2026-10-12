@@ -518,8 +518,8 @@ A detected mutation is a problem (exit 1, with the receipt path to read and the
 `--mutation-reviewed 2026-01-01` run that lets `daily` continue); a receipt
 that does not say whether the tree was mutated prints `mutation=unknown` with a
 warning; a receipt that does not read as one is a warning with its reason, never a
-silent skip. Recency is judged, not only printed: a finish time more than two days
-old warns that the scheduler, not the job, is what to check; one in the future or
+silent skip. Recency is judged, not only printed: a finish time more than two whole
+days old warns that the scheduler, not the job, is what to check; one in the future or
 one that does not parse warns that the clock or the receipt was edited, rather than
 reading as today. Dry runs write no receipt, so they do not count as a run here. With
 `--json` the same facts are the `last_run` object (`age_days` included) and the
