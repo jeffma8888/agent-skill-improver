@@ -324,6 +324,66 @@ class StateLayoutIsConfinedToItsRootTests(StateTreeHarness):
         self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
         self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
 
+    def test_a_dotted_path_through_a_symlinked_ancestor_is_refused_not_collapsed(self):
+        """``parent/link/../state`` names ``parent/state`` on paper and
+        ``<target's parent>/state`` on disk. The check used to collapse the
+        dots first and never look at the link; the tree was then created
+        through it."""
+        deep = self.root.parent / "deep"
+        deep.mkdir()
+        outside = deep / "outside"
+        outside.mkdir()
+        os.chmod(outside, 0o755)
+        (self.root.parent / "link").symlink_to(outside)
+        dotted = self.root.parent / "link" / ".." / "state"
+        store = StateStore(
+            dotted,
+            clock=FrozenClock(datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)),
+        )
+
+        with self.assertRaises(SafetyRefusal) as ctx:
+            store.ensure()
+        self.assertIn(f"ancestor {self.root.parent / 'link'} is a symlink to", str(ctx.exception))
+        self.assertFalse((deep / "state").exists(), "the tree was created through the link")
+        self.assertFalse(self.root.exists(), "nothing was created at the lexical location either")
+        self.assertEqual(sorted(p.name for p in deep.iterdir()), ["outside"])
+        self.assertEqual(oct(mode_of(outside)), oct(0o755))
+
+    def test_a_dotted_path_that_steps_back_over_an_absent_component_still_meets_the_link(self):
+        """``parent/missing/../link/state``: the walk must not stop at
+        ``missing``, because ``..`` steps back onto ``parent`` and the link
+        after it is exactly what the kernel will follow. Checked on both the
+        eager and the lazy entry point, since ``dir()`` has no later verify to
+        catch what the walk missed."""
+        outside = self._outside_dir()
+        (self.root.parent / "link").symlink_to(outside)
+        dotted = self.root.parent / "missing" / ".." / "link" / "state"
+        clock = FrozenClock(datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc))
+
+        expected = f"ancestor {self.root.parent / 'link'} is a symlink to"
+        with self.assertRaises(SafetyRefusal) as ctx:
+            StateStore(dotted, clock=clock).ensure()
+        self.assertIn(expected, str(ctx.exception))
+        with self.assertRaises(SafetyRefusal) as ctx:
+            StateStore(dotted, clock=clock).dir("conversations")
+        self.assertIn(expected, str(ctx.exception))
+        self._assert_outside_untouched(outside)
+        self.assertFalse((self.root.parent / "missing").exists())
+
+    def test_the_control_a_dotted_path_through_real_directories_is_accepted(self):
+        """The same shape with a real directory in place of the link is just a
+        long way of writing the lexical path, and lands there."""
+        real = self.root.parent / "real"
+        real.mkdir()
+        dotted = real / ".." / "state"
+        store = StateStore(
+            dotted,
+            clock=FrozenClock(datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)),
+        )
+        store.ensure()
+        self.assertTrue(self.root.is_dir() and not self.root.is_symlink())
+        self.assertEqual(oct(mode_of(self.root)), oct(DIR_MODE))
+
     def test_an_existing_symlink_in_a_state_root_ancestor_is_refused_before_creation(self):
         outside = self._outside_dir()
         alias = self.root.parent / "alias"

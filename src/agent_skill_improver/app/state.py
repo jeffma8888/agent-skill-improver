@@ -738,15 +738,33 @@ def _label(path: Path, root: Path) -> str:
 
 
 def _ancestor_layout_reason(root: Path) -> str | None:
-    """Why an existing ancestor would redirect ``root``, without following it."""
-    absolute = Path(os.path.abspath(root))
+    """Why an existing ancestor would redirect ``root``, without following it.
+
+    The path is walked as written, never after a lexical collapse of ``..``:
+    ``os.path.abspath`` turns ``/a/link/../state`` into ``/a/state`` and would
+    never look at ``/a/link``, while the kernel resolves the link first and
+    lands under its target. A ``..`` steps back only once every component before
+    it has been measured to be a real directory or to be absent, so the lexical
+    parent is also the physical one.
+    """
+    absolute = root.absolute()
+    ancestors = absolute.parts[1:-1]
     current = Path(absolute.anchor)
-    for component in absolute.parts[1:-1]:
+    for index, component in enumerate(ancestors):
+        if component == ".":  # pragma: no cover - pathlib drops these at construction
+            continue
+        if component == "..":
+            current = current.parent
+            continue
         current /= component
         try:
             entry = os.lstat(current)
         except FileNotFoundError:
-            # Once an ancestor is absent, every descendant is absent too.
+            # An absent component ends the chain only when nothing steps back
+            # over it: a later ``..`` lands on entries that do exist, and one
+            # of those may be the link this walk is for.
+            if ".." in ancestors[index + 1 :]:
+                continue
             return None
         except OSError as exc:
             return f"ancestor {current} cannot be inspected ({exc.strerror})"
