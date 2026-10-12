@@ -209,9 +209,11 @@ derived from conversation content and can carry a forged line), a listed entry
 with no "Thread:" line the parser could read, or one whose "Thread:" line is
 blank or not an id; an unsafe id is never placed on a command line, and `doctor`
 cannot list these without running discovery, so the receipt is their only
-surface. Each is in no count on the
-receipt and a note names them. `is_total` is unaffected: the window was read
-whole; part of it did not parse.
+surface. A listing is numbered per query, so for this source, when a workspace
+was queried, the entry names it ("listing entry 1 ('x') in workspace /a"); the same number in
+two workspaces is two entries. Each is in no count on the receipt and a note
+names them. `is_total` is unaffected: the window was read whole; part of it did
+not parse.
 
 **`selection.bucket_coverage`** — fraction of buckets that contributed. A run that
 touched one bucket of five looks fine by count and is not representative.

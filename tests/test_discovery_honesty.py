@@ -647,6 +647,31 @@ class AListedEntryWithoutAReadableThreadLineIsNamedTests(unittest.TestCase):
             ["listing entry #1 ('') with id '(odd)'", "listing entry #2 ('') with id '-rf'"],
         )
 
+    def test_the_same_listing_number_in_two_workspaces_is_two_entries_not_one(self):
+        # Measured before: both pages named "listing entry 1 ('x')" with one
+        # reason, merge_pages kept one, and the receipt said one conversation
+        # was passed over when two were.
+        listing = '1. "x" (2026-01-02)\n'
+
+        class Headless(ConversationCliSource):
+            def _run(self, argv, **kwargs):  # type: ignore[override]
+                return listing
+
+        source = Headless()
+        pages = [source.discover_page(since="1d", limit=5, workspace=w) for w in ("/a", "/b")]
+        self.assertEqual(pages[0].passed_over[0][0], "listing entry 1 ('x') in workspace /a")
+        _, summary = merge_pages(pages)
+        self.assertEqual(
+            [item["entry"] for item in summary["passed_over"]],
+            ["listing entry 1 ('x') in workspace /a", "listing entry 1 ('x') in workspace /b"],
+        )
+        self.assertIn("passed over 2 source entries", passed_over_note(summary["passed_over"]))
+        # No workspace queried: nothing to append, the entry reads as before.
+        self.assertEqual(
+            source.discover_page(since="1d", limit=5).passed_over[0][0],
+            "listing entry 1 ('x')",
+        )
+
 
 class ExplicitLimitTests(unittest.TestCase):
     """The limit is always sent. Relying on an interface default is the bug."""

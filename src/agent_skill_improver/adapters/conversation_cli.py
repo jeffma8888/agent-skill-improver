@@ -335,6 +335,14 @@ class ConversationCliSource:
         """
         argv = self.build_discovery_argv(since=since, limit=limit, workspace=workspace, query=query)
         threads, passed_over = parse_discovery(self._run(argv))
+        if workspace:
+            # A listing is numbered per query. "listing entry 1" in one workspace
+            # and in the next are two conversations; merge_pages de-duplicates
+            # passed-over items by their text, so the workspace has to be in it
+            # or two become one on the receipt.
+            passed_over = [
+                (f"{entry} in workspace {workspace}", reason) for entry, reason in passed_over
+            ]
         return page_from_threads(
             threads,
             limit=limit,
