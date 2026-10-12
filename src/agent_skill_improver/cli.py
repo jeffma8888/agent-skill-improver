@@ -642,17 +642,29 @@ def cmd_skills(args: argparse.Namespace) -> int:
             if not canonical.loads:
                 head += "  [DOES NOT LOAD]"
         # A copy in the root that would be edited is not a mirror; when that
-        # root holds several, they are listed as what they are.
+        # root holds several, they are listed as what they are. A root is
+        # named once with a count, never once per copy.
         if group.ambiguous_copies:
-            head += f"  ambiguous={','.join(c.root_id for c in group.ambiguous_copies)}"
+            head += f"  ambiguous={_root_labels(group.ambiguous_copies)}"
         mirrors = [m for m in group.mirrors if m not in group.ambiguous_copies]
         if mirrors:
-            head += f"  mirrors={','.join(m.root_id for m in mirrors)}"
+            head += f"  mirrors={_root_labels(mirrors)}"
         if group.divergent_mirrors:
-            head += f"  DIVERGENT={','.join(m.root_id for m in group.divergent_mirrors)}"
+            head += f"  DIVERGENT={_root_labels(group.divergent_mirrors)}"
         lines.append(head)
         if canonical is None:
             lines.append(f"    why: {one_line(group.canonical_reason)}")
+        # A root holding several mirror copies of this skill is one name in
+        # the head line, so which copy is which, and which one diverged, is
+        # said here by path. Measured before: two copies in one mirror root
+        # read as "mirrors=mirror,mirror  DIVERGENT=mirror", naming neither.
+        several = {
+            r for r in (m.root_id for m in mirrors) if sum(1 for m in mirrors if m.root_id == r) > 1
+        }
+        for snapshot in mirrors:
+            if snapshot.root_id in several:
+                tag = "  DIVERGENT" if snapshot in group.divergent_mirrors else ""
+                lines.append(f"    copy ({snapshot.root_id}): {snapshot.path}{tag}")
         # What discovery noticed about each copy, one line each (``_emit`` keeps
         # a file name's line break from becoming a line of its own).
         for snapshot in ([canonical] if canonical is not None else []) + list(group.mirrors):
@@ -671,6 +683,21 @@ def cmd_skills(args: argparse.Namespace) -> int:
     )
     _emit(payload, as_json=args.json, lines=lines)
     return 0
+
+
+def _root_labels(copies: Sequence[Any]) -> str:
+    """Root ids of ``copies`` in first-seen order, each once, with a count past one.
+
+    Two copies of a skill in one root are two documents under one root id;
+    listing the id twice says nothing about which is which, so the id carries a
+    count instead and the copies are named by path on their own lines. Root ids
+    are operator-written config and may themselves contain a space, an x or a
+    comma, so this label is a summary for a reader; the JSON is the record.
+    """
+    counts: dict[str, int] = {}
+    for copy in copies:
+        counts[copy.root_id] = counts.get(copy.root_id, 0) + 1
+    return ",".join(f"{root_id} x{n}" if n > 1 else root_id for root_id, n in counts.items())
 
 
 def cmd_rubrics(args: argparse.Namespace) -> int:

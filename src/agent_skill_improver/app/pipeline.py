@@ -371,9 +371,11 @@ def propose_candidate(
             "filename but SKILL.md; a reviewer should know the directory was not fully seen."
         )
     if group.divergent_mirrors:
+        # Named by path, not root id: a root holding two copies of the skill
+        # would otherwise read "mirror, mirror", naming neither.
         notes.append(
             "mirror copies already differ from canonical ("
-            + ", ".join(m.root_id for m in group.divergent_mirrors)
+            + ", ".join(f"{m.root_id}: {m.path}" for m in group.divergent_mirrors)
             + "): applying this candidate updates the canonical file only, and the mirrors will "
             "still hold their own version until they are synced by their own tooling"
         )

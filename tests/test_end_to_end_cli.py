@@ -1102,6 +1102,98 @@ class ACrlfDocumentIsAppliedAndRolledBackInItsOwnConventionTests(unittest.TestCa
         self.assertNotIn(b"\r", self.skill.read_bytes())
 
 
+class ARootHoldingSeveralMirrorCopiesNamesEachByPathTests(unittest.TestCase):
+    """Measured before: two copies of ``tdd`` in the one mirror root rendered as
+    ``mirrors=mirror,mirror  DIVERGENT=mirror`` in ``asi skills``: the root id
+    twice, and no way to tell which of the two copies had diverged. The JSON
+    carried both paths; the text named neither. A root is now one name with a
+    count, and each copy under such a root is listed by path with its own
+    divergence tag.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, seed="several-mirrors"))]
+        self.first = self.base / "skills-mirror" / "tdd" / "SKILL.md"
+        self.second = self.base / "skills-mirror" / "nested" / "tdd" / "SKILL.md"
+
+    def _add_second_copy(self, *, divergent: bool) -> None:
+        self.second.parent.mkdir(parents=True)
+        text = self.first.read_text(encoding="utf-8")
+        self.second.write_text(text + ("\nlocal note\n" if divergent else ""), encoding="utf-8")
+
+    def _tdd_lines(self) -> list[str]:
+        proc = run_cli([*self.cfg, "skills"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        lines = proc.stdout.splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("tdd  "))
+        end = next(
+            (i for i in range(start + 1, len(lines)) if not lines[i].startswith("    ")),
+            len(lines),
+        )
+        return lines[start:end]
+
+    def test_the_root_is_named_once_with_a_count_and_the_divergent_copy_by_path(self):
+        self._add_second_copy(divergent=True)
+        head, *rest = self._tdd_lines()
+        self.assertTrue(head.endswith("  mirrors=mirror x2  DIVERGENT=mirror"), head)
+        self.assertNotIn("mirror,mirror", head)
+        self.assertEqual(
+            rest,
+            [
+                f"    copy (mirror): {self.second}  DIVERGENT",
+                f"    copy (mirror): {self.first}",
+            ],
+        )
+        as_json = run_cli([*self.cfg, "--json", "skills"])
+        group = next(g for g in json.loads(as_json.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertEqual(
+            sorted(m["path"] for m in group["mirrors"]), sorted([str(self.first), str(self.second)])
+        )
+
+    def test_two_identical_copies_are_counted_and_neither_is_tagged(self):
+        self._add_second_copy(divergent=False)
+        head, *rest = self._tdd_lines()
+        self.assertTrue(head.endswith("  mirrors=mirror x2"), head)
+        self.assertNotIn("DIVERGENT", head)
+        self.assertEqual(len(rest), 2, rest)
+        self.assertTrue(all(ln.startswith("    copy (mirror): ") for ln in rest), rest)
+        self.assertFalse(any("DIVERGENT" in ln for ln in rest), rest)
+
+    def test_the_control_one_copy_per_root_renders_as_before_with_no_copy_lines(self):
+        head, *rest = self._tdd_lines()
+        self.assertTrue(head.endswith("  mirrors=mirror"), head)
+        self.assertEqual(rest, [])
+
+    def test_the_reviewer_note_names_each_divergent_copy_by_path(self):
+        self._add_second_copy(divergent=True)
+        self.first.write_text(
+            self.first.read_text(encoding="utf-8") + "\nanother local note\n", encoding="utf-8"
+        )
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        cid = next(c["candidate_id"] for c in receipt["candidates"] if c["skill_id"] == "tdd")
+        review = run_cli([*self.cfg, "--json", "review", cid])
+        self.assertEqual(review.returncode, RC_OK, review.stderr)
+        notes = [n for n in json.loads(review.stdout)["notes"] if n.startswith("mirror copies")]
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn(f"mirror: {self.first}", notes[0])
+        self.assertIn(f"mirror: {self.second}", notes[0])
+        self.assertNotIn("(mirror, mirror)", notes[0])
+
+    def test_root_labels_keep_first_seen_order_and_count_only_past_one(self):
+        from types import SimpleNamespace
+
+        from agent_skill_improver.cli import _root_labels
+
+        copies = [SimpleNamespace(root_id=r) for r in ("zeta", "alpha", "zeta", "zeta", "mid")]
+        self.assertEqual(_root_labels(copies), "zeta x3,alpha,mid")
+        self.assertEqual(_root_labels([]), "")
+
+
 class TwoRootsTiedOnPrecedenceAreRefusedNotPickedByIdTests(unittest.TestCase):
     """Measured before: the harness mirror root renamed ``alpha`` and made
     canonical and editable at the canonical root's precedence had its ``tdd``
@@ -1208,11 +1300,14 @@ class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
         )
         text = run_cli([*self.cfg, "skills"])
         self.assertIn(
-            "tdd  [NO CANONICAL EDITABLE COPY -- proposals refused]  ambiguous=canonical,canonical"
+            "tdd  [NO CANONICAL EDITABLE COPY -- proposals refused]  ambiguous=canonical x2"
             "  mirrors=mirror",
             text.stdout,
         )
         self.assertIn("why: editable root 'canonical' holds 2 copies of this skill", text.stdout)
+        # The ambiguous copies are on the why line by path; they are not mirror
+        # copies, so no copy lines are printed for the editable root.
+        self.assertNotIn("copy (canonical):", text.stdout)
 
         doctor = run_cli([*self.cfg, "--json", "doctor"])
         self.assertEqual(doctor.returncode, RC_OK, doctor.stderr)
