@@ -211,6 +211,8 @@ class SkillGroup:
 def resolve_groups(
     snapshots: Iterable[SkillSnapshot],
     roots: Sequence[SkillRoot],
+    *,
+    passed_over: Iterable[tuple[str, str, str]] = (),
 ) -> list[SkillGroup]:
     """Group snapshots by logical skill id and pick the canonical copy.
 
@@ -220,11 +222,25 @@ def resolve_groups(
     2. roots that are merely ``editable``, lowest precedence first;
     3. otherwise no canonical copy exists and proposals against the skill are
        refused rather than pointed at a mirror.
+
+    ``passed_over`` is ``(root_id, skill_id, reason)`` for every document
+    discovery saw and did not take. A copy passed over in an editable root is
+    a copy this run cannot see, not an absent one: the skill then has no
+    canonical copy and the reason says which copy and why, so no proposal is
+    pointed at a lower-precedence copy while the real one is unreadable.
+    Measured before: a canonical ``SKILL.md`` at mode 000 made the group read
+    exactly like a mirror-only skill, and ``daily`` quarantined it with "no
+    editable root holds this skill", which was false.
     """
     by_root = {r.id: r for r in roots}
     buckets: dict[str, list[SkillSnapshot]] = {}
     for snap in snapshots:
         buckets.setdefault(snap.skill_id, []).append(snap)
+    withheld: dict[str, list[tuple[str, str]]] = {}
+    for root_id, skill_id, why in passed_over:
+        root = by_root.get(root_id)
+        if root and root.editable:
+            withheld.setdefault(skill_id, []).append((root_id, why))
 
     groups: list[SkillGroup] = []
     for skill_id in sorted(buckets):
@@ -237,6 +253,19 @@ def resolve_groups(
         ordered = sorted(copies, key=sort_key)
         canonical: SkillSnapshot | None = None
         reason = ""
+        if skill_id in withheld:
+            root_id, why = withheld[skill_id][0]
+            groups.append(
+                SkillGroup(
+                    skill_id,
+                    None,
+                    tuple(ordered),
+                    f"the copy in editable root {root_id!r} was passed over by discovery "
+                    f"({why}); proposals are refused until it reads, rather than pointed "
+                    "at another copy",
+                )
+            )
+            continue
         for snap in ordered:
             root = by_root.get(snap.root_id)
             if root and root.canonical and root.editable:

@@ -223,6 +223,10 @@ def run_daily(
             "mirrored_skills": sum(1 for g in groups if g.is_mirrored),
             "skills_with_divergent_mirrors": sum(1 for g in groups if g.divergent_mirrors),
             "skills_that_do_not_load": [s.skill_id for s in skill_store.snapshots() if not s.loads],
+            # What discovery saw and did not take, with reasons: a skill whose
+            # every copy is here is absent from every count above, and this is
+            # the only unattended surface that says so.
+            "skill_documents_passed_over": [d.to_dict() for d in skill_store.passed_over()],
             "skills_with_executable_payloads": sorted(
                 {s.skill_id for s in skill_store.snapshots() if s.payload_files}
             ),

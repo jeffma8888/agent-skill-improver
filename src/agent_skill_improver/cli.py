@@ -535,6 +535,8 @@ def cmd_skills(args: argparse.Namespace) -> int:
         if group.divergent_mirrors:
             head += f"  DIVERGENT={','.join(m.root_id for m in group.divergent_mirrors)}"
         lines.append(head)
+        if canonical is None:
+            lines.append(f"    why: {one_line(group.canonical_reason)}")
         # What discovery noticed about each copy, one line each (``_emit`` keeps
         # a file name's line break from becoming a line of its own).
         for snapshot in ([canonical] if canonical is not None else []) + list(group.mirrors):

@@ -28,6 +28,7 @@ from agent_skill_improver.domain.skills import (
     group_for,
     is_payload_name,
     parse_frontmatter,
+    resolve_groups,
 )
 from agent_skill_improver.errors import (
     BackupUnusable,
@@ -1090,6 +1091,141 @@ class CanonicalResolutionTests(Harness):
             "there is no editable copy, so a proposal against it must be refused "
             "rather than written somewhere ineffective",
         )
+
+    def test_a_passed_over_editable_copy_withholds_the_canonical_slot_and_says_why(self):
+        # Pure domain: the store's passed-over list reaches resolve_groups as
+        # (root_id, skill_id, reason). Measured before: with the canonical copy
+        # of ``shared`` passed over, the group read exactly like ``mirror-only``.
+        snapshots = [s for s in self.store().snapshots() if s.root_id == "mirror"]
+        groups = resolve_groups(
+            snapshots,
+            self.roots,
+            passed_over=[("canonical", "shared", "a document this process cannot read (x)")],
+        )
+        shared = group_for(groups, "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertEqual([m.root_id for m in shared.mirrors], ["mirror"])
+        self.assertEqual(
+            shared.canonical_reason,
+            "the copy in editable root 'canonical' was passed over by discovery (a document "
+            "this process cannot read (x)); proposals are refused until it reads, rather than "
+            "pointed at another copy",
+        )
+        only = group_for(groups, "mirror-only")
+        assert only is not None
+        self.assertEqual(
+            only.canonical_reason, "no editable root holds this skill; proposals will be refused"
+        )
+
+    def test_a_passed_over_copy_in_a_root_that_is_not_editable_changes_nothing(self):
+        snapshots = self.store().snapshots()
+        groups = resolve_groups(
+            snapshots, self.roots, passed_over=[("mirror", "shared", "a symlink; not followed")]
+        )
+        shared = group_for(groups, "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "canonical")
+
+    def test_a_lower_precedence_editable_copy_is_not_promoted_over_a_passed_over_one(self):
+        # Two editable roots; the higher-precedence copy is passed over. Pointing
+        # a proposal at the other copy would edit the wrong file.
+        second = self.base / "second"
+        write(second / "shared" / SKILL_FILENAME, GOOD)
+        roots = [
+            self.roots[0],
+            SkillRoot(
+                id="second",
+                path=second,
+                precedence=50,
+                canonical=False,
+                editable=True,
+                kind="custom",
+            ),
+        ]
+        snapshots = [s for s in FilesystemSkillStore(roots, read_only=True).snapshots()]
+        snapshots = [
+            s for s in snapshots if not (s.root_id == "canonical" and s.skill_id == "shared")
+        ]
+        groups = resolve_groups(snapshots, roots, passed_over=[("canonical", "shared", "mode 000")])
+        shared = group_for(groups, "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical, "not the second root's copy")
+        self.assertIn("'canonical'", shared.canonical_reason)
+
+    def test_an_entry_that_is_not_a_copy_of_the_skill_withholds_nothing(self):
+        # Measured by the cycle-72 audit: an unlistable directory inside tdd/, a
+        # link at nested/tdd/SKILL.md, a too-deep a/b/tdd/SKILL.md and a dangling
+        # root-level SKILL.md all carried the skill id of a readable document and
+        # withheld its canonical slot, dropping a true divergence and turning an
+        # approved apply into a mirror-edit refusal.
+        shared_dir = self.canonical_dir / "shared"
+        (shared_dir / "sub").mkdir()
+        (self.canonical_dir / "nested" / "shared").mkdir(parents=True)
+        (self.canonical_dir / "nested" / "shared" / SKILL_FILENAME).symlink_to(
+            shared_dir / SKILL_FILENAME
+        )
+        deep = self.canonical_dir / "a" / "b" / "c" / "shared"
+        deep.mkdir(parents=True)
+        write(deep / SKILL_FILENAME, GOOD)
+        (self.canonical_dir / SKILL_FILENAME).symlink_to(self.canonical_dir / "nowhere.md")
+        if os.geteuid() != 0:
+            os.chmod(shared_dir / "sub", 0o000)
+        try:
+            store = self.store()
+            passed = store.passed_over()
+            self.assertGreaterEqual(len(passed), 3, [d.reason for d in passed])
+            nested = (self.canonical_dir / "nested" / "shared" / SKILL_FILENAME).resolve()
+            for document in passed:
+                if document.path.resolve() == nested:
+                    # A second copy of ``shared`` in the same root, at a place
+                    # discovery accepts: that one IS a copy, and withholds.
+                    self.assertEqual(document.skill_id, "shared")
+                else:
+                    self.assertIsNone(document.skill_id, document)
+            # Without the nested link, nothing here is a copy of ``shared``.
+            (self.canonical_dir / "nested" / "shared" / SKILL_FILENAME).unlink()
+            store = self.store()
+            self.assertEqual(
+                [d.skill_id for d in store.passed_over()], [None] * len(store.passed_over())
+            )
+            group = group_for(store.groups(), "shared")
+            assert group is not None and group.canonical is not None
+            self.assertEqual(group.canonical.root_id, "canonical", "the readable document rules")
+            self.assertTrue(group.divergent_mirrors, "the true divergence is still reported")
+        finally:
+            if os.geteuid() != 0:
+                os.chmod(shared_dir / "sub", 0o755)
+
+    def test_a_passed_over_link_at_a_nested_place_is_a_copy_of_that_skill_not_another(self):
+        # nested/shared/SKILL.md names skill ``shared`` under discovery's own rule
+        # (parent directory); the canonical shared/SKILL.md stays readable, so the
+        # withhold is about a second copy of the same skill in the same editable
+        # root, the one case where refusing is right: two copies, one unseen.
+        (self.canonical_dir / "nested" / "other").mkdir(parents=True)
+        (self.canonical_dir / "nested" / "other" / SKILL_FILENAME).symlink_to(
+            self.canonical_dir / "shared" / SKILL_FILENAME
+        )
+        store = self.store()
+        self.assertEqual([d.skill_id for d in store.passed_over()], ["other"])
+        shared = group_for(store.groups(), "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "canonical")
+        self.assertIsNone(group_for(store.groups(), "other"), "no readable copy, no group")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_the_store_feeds_what_it_passed_over_into_its_groups(self):
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        os.chmod(target, 0o000)
+        try:
+            group = group_for(self.store().groups(refresh=True), "shared")
+            assert group is not None
+            self.assertIsNone(group.canonical)
+            self.assertIn("passed over by discovery", group.canonical_reason)
+            self.assertIn("Permission denied", group.canonical_reason)
+            self.assertEqual(group.divergent_mirrors, (), "nothing to compare against")
+        finally:
+            os.chmod(target, 0o644)
 
     def test_the_tree_digest_changes_when_any_skill_changes(self):
         store = self.store()

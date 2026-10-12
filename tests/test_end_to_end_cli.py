@@ -807,8 +807,47 @@ class AnUnreadableSkillDocumentDoesNotEndTheRunTests(unittest.TestCase):
         daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
         self.assertEqual(daily.returncode, RC_OK, daily.stderr)
         self.assertNotIn("Traceback", daily.stderr)
-        self.assertIn(json.loads(daily.stdout)["status"], ("ok", "partial"))
+        receipt = json.loads(daily.stdout)
+        self.assertIn(receipt["status"], ("ok", "partial"))
         self.assertEqual(os.stat(self.target).st_mode & 0o777, 0, "untouched")
+        self.assertEqual(
+            {d["path"]: d["reason"] for d in receipt["skill_tree"]["skill_documents_passed_over"]},
+            {str(self.target): "a document this process cannot read (Permission denied)"},
+            "the receipt is the unattended surface; it names the document too",
+        )
+
+    def test_the_skill_is_not_described_as_mirror_only_and_no_proposal_goes_elsewhere(self):
+        # The canonical root holds tdd; make that copy unreadable while its mirror
+        # reads. Measured before: the group read exactly like mirror-only, and daily
+        # quarantined tdd with "no editable root holds this skill", which was false.
+        os.chmod(self.target, 0o644)
+        tdd = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        os.chmod(tdd, 0o000)
+        self.addCleanup(os.chmod, tdd, 0o644)
+        skills = run_cli([*self.cfg, "--json", "skills"])
+        self.assertEqual(skills.returncode, RC_OK, skills.stderr)
+        group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertIsNone(group["canonical"])
+        self.assertIn("passed over by discovery", group["canonical_reason"])
+        self.assertIn("'canonical'", group["canonical_reason"])
+        self.assertNotIn("no editable root holds", group["canonical_reason"])
+        as_text = run_cli([*self.cfg, "skills"])
+        self.assertTrue(
+            any(
+                ln.startswith("    why: the copy in editable root 'canonical' was passed over")
+                for ln in as_text.stdout.split("\n")
+            ),
+            as_text.stdout,
+        )
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.assertEqual([c for c in receipt["candidates"] if c["skill_id"] == "tdd"], [])
+        text = json.dumps(receipt)
+        self.assertNotIn("no editable root holds this skill", text)
+        if "'tdd' has no canonical editable copy" in text:
+            self.assertIn("passed over by discovery", text)
+        self.assertEqual(os.stat(tdd).st_mode & 0o777, 0, "untouched")
 
 
 class AnUnreadableCandidateRecordIsNamedNotDroppedTests(unittest.TestCase):

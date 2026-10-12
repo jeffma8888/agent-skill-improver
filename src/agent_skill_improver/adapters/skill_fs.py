@@ -147,9 +147,20 @@ class PassedOverDocument:
     root_id: str
     path: Path
     reason: str
+    #: The skill this entry would have been a copy of, had discovery taken it:
+    #: set only for a ``SKILL.md`` at a depth discovery accepts, by the same
+    #: rule ``_snapshot`` uses (the parent directory's name). None for an
+    #: unlistable directory, a document too deep or a root-level document, none
+    #: of which is a copy of anything, so none of them withholds a skill's slot.
+    skill_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"root_id": self.root_id, "path": str(self.path), "reason": self.reason}
+        return {
+            "root_id": self.root_id,
+            "path": str(self.path),
+            "reason": self.reason,
+            "skill_id": self.skill_id,
+        }
 
 
 class FilesystemSkillStore:
@@ -209,6 +220,7 @@ class FilesystemSkillStore:
                             root.id,
                             skill_file,
                             f"a document this process cannot read ({exc.strerror or exc})",
+                            skill_id=self._skill_id_at(base, skill_file),
                         )
                     )
                     continue
@@ -225,7 +237,14 @@ class FilesystemSkillStore:
         return list(self._passed_over)
 
     def groups(self, *, refresh: bool = False) -> list[SkillGroup]:
-        return resolve_groups(self.snapshots(refresh=refresh), self._roots)
+        snapshots = self.snapshots(refresh=refresh)
+        return resolve_groups(
+            snapshots,
+            self._roots,
+            passed_over=[
+                (d.root_id, d.skill_id, d.reason) for d in self._passed_over if d.skill_id
+            ],
+        )
 
     def known_skill_ids(self) -> list[str]:
         return sorted({s.skill_id for s in self.snapshots()})
@@ -854,13 +873,28 @@ class FilesystemSkillStore:
     ) -> list[Path]:
         found: list[Path] = []
 
-        def skip(candidate: Path, reason: str) -> None:
-            passed_over.append(PassedOverDocument(root_id=root_id, path=candidate, reason=reason))
+        def skip(candidate: Path, reason: str, *, copy_of_a_skill: bool = True) -> None:
+            # An entry at a document's place is a copy this run cannot see and
+            # carries the skill id it would have had; a directory or an entry at
+            # a depth discovery never takes is not a copy of anything. Measured
+            # before: an unlistable directory inside ``tdd/`` was recorded with
+            # ``tdd`` as its skill and withheld the canonical slot of a readable
+            # document, dropping a true divergence and refusing an approved apply.
+            skill_id = self._skill_id_at(base, candidate) if copy_of_a_skill else None
+            passed_over.append(
+                PassedOverDocument(
+                    root_id=root_id, path=candidate, reason=reason, skill_id=skill_id
+                )
+            )
 
         unlistable: list[tuple[Path, str]] = []
         entries = self._entries_named_like_a_document(base, unlistable=unlistable)
         for directory, error in unlistable:
-            skip(directory, f"a directory that could not be listed ({error})")
+            skip(
+                directory,
+                f"a directory that could not be listed ({error})",
+                copy_of_a_skill=False,
+            )
         for candidate in entries:
             is_link = candidate.is_symlink()
             if is_link and not candidate.exists():
@@ -875,7 +909,11 @@ class FilesystemSkillStore:
                     continue
                 rel = Path(candidate.name)
             if len(rel.parts) > self._max_depth:
-                skip(candidate, f"deeper than max_depth={self._max_depth} below the root")
+                skip(
+                    candidate,
+                    f"deeper than max_depth={self._max_depth} below the root",
+                    copy_of_a_skill=False,
+                )
                 continue
             if is_link and not self._follow_symlinks:
                 skip(candidate, "a symlink; this store does not follow links")
@@ -887,6 +925,28 @@ class FilesystemSkillStore:
                 continue
             found.append(candidate)
         return found
+
+    def _skill_id_at(self, base: Path, document: Path) -> str | None:
+        """The skill id discovery would give a ``SKILL.md`` at this place, or None.
+
+        Judged on the entry's own place under the root (no link is followed):
+        ``<root>/<skill>/SKILL.md`` or deeper up to ``max_depth``, named by the
+        parent directory as ``_snapshot`` names it. A deeper one is never
+        taken, so it is not a copy of a skill. A root-level document is left
+        out too, on purpose: a readable one is taken by ``_snapshot`` under the
+        root's own basename, but an unreadable one withholding whatever skill
+        happens to share that name would be the collision this rule exists to
+        avoid, so the withhold stays fail-open there.
+        """
+        if document.name != SKILL_FILENAME:
+            return None
+        try:
+            rel = document.relative_to(base)
+        except ValueError:
+            return None
+        if len(rel.parts) < 2 or len(rel.parts) > self._max_depth:
+            return None
+        return rel.parts[-2]
 
     def _payload_files(self, skill_dir: Path) -> tuple[str, ...]:
         """Enumerate executable payloads beside a skill document.

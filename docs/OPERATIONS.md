@@ -119,6 +119,15 @@ run. If they differ, something changed a skill file during the run, from *any*
 source. `mutation_detected` states it directly. This is the single most important
 line in the receipt.
 
+**`skill_tree.skill_documents_passed_over`** — every `SKILL.md` discovery saw and
+did not take this run, with its root and reason (a link, a fifo, a document too
+deep, a document this process cannot read). A skill whose every copy is here is in
+none of the counts beside it, and this list is the only unattended surface that
+says so; `doctor` and `skills` print the same entries. A copy passed over in an
+editable root also withholds that skill's canonical slot: `skills` shows the skill
+with no canonical copy and a `why:` line naming the copy, and `daily` refuses to
+propose against it rather than point a proposal at another copy.
+
 **`counts`** — the honest arithmetic:
 
 ```
