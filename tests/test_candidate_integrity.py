@@ -21,6 +21,7 @@ Two halves, both needed:
 
 from __future__ import annotations
 
+import difflib
 import json
 import unittest
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ from agent_skill_improver.domain.candidate import (
     RubricFailureRef,
     SourceRef,
     TargetRef,
+    NO_NEWLINE_MARKER,
     challenge_for,
     make_patch,
 )
@@ -824,6 +826,59 @@ class DiffHeaderLabelTests(unittest.TestCase):
         self.assertTrue(
             patch.unified_diff.startswith("--- a/skills/tdd/SKILL.md\n+++ b/skills/tdd/SKILL.md\n")
         )
+
+
+class UnterminatedLastLineDiffTests(unittest.TestCase):
+    """A changed line is its own diff line even when the file's last line has
+    no newline. Measured before: ``-last line+last line changed`` printed as
+    one removed line, and with the new text keeping ``last line`` and adding
+    one more, the added ``+last line`` vanished into the removed line."""
+
+    BASE = "# T\n\nrule one\nlast line"
+
+    def test_a_changed_unterminated_last_line_is_two_lines_each_marked(self):
+        patch = make_patch(self.BASE, "# T\n\nrule one\nlast line changed", path_label="x")
+        lines = patch.unified_diff.split("\n")
+        self.assertEqual(
+            lines[-5:],
+            ["-last line", NO_NEWLINE_MARKER, "+last line changed", NO_NEWLINE_MARKER, ""],
+            patch.unified_diff,
+        )
+        self.assertEqual((patch.added_lines, patch.removed_lines), (1, 1))
+
+    def test_an_added_line_after_an_unterminated_last_line_is_not_swallowed(self):
+        patch = make_patch(self.BASE, "# T\n\nrule one\nlast line\n+DIFF\n", path_label="x")
+        lines = patch.unified_diff.split("\n")
+        self.assertIn("+last line", lines)
+        self.assertIn("++DIFF", lines)
+        self.assertEqual(lines[lines.index("-last line") + 1], NO_NEWLINE_MARKER)
+        self.assertEqual((patch.added_lines, patch.removed_lines), (2, 1))
+        for line in lines:
+            self.assertTrue(line == "" or line[0] in "-+@ \\", repr(line))
+
+    def test_a_stored_diff_in_the_joined_form_is_a_derived_field_mismatch(self):
+        new_text = "# T\n\nrule one\nlast line changed"
+        candidate = build_candidate(base_text=self.BASE, new_text=new_text)
+        joined = candidate.patch.unified_diff.replace("\n" + NO_NEWLINE_MARKER + "\n", "")
+        self.assertIn("-last line+last line changed", joined)
+        self.assertEqual(derived_field_mismatches(candidate, base_text=self.BASE), [])
+        tampered = replace(candidate, patch=replace(candidate.patch, unified_diff=joined))
+        problems = derived_field_mismatches(tampered, base_text=self.BASE)
+        self.assertTrue(any("unified_diff" in p for p in problems), problems)
+
+    def test_the_control_terminated_texts_carry_no_marker_and_are_unchanged(self):
+        patch = make_patch(BASE_TEXT, NEW_TEXT, path_label="x")
+        self.assertNotIn(NO_NEWLINE_MARKER, patch.unified_diff)
+        plain = "".join(
+            difflib.unified_diff(
+                BASE_TEXT.splitlines(keepends=True),
+                NEW_TEXT.splitlines(keepends=True),
+                fromfile="a/x",
+                tofile="b/x",
+                n=3,
+            )
+        )
+        self.assertEqual(patch.unified_diff, plain)
 
 
 class TargetIdentityTests(unittest.TestCase):

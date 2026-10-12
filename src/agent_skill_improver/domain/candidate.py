@@ -151,6 +151,25 @@ def one_line_label(text: str) -> str:
     return text.replace("\r", "\\r").replace("\n", "\\n")
 
 
+NO_NEWLINE_MARKER = "\\ No newline at end of file"
+
+
+def _terminated(diff_line: str) -> str:
+    """A diff line that ends where its line ends.
+
+    ``difflib`` keeps each text's own line ending, so when the last line of
+    the base or of the new text has none, the diff line made from it has none
+    either and the next diff line is joined onto it: ``-last line+last line
+    changed`` read as one removed line, and an added line could disappear into
+    the removed line before it. The marker is the one ``diff`` and ``git``
+    print for the same case, on its own line, so every changed line is its own
+    line and the missing newline is itself visible.
+    """
+    if diff_line.endswith("\n"):
+        return diff_line
+    return f"{diff_line}\n{NO_NEWLINE_MARKER}\n"
+
+
 def make_patch(base_text: str, new_text: str, *, path_label: str) -> Patch:
     label = one_line_label(path_label)
     base_lines = base_text.splitlines(keepends=True)
@@ -169,7 +188,7 @@ def make_patch(base_text: str, new_text: str, *, path_label: str) -> Patch:
     return Patch(
         new_text=new_text,
         new_text_sha256=sha256_text(new_text),
-        unified_diff="".join(diff),
+        unified_diff="".join(_terminated(line) for line in diff),
         added_lines=added,
         removed_lines=removed,
     )

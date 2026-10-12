@@ -622,8 +622,9 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 0
     # Only the tool's own words stand at column 0 in this report: the section
     # headers, the diff and the apply instruction. Every content line of the
-    # diff carries difflib's prefix character and ``make_patch`` keeps its two
-    # header labels to one line; ``review_report`` has already checked that the
+    # diff carries difflib's prefix character, its only unprefixed line is the
+    # ``\ No newline at end of file`` marker ``make_patch`` writes, and
+    # ``make_patch`` keeps its two header labels to one line; ``review_report`` has already checked that the
     # stored diff equals the one recomputed from the live base, so the diff
     # printed here is one ``make_patch`` produced. A skill id, path, gate reason
     # or note is kept to one line; the model's prose is quoted (see ``quoted``)
