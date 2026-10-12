@@ -115,7 +115,8 @@ invariant of this tool is broken. Do not let the scheduler retry it; find out
 what wrote to the tree first, and treat any candidate from that run as suspect.
 The tool holds that line for you: every scheduled run after a blocked one exits 5
 again, before taking the lock or reading a conversation, until you run once by hand
-with `--mutation-reviewed 2026-01-01` naming the blocked run's day. The schedule
+with `--commit --mutation-reviewed 2026-01-01` naming the blocked run's day (a dry
+run writes no receipt, so it clears nothing). The schedule
 itself needs no change. The signal is the receipt's `skill_tree.mutation_detected`
 field, not its status word, so editing the status changes nothing; and if a receipt
 under `state/receipts/` cannot be read at all, the run exits 3 (`StateUnreadable`)

@@ -245,7 +245,7 @@ class DoctorAnswersTheHealthQuestionsTests(unittest.TestCase):
             if p.startswith("the last run (2026-01-01) detected a skill tree mutation")
         )
         self.assertIn(str(receipt), problem, "the receipt to read is named")
-        self.assertIn("--mutation-reviewed 2026-01-01", problem, "and the way out")
+        self.assertIn("--commit --mutation-reviewed 2026-01-01", problem, "and the way out")
         self.assertIn("verdict: problems found", text.stdout)
 
         del payload["skill_tree"]

@@ -27,7 +27,7 @@
 #     stderr; 5 means the skill tree changed while the run was reading it. Every
 #     committed run after a 5 exits 5 again, before taking the lock or reading a
 #     conversation, until one run is started with
-#     `--mutation-reviewed 2026-01-01` naming the blocked run's day (a dry run
+#     `--commit --mutation-reviewed 2026-01-01` naming the blocked run's day (a dry run
 #     writes no receipt, so it neither blocks the next run nor clears a block).
 #     The daily line below needs no change for that. `asi doctor` prints the
 #     newest receipt's age and warns once it is more than two whole days old:

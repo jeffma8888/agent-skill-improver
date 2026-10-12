@@ -276,7 +276,8 @@ def run_daily(
                 f"the {blocked_day} run recorded a skill tree mutation and no later run has "
                 f"finished; read skill_tree.changes in {one_line_label(str(blocked.path))}, "
                 "find out what wrote to "
-                f"the tree, then re-run with --mutation-reviewed {blocked_day}{named}"
+                f"the tree, then run once with --commit --mutation-reviewed {blocked_day}"
+                f"{named}"
             )
     elif mutation_reviewed:
         newest = (

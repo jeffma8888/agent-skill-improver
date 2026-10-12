@@ -130,7 +130,9 @@ class TheRunAfterABlockedOneTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn(f"the {BLOCKED_DAY} run recorded a skill tree mutation", message)
         self.assertIn(str(path), message, "the receipt to read is named")
-        self.assertIn(f"--mutation-reviewed {BLOCKED_DAY}", message, "the way out is spelled")
+        self.assertIn(
+            f"--commit --mutation-reviewed {BLOCKED_DAY}", message, "the way out is spelled"
+        )
         self.assertEqual(_tree_fingerprint(self.config.state_dir), before, "nothing was written")
         self.assertFalse(self.state.lock_path().exists(), "the lock was never taken")
 
@@ -264,7 +266,7 @@ class ThroughTheCommandTests(unittest.TestCase):
         refused = run_cli([*self.cfg, "daily", "--commit", "--day", "2026-01-02"])
         self.assertEqual(refused.returncode, RC_BLOCKED, refused.stderr)
         self.assertIn("BlockedRunUnreviewed: ", refused.stderr)
-        self.assertIn(f"--mutation-reviewed {BLOCKED_DAY}", refused.stderr)
+        self.assertIn(f"--commit --mutation-reviewed {BLOCKED_DAY}", refused.stderr)
         self.assertEqual(sorted(self._receipts()), [BLOCKED_DAY], "the refused run left no receipt")
         doctor = run_cli([*self.cfg, "doctor"])
         self.assertEqual(doctor.returncode, RC_NEGATIVE, "doctor still names the mutation")

@@ -51,9 +51,10 @@
        asi doctor, whose last run line gives the newest receipt's age and warns
        once it is more than two whole days old. Exit status 5 means the skill
        tree changed while the run was reading it; every committed run after that
-       exits 5 again, before taking the lock, until one run is started with the
-       mutation-reviewed flag naming the blocked run's day (a dry run writes no
-       receipt, so it neither blocks nor clears). This file needs no change. -->
+       exits 5 again, before taking the lock, until one committed run is started
+       with the mutation-reviewed flag naming the blocked run's day (a dry run
+       writes no receipt, so it neither blocks nor clears). This file needs no
+       change. -->
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key><integer>3</integer>

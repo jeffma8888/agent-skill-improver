@@ -573,8 +573,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             problems.append(
                 f"the last run ({one_line(last_run.day)}) detected a skill tree mutation; "
                 f"`daily` refuses to run again until you have read skill_tree.changes in "
-                f"{one_line(str(last_run.path))} and start one run with "
-                f"--mutation-reviewed {one_line(last_run.day)}"
+                f"{one_line(str(last_run.path))} and start one committed run with "
+                f"--commit --mutation-reviewed {one_line(last_run.day)}"
             )
         if last_run is not None and last_run.mutation_detected is None:
             warnings.append(
@@ -1714,7 +1714,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "the day of a blocked run whose recorded skill tree mutation you have read; "
-            "without it a run after a blocked one is refused (exit 5)"
+            "without it a run after a blocked one is refused (exit 5). Only a committed run "
+            "clears the block: a dry run writes no receipt"
         ),
     )
     p_daily.add_argument(
