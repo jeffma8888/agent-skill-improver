@@ -1712,6 +1712,50 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         self.assertEqual([p for p in state.rglob("*") if not p.is_dir()], [], "still no file")
 
 
+class AValueThatCannotBeUsedIsAUsageErrorBeforeTheRunTests(unittest.TestCase):
+    """``--day`` names every candidate of the run and ``--limit`` is a page
+    size, so a value that cannot serve is refused by argparse (exit 2), before
+    the config is read or a conversation ingested. Measured before: ``--day
+    2026/01/02`` ran the whole pass and died on the first candidate id;
+    ``--limit -1`` printed ``5 of at most -1`` and called it a whole window."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.cfg = ["--config", str(build_env(self.base, dry_run=False, seed="s"))]
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_slash_date_is_refused_by_argparse_with_the_spelling_it_wanted(self):
+        proc = run_cli([*self.cfg, "daily", "--commit", "--day", "2026/01/02"])
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("argument --day: run day '2026/01/02' cannot name a candidate", proc.stderr)
+        self.assertIn("'2026-01-02'", proc.stderr)
+        self.assertNotIn("invalid candidate id", proc.stderr)
+        self.assertFalse((self.base / "state" / "conversations").exists(), "nothing was ingested")
+
+    def test_a_whitespace_day_is_refused_but_an_empty_one_still_means_today(self):
+        proc = run_cli([*self.cfg, "daily", "--day", "  "])
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("argument --day", proc.stderr)
+        proc = run_cli([*self.cfg, "--json", "daily", "--day", ""])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        self.assertRegex(json.loads(proc.stdout)["day"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_a_page_size_below_one_is_refused_and_one_is_honoured(self):
+        for bad in ("0", "-1", "two"):
+            with self.subTest(limit=bad):
+                proc = run_cli([*self.cfg, "--json", "discover", "--limit", bad])
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn("argument --limit", proc.stderr)
+        proc = run_cli([*self.cfg, "--json", "discover", "--limit", "1"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["page"]["limit"], 1)
+        self.assertEqual(len(payload["threads"]), 1)
+
+
 class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
     """The templates drop four paths into two foreign syntaxes: a crontab line,
     which the shell splits on spaces and cron turns ``%`` into a newline on, and

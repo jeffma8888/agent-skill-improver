@@ -87,7 +87,7 @@ the remedy in each reason is to move it aside or repair it by hand.
 | --- | --- |
 | 0 | success, including "stood down for a stated reason" |
 | 1 | the command ran and the answer is negative (`doctor` not ready, `selftest` failed, a gate not met) |
-| 2 | usage error (unknown subcommand or flag); argparse's code, never returned by a command |
+| 2 | usage error: an unknown subcommand or flag, or a value argparse refuses before any config is read (a `--day` that could not name a candidate, a `--limit` below 1); argparse's code, never returned by a command |
 | 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, `ConfigError`, ...) |
 | 4 | a required file was missing |
 | 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree |
@@ -133,6 +133,26 @@ mode drifted from owner-only (`state_modes_repaired`, as `doctor` does); that re
 writes no content, so it is not withheld. The receipt still reports how many files it withheld
 (`artifacts_withheld_dry_run`) and `--json` prints it. For a private source this is
 the difference between a preview and a copy of the transcripts on disk.
+
+`--day` is the run's idempotence key and the middle of every candidate id
+(`CAND-2026-01-02-01-tdd`), so it is held to the id's alphabet: ASCII letters,
+digits, dot, underscore or hyphen, at most 64 characters, starting with a letter
+or digit. A value that cannot serve (`2026/01/02`, whitespace) is refused by the
+command line with exit 2, before the config is read or a conversation ingested,
+and a slash-spelled date is told the hyphenated spelling it wanted; an empty
+`--day ""` is the same as none and means today. The skill directory name has no
+length rule of its own, so once the skill tree is read (still before anything is
+ingested) the pass forms, for every known skill, the longest id a first run of the
+day could need and refuses with `ConfigError`, naming the day, the skill and both
+lengths, if one would not fit the 204-character candidate id. Stated limit: a day
+re-run more times than the candidate cap allows can push the sequence number one
+digit wider than probed. Measured
+before this check: `--day 2026/01/02` ran the whole pass, scored every
+conversation at full model cost, wrote them under `--commit`, and then died
+building its first candidate id with `invalid candidate id`, a message about
+the wrong thing; no receipt or checkpoint was written, so the next run with the
+same day repeated all of it. A library caller gets the same refusal as a
+`ConfigError` from `run_daily`, before the source is touched.
 
 ## Reading a receipt
 

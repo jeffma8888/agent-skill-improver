@@ -53,7 +53,13 @@ from ..domain.authorship import (
     classify_conversation,
     classify_thread,
 )
-from ..domain.candidate import STATUS_BLOCKED_RUN, STATUS_GATE_FAILED, STATUS_VALIDATED
+from ..domain.candidate import (
+    STATUS_BLOCKED_RUN,
+    STATUS_GATE_FAILED,
+    STATUS_VALIDATED,
+    validate_candidate_id,
+    validate_run_day,
+)
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import error_page, merge_pages, passed_over_note
 from ..domain.failure import FailureCase
@@ -66,7 +72,7 @@ from ..domain.skills import (
     group_for,
     tree_digest_of,
 )
-from ..errors import AsiError, RecordDefect, SafetyRefusal, TransientFailure
+from ..errors import AsiError, ConfigError, RecordDefect, SafetyRefusal, TransientFailure
 from ..ports import ModelRunner
 from .lock import RunLock
 from .pipeline import propose_candidate, read_canonical_text, score_and_isolate
@@ -194,6 +200,14 @@ def run_daily(
             "validate; only `asi apply` may write, and only with a human approval token."
         )
     started = clock.now()
+    # The day names the checkpoint, the receipt and every candidate, and is
+    # only used once the pass has read and scored everything. Refuse one that
+    # cannot serve before the source is touched; see ``validate_run_day``.
+    if day:
+        try:
+            validate_run_day(day)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
     run_day = day or day_key(started)
     run_seed = seed or config.seed or run_day
     dry_run = config.dry_run if commit is None else not commit
@@ -267,6 +281,9 @@ def run_daily(
             return _finish(
                 receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
             )
+        _assert_every_skill_can_be_named(
+            run_day, known_skill_ids, config.caps.max_candidates_per_run
+        )
 
         # A record under candidates/ that cannot be read is a queue this run
         # cannot count: it may be an open candidate for any skill, so neither the
@@ -811,6 +828,35 @@ def _downgrade_candidates_of_blocked_run(
             f"{len(receipt.candidates)} candidate(s) from this blocked run were closed as "
             f"blocked-run ({rewritten} rewritten on disk) and cannot be applied"
         )
+
+
+def _assert_every_skill_can_be_named(
+    run_day: str, skill_ids: Sequence[str], max_candidates_per_run: int
+) -> None:
+    """Refuse, before anything is ingested, a day and skill tree whose candidate
+    ids would not fit.
+
+    ``validate_run_day`` bounds the day's alphabet and length, and the skill id
+    is a directory name with no length rule of its own, so the two together can
+    still exceed the candidate id's 204 characters. The id is formed at the end,
+    ``CAND-{day}-{seq}-{safe_name(skill)}``; this forms it here for every known
+    skill, with the sequence number at the widest it can reach (two digits, or
+    the per-run candidate cap when that is wider), and refuses on the first one
+    that does not fit. Stated limit: the sequence number also skips over ids a
+    previous run of the same day already used, so a day re-run more than the
+    cap allows can push it one digit wider than probed.
+    """
+    seq_ceiling = max(99, max_candidates_per_run)
+    for skill_id in sorted(skill_ids):
+        probe = f"CAND-{run_day}-{seq_ceiling:02d}-{safe_name(skill_id)}"
+        try:
+            validate_candidate_id(probe)
+        except ValueError as exc:
+            raise ConfigError(
+                f"run day {run_day!r} ({len(run_day)} characters) cannot name a candidate for "
+                f"skill {skill_id!r} ({len(skill_id)} characters): {exc}. Use a shorter --day "
+                f"or a shorter skill directory name. No conversation was read or scored."
+            ) from None
 
 
 def _no_skills_reason(skill_store: Any) -> str:

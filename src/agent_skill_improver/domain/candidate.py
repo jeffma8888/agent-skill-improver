@@ -56,6 +56,37 @@ def validate_candidate_id(candidate_id: str) -> str:
     return candidate_id
 
 
+#: The run day sits in the middle of every candidate id (``CAND-{day}-{seq}-{skill}``),
+#: so it is held to the id's own alphabet and bounded. Whether a day and a skill
+#: name fit the id TOGETHER is checked by the daily pass against its real skill tree.
+RUN_DAY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+RUN_DAY_MAX_CHARS = 64
+
+
+def validate_run_day(day: str) -> str:
+    """Require a run day that can name a candidate and a checkpoint.
+
+    Checked before a pass reads anything, because the day is only used at the
+    end. Measured before this check: ``--day 2026/01/02`` was accepted on the
+    command line, every conversation was ingested and scored (the model calls
+    paid for, the conversations and scorecards written under ``--commit``),
+    and the pass died building its first candidate id with ``StateUnreadable:
+    invalid candidate id``, a message about the wrong thing. No receipt or
+    checkpoint was written, so the next run with the same day repeated all of
+    it.
+    """
+    if not RUN_DAY_RE.fullmatch(day):
+        hint = ""
+        if "/" in day and RUN_DAY_RE.fullmatch(day.replace("/", "-")):
+            hint = f"; a date is spelled with hyphens, {day.replace('/', '-')!r}"
+        raise ValueError(
+            f"run day {day!r} cannot name a candidate: a day must start with an ASCII letter "
+            f"or digit and contain only ASCII letters, digits, dot, underscore or hyphen "
+            f"(maximum {RUN_DAY_MAX_CHARS} characters){hint}"
+        )
+    return day
+
+
 @dataclass(frozen=True)
 class RubricFailureRef:
     failure_case_id: str

@@ -49,6 +49,7 @@ from agent_skill_improver.domain.candidate import (
     NO_NEWLINE_MARKER,
     challenge_for,
     make_patch,
+    validate_run_day,
 )
 from agent_skill_improver.domain.integrity import (
     derived_field_mismatches,
@@ -703,6 +704,34 @@ class CandidateIdTests(unittest.TestCase):
 
     def test_a_normal_generated_candidate_id_remains_valid(self):
         self.assertEqual(build_candidate().id, "CAND-2026-02-01-01-tdd")
+
+
+class RunDayTests(unittest.TestCase):
+    """The run day is the middle of every candidate id, so it is held to the
+    id's alphabet up front. Measured before: a day spelled 2026/01/02 was
+    accepted, the whole pass ran, and the first candidate id was refused as
+    'invalid candidate id' after the model calls were paid for."""
+
+    def test_a_date_and_a_rerun_suffix_are_accepted_unchanged(self):
+        for day in ("2026-01-02", "2026-01-02.rerun_2", "20260102", "x" * 64):
+            with self.subTest(day=day):
+                self.assertEqual(validate_run_day(day), day)
+
+    def test_a_day_that_could_not_name_a_candidate_is_refused_by_name(self):
+        for bad in ("2026/01/02", "  ", "-x", ".hidden", "x" * 65, "d\u00eda", "a b", "a:b", ""):
+            with self.subTest(day=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    validate_run_day(bad)
+                self.assertIn(f"run day {bad!r} cannot name a candidate", str(ctx.exception))
+                self.assertIn("maximum 64 characters", str(ctx.exception))
+
+    def test_a_slash_date_is_told_how_to_spell_itself(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_run_day("2026/01/02")
+        self.assertIn("a date is spelled with hyphens, '2026-01-02'", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            validate_run_day("a/b c")
+        self.assertNotIn("spelled with hyphens", str(ctx.exception), "no hint it cannot keep")
 
 
 class DerivedPatchFieldTests(unittest.TestCase):

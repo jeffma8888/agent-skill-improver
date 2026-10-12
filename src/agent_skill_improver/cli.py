@@ -36,7 +36,13 @@ from . import __version__
 from .clock import SystemClock, day_key, iso
 from .config import SOURCE_FIXTURES, Config, load_config, package_dir
 from .domain.approval import HumanApproval, automation_active
-from .domain.candidate import BIDI_CONTROLS, HIDDEN_CONTROLS, STATUS_VALIDATED, one_line_label
+from .domain.candidate import (
+    BIDI_CONTROLS,
+    HIDDEN_CONTROLS,
+    STATUS_VALIDATED,
+    one_line_label,
+    validate_run_day,
+)
 from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
@@ -1317,6 +1323,29 @@ def _referenced_names(source: str) -> set[str]:
 
 
 # -- parser --------------------------------------------------------------
+def _run_day_argument(value: str) -> str:
+    """``--day``: refused by argparse, before any config is read, when it could
+    not name a candidate; an empty value keeps the default (today, UTC)."""
+    if not value:
+        return value
+    try:
+        return validate_run_day(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _positive_int_argument(value: str) -> int:
+    """``--limit``: a page size of 0 or less has no meaning, and the page
+    description would otherwise say ``N of at most -1``."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, got {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value!r}")
+    return number
+
+
 class _EscapingParser(argparse.ArgumentParser):
     """argparse writes usage and errors to the terminal itself, and its
     "unrecognized arguments" message repeats argv raw. Subparsers inherit this
@@ -1367,7 +1396,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_discover = add("discover", "list conversations the source would ingest")
     p_discover.add_argument("--since", help="time window, e.g. 1d, 7d, 2026-08-01")
-    p_discover.add_argument("--limit", type=int)
+    p_discover.add_argument("--limit", type=_positive_int_argument, help="page size, at least 1")
     p_discover.add_argument("--workspace")
     p_discover.set_defaults(func=cmd_discover)
 
@@ -1380,7 +1409,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="persist candidates and the checkpoint. Still never writes a skill file.",
     )
-    p_daily.add_argument("--day", help="run id / idempotence key, defaults to today (UTC)")
+    p_daily.add_argument(
+        "--day",
+        type=_run_day_argument,
+        help=(
+            "run id / idempotence key, defaults to today (UTC); ASCII letters, digits, "
+            "dot, underscore or hyphen, since it names every candidate of the run"
+        ),
+    )
     p_daily.add_argument("--seed", help="deterministic seed for nonces and blind judging")
     p_daily.add_argument(
         "--allow-missing-roles",

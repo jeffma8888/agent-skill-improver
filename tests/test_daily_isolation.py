@@ -29,6 +29,7 @@ from agent_skill_improver.app.state import StateStore, safe_name
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.config import load_config
 from agent_skill_improver.errors import (
+    ConfigError,
     LinkedTargetRefused,
     LockHeld,
     RecordDefect,
@@ -1559,6 +1560,92 @@ class StateCorruptionTests(DailyHarness):
         receipt_path = state.receipt_path(DAY, dry_run=False)
         self.assertTrue(receipt_path.is_file(), "the receipt was written first")
         self.assertFalse(state.checkpoint_path(DAY).is_file())
+
+
+class ARunDayThatCannotNameACandidateIsRefusedFirstTests(DailyHarness):
+    """Measured before this check: ``run_daily(day="2026/01/02")`` ingested and
+    scored every conversation, wrote them under ``--commit``, and then raised
+    ``StateUnreadable: invalid candidate id`` from the first candidate, with no
+    receipt or checkpoint, so the next run with the same day paid again."""
+
+    class _UntouchedSource:
+        def __getattr__(self, name):
+            raise AssertionError(f"the source was touched ({name}) before the day was checked")
+
+    def test_the_day_is_refused_before_the_source_is_read_or_state_is_written(self):
+        config = self.env()
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            run_daily(
+                config,
+                source=self._UntouchedSource(),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day="2026/01/02",
+                commit=True,
+            )
+        self.assertIn("run day '2026/01/02' cannot name a candidate", str(ctx.exception))
+        self.assertIn("'2026-01-02'", str(ctx.exception))
+        self.assertFalse(
+            (config.state_dir / "conversations").exists(), "nothing was ingested or written"
+        )
+
+    def test_the_control_a_hyphenated_day_runs_to_a_candidate(self):
+        config = self.env()
+        receipt, _, _ = self.run_pass(config, day="2026-01-02")
+        payload = receipt.to_dict()
+        self.assertEqual(payload["day"], "2026-01-02")
+        self.assertGreaterEqual(payload["counts"]["candidates_proposed"], 1)
+
+    def test_a_day_and_a_skill_name_that_do_not_fit_one_id_together_are_refused_first(self):
+        """The day alone passes at 64 characters and a skill directory name
+        has no length rule, so the pair can still exceed the 204-character
+        candidate id. Measured before this check: a 64-character day and a
+        140-character skill directory ran the whole pass and died on the first
+        id with ``invalid candidate id ... (maximum 204 characters)``."""
+        from tests.support import TDD_SKILL, write_skill
+
+        config = self.env()
+        long_skill = "y" * 140
+        write_skill(
+            self.base / "skills-canonical", long_skill, TDD_SKILL.replace("tdd", long_skill)
+        )
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        self.assertIn(long_skill, store.known_skill_ids(), "the long skill is a real one")
+        day = "x" * 64
+        with self.assertRaises(ConfigError) as ctx:
+            run_daily(
+                config,
+                source=self._UntouchedSource(),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            )
+        message = str(ctx.exception)
+        self.assertIn(f"run day {day!r} (64 characters) cannot name a candidate", message)
+        self.assertIn(f"skill {long_skill!r} (140 characters)", message)
+        self.assertIn("maximum 204 characters", message)
+        self.assertIn("No conversation was read or scored", message)
+        # The owner-only layout exists (the skill tree had to be read under the
+        # lock) and holds nothing: no conversation, scorecard or receipt.
+        written = [p for p in config.state_dir.rglob("*") if p.is_file() and p.name != "README.txt"]
+        self.assertEqual([p.name for p in written], ["daily.lock"])
+        # The same tree with a date-sized day fits and runs.
+        receipt, _, _ = self.run_pass(config, day="2026-01-02")
+        payload = receipt.to_dict()
+        self.assertEqual(payload["skill_tree"]["skills_discovered"], len(store.known_skill_ids()))
+        self.assertGreaterEqual(payload["counts"]["records_scored"], 1)
 
 
 class IdempotenceAndLockTests(DailyHarness):
