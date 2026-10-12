@@ -18,7 +18,9 @@ Safety properties enforced here rather than by convention:
 
 from __future__ import annotations
 
+import errno
 import os
+import secrets
 import shlex
 import stat
 from dataclasses import dataclass
@@ -44,11 +46,21 @@ from ..errors import (
     ReadOnlyViolation,
     SelfMutationRefused,
 )
-from ..hashing import normalize_text, sha256_file, sha256_text, tree_digest
-from ..jsonio import write_bytes_atomic, write_json, write_text_atomic
+from ..hashing import normalize_text, sha256_bytes, sha256_file, sha256_text, tree_digest
+from ..jsonio import write_bytes_atomic, write_json
 
 #: Backups live under the owner-only state tree, so they are owner-only too.
 BACKUP_FILE_MODE = 0o600
+
+#: A skill document is read, replaced and re-read through a directory handle
+#: opened component by component below its root, each with ``O_NOFOLLOW``; the
+#: handle pins the directory, so a link planted on the way after the walk is
+#: not followed. POSIX only, like the owner-only modes the state tree relies on.
+PINNED_IO_SUPPORTED = (
+    os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
 
 DEFAULT_MAX_DEPTH = 3
 
@@ -73,6 +85,32 @@ class WriteReceipt:
             "backup_manifest_path": self.backup_manifest_path,
             "rollback_command": self.rollback_command,
         }
+
+
+def _write_pinned(parent_fd: int, leaf: str, data: bytes, *, mode: int) -> None:
+    """Atomic replace of ``leaf`` through a pinned directory handle.
+
+    The temp file is created with ``O_CREAT | O_EXCL | O_NOFOLLOW`` relative to
+    the handle, synced, given ``mode``, then renamed over ``leaf`` relative to
+    the same handle: the directory entry is swapped, so a link at ``leaf`` is
+    replaced rather than written through, and the directory itself is the one
+    the handle was opened on, whatever the path now says.
+    """
+    tmp = f".tmp-{leaf}-{os.getpid()}-{secrets.token_hex(4)}.part"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), mode)
+        os.rename(tmp, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 class FilesystemSkillStore:
@@ -203,46 +241,56 @@ class FilesystemSkillStore:
         self._assert_canonical(target)
         if not target.exists():
             raise BaseHashMismatch(f"refusing to write {target}: file does not exist")
-        current = sha256_file(target)
-        if current != expected_sha256:
-            raise BaseHashMismatch(
-                f"refusing to write {target}: on-disk sha256 is {current[:12]} but the "
-                f"candidate was written against {expected_sha256[:12]}. The skill changed "
-                "since the proposal was made -- re-run validation against the new base."
-            )
-        # The target's own mode, captured BEFORE anything is written. An atomic
-        # write replaces the inode, so without this the new file would carry the
-        # writer's default rather than the mode the skill had -- silently
-        # tightening or loosening somebody else's file. Recorded in the manifest
-        # so rollback can restore it too.
-        target_mode = stat.S_IMODE(target.stat().st_mode)
-        backup_dir = Path(backup_dir)
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(backup_dir, 0o700)
-        backup_path = backup_dir / f"{target.name}.bak"
-        # Written as a fresh regular file at 0600, atomically. The backup lives
-        # under the owner-only state tree, so it must not inherit a
-        # world-readable skill's mode; and ``os.replace`` swaps the directory
-        # entry, so a link planted at this path is replaced rather than written
-        # through to wherever it pointed.
-        write_bytes_atomic(backup_path, target.read_bytes(), mode=BACKUP_FILE_MODE)
-        backup_sha = sha256_file(backup_path)
-        if backup_sha != current:
-            raise BaseHashMismatch(
-                f"backup verification failed for {target}: copy hashes {backup_sha[:12]} "
-                f"but source hashes {current[:12]}; refusing to proceed"
-            )
-        new_sha = sha256_text(text)
-        write_text_atomic(target, normalize_text(text), mode=target_mode)
-        written_sha = sha256_file(target)
-        if written_sha != new_sha:
-            # Restore immediately: a write that did not land as intended is a
-            # rollback trigger, not something to report and leave in place.
-            write_bytes_atomic(target, backup_path.read_bytes(), mode=target_mode)
-            raise BaseHashMismatch(
-                f"post-write verification failed for {target} "
-                f"(expected {new_sha[:12]}, found {written_sha[:12]}); original restored"
-            )
+        # From here on the document is addressed through a handle on its own
+        # directory, taken with O_NOFOLLOW at every component below the root, so
+        # the hash that is checked, the bytes that are backed up, the write and
+        # the re-read all concern one directory: a link swapped in after the
+        # walk above cannot redirect any of them.
+        parent_fd, leaf = self._open_parent_pinned(Path(path), verb="write")
+        try:
+            data, target_mode = self._read_pinned(parent_fd, leaf, target, verb="write")
+            current = sha256_bytes(data)
+            if current != expected_sha256:
+                raise BaseHashMismatch(
+                    f"refusing to write {target}: on-disk sha256 is {current[:12]} but the "
+                    f"candidate was written against {expected_sha256[:12]}. The skill changed "
+                    "since the proposal was made -- re-run validation against the new base."
+                )
+            # The target's own mode, captured BEFORE anything is written. An
+            # atomic write replaces the inode, so without this the new file would
+            # carry the writer's default rather than the mode the skill had --
+            # silently tightening or loosening somebody else's file. Recorded in
+            # the manifest so rollback can restore it too.
+            backup_dir = Path(backup_dir)
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(backup_dir, 0o700)
+            backup_path = backup_dir / f"{target.name}.bak"
+            # Written as a fresh regular file at 0600, atomically. The backup
+            # lives under the owner-only state tree, so it must not inherit a
+            # world-readable skill's mode; and ``os.replace`` swaps the directory
+            # entry, so a link planted at this path is replaced rather than
+            # written through to wherever it pointed.
+            write_bytes_atomic(backup_path, data, mode=BACKUP_FILE_MODE)
+            backup_sha = sha256_file(backup_path)
+            if backup_sha != current:
+                raise BaseHashMismatch(
+                    f"backup verification failed for {target}: copy hashes {backup_sha[:12]} "
+                    f"but source hashes {current[:12]}; refusing to proceed"
+                )
+            new_sha = sha256_text(text)
+            _write_pinned(parent_fd, leaf, normalize_text(text).encode("utf-8"), mode=target_mode)
+            written, _mode = self._read_pinned(parent_fd, leaf, target, verb="write")
+            written_sha = sha256_bytes(written)
+            if written_sha != new_sha:
+                # Restore immediately: a write that did not land as intended is
+                # a rollback trigger, not something to report and leave in place.
+                _write_pinned(parent_fd, leaf, backup_path.read_bytes(), mode=target_mode)
+                raise BaseHashMismatch(
+                    f"post-write verification failed for {target} "
+                    f"(expected {new_sha[:12]}, found {written_sha[:12]}); original restored"
+                )
+        finally:
+            os.close(parent_fd)
         manifest_path = backup_dir / "backup.json"
         rollback = shlex.join(["cp", str(backup_path), str(target)])
         write_json(
@@ -333,7 +381,34 @@ class FilesystemSkillStore:
                 f"refusing to roll back {target}: the recorded target is not a regular file "
                 f"any more, so nothing here can be verified as the text this apply wrote."
             )
-        live = sha256_file(target)
+        parent_fd, leaf = self._open_parent_pinned(target, verb="roll back")
+        try:
+            return self._rollback_pinned(
+                parent_fd,
+                leaf,
+                target,
+                backup=backup,
+                expected=expected,
+                applied=applied,
+                manifest=manifest,
+            )
+        finally:
+            os.close(parent_fd)
+
+    def _rollback_pinned(
+        self,
+        parent_fd: int,
+        leaf: str,
+        target: Path,
+        *,
+        backup: Path,
+        expected: str,
+        applied: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The verified half of :meth:`rollback`, through the pinned handle."""
+        live_bytes, live_mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
+        live = sha256_bytes(live_bytes)
         if live == expected:
             # Already holds the previous text: a second rollback, or a manual
             # `cp` of the backup. Nothing to write; say so rather than rewrite.
@@ -357,11 +432,12 @@ class FilesystemSkillStore:
         # fall back to the live file's current mode rather than guessing.
         recorded_mode = str(manifest.get("target_mode", ""))
         try:
-            mode = int(recorded_mode, 8) if recorded_mode else stat.S_IMODE(target.stat().st_mode)
+            mode = int(recorded_mode, 8) if recorded_mode else live_mode
         except ValueError:
-            mode = stat.S_IMODE(target.stat().st_mode)
-        write_bytes_atomic(target, backup.read_bytes(), mode=mode)
-        restored = sha256_file(target)
+            mode = live_mode
+        _write_pinned(parent_fd, leaf, backup.read_bytes(), mode=mode)
+        restored_bytes, _mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
+        restored = sha256_bytes(restored_bytes)
         if restored != expected:
             raise BaseHashMismatch(
                 f"rollback verification failed: restored sha {restored[:12]} != {expected[:12]}"
@@ -484,6 +560,102 @@ class FilesystemSkillStore:
                     f"skill through a symbolic link. Spell the target as the root does. Nothing "
                     f"was touched."
                 )
+
+    def _open_parent_pinned(self, spelled: Path, *, verb: str) -> tuple[int, str]:
+        """A handle on the document's directory, plus the document's name.
+
+        The root is opened as it is (it may legitimately be a link); every
+        component below it is opened relative to the previous handle with
+        ``O_DIRECTORY | O_NOFOLLOW``, so a link on the way is ``ELOOP`` rather
+        than a redirection, and a directory swapped for a link after this
+        returns is simply not what the handle refers to. The caller closes the
+        handle. The spelled path is required to lie under a configured root,
+        which :meth:`_assert_no_link_below_root` has already established.
+        """
+        if not PINNED_IO_SUPPORTED:
+            raise LinkedTargetRefused(
+                f"refusing to {verb} {spelled}: this platform cannot address a file through "
+                f"a directory handle, so the write could not be pinned to the directory that "
+                f"was checked. Nothing was touched."
+            )
+        spelled = spelled if spelled.is_absolute() else spelled.absolute()
+        for root in self._roots:
+            for root_form in (Path(root.path), Path(root.path).resolve()):
+                try:
+                    below = spelled.relative_to(root_form)
+                except ValueError:
+                    continue
+                if not below.parts:
+                    raise NonDocumentWriteRefused(
+                        f"refusing to {verb} {spelled}: it is the skill root {root.id} itself, "
+                        f"not a document in it. Nothing was touched."
+                    )
+                fd = os.open(str(root_form), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    for part in below.parts[:-1]:
+                        try:
+                            nxt = os.open(
+                                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                            )
+                        except OSError as exc:
+                            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                                raise LinkedTargetRefused(
+                                    f"refusing to {verb} {spelled}: {root_form / part} is a "
+                                    f"symbolic link or not a directory on the way to the "
+                                    f"document, judged on the open handle. Nothing was touched."
+                                ) from exc
+                            raise BaseHashMismatch(
+                                f"refusing to {verb} {spelled}: {root_form / part} could not be "
+                                f"opened ({exc.strerror}). Nothing was touched."
+                            ) from exc
+                        os.close(fd)
+                        fd = nxt
+                except BaseException:
+                    os.close(fd)
+                    raise
+                return fd, below.parts[-1]
+        raise LinkedTargetRefused(
+            f"refusing to {verb} {spelled}: it lies under no configured skill root, so there "
+            f"is no directory handle to pin it to. Nothing was touched."
+        )
+
+    def _read_pinned(
+        self, parent_fd: int, leaf: str, target: Path, *, verb: str
+    ) -> tuple[bytes, int]:
+        """The document's bytes and mode, read through the pinned handle.
+
+        ``O_NOFOLLOW`` on the leaf, then ``fstat`` on what was opened: a link
+        or anything but a regular file at the name is a refusal, not a read of
+        whatever it points to.
+        """
+        try:
+            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise LinkedTargetRefused(
+                    f"refusing to {verb} {target}: the document is a symbolic link, judged on "
+                    f"the open handle. Neither the link nor its target was touched."
+                ) from exc
+            raise BaseHashMismatch(
+                f"refusing to {verb} {target}: the document could not be opened "
+                f"({exc.strerror}). Nothing was touched."
+            ) from exc
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise BaseHashMismatch(
+                    f"refusing to {verb} {target}: the document is not a regular file. "
+                    f"Nothing was touched."
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(fd)
+        return b"".join(chunks), stat.S_IMODE(info.st_mode)
 
     def _assert_canonical(self, target: Path) -> None:
         """Refuse a mirror copy, and refuse anything we cannot identify at all.

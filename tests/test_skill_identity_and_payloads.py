@@ -421,6 +421,124 @@ class WritePathRefusalTests(Harness):
             )
 
 
+class WritesArePinnedToTheDirectoryHandleTests(Harness):
+    """The lstat walk judges the path at one instant; the write came later, by
+    path. Between the two, a directory on the way could become a link and the
+    kernel would follow it at write time, with a same-text twin passing every
+    hash. So the document is addressed through a handle on its directory, taken
+    with ``O_NOFOLLOW`` per component, for the hash read, the write and the
+    re-read alike. The swap is simulated here at the one point in
+    ``write_canonical`` that sits between the read and the write.
+    """
+
+    def _twin_and_target(self) -> tuple[Path, Path]:
+        twin = write(self.canonical_dir / "twin" / SKILL_FILENAME, GOOD)
+        return self.canonical_dir / "shared" / SKILL_FILENAME, twin
+
+    def _link(self, link: Path, to: Path) -> None:
+        try:
+            os.symlink(to, link)
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_directory_swapped_for_a_link_mid_write_still_receives_the_write(self):
+        from unittest import mock
+
+        from agent_skill_improver.adapters import skill_fs as skill_fs_mod
+
+        target, twin = self._twin_and_target()
+        moved_to = self.base / "real-shared"
+        base_sha = sha256_file(target)
+        real_normalize = skill_fs_mod.normalize_text
+
+        def swap_then_normalize(text: str) -> str:
+            # Runs after the hash read, before the write: the directory the
+            # path names is now a link to the twin.
+            shutil.move(str(target.parent), str(moved_to))
+            self._link(target.parent, twin.parent)
+            return real_normalize(text)
+
+        with mock.patch.object(skill_fs_mod, "normalize_text", swap_then_normalize):
+            receipt = self.store(read_only=False).write_canonical(
+                target,
+                GOOD + "\n- changed\n",
+                expected_sha256=base_sha,
+                backup_dir=self.base / "bak",
+                skill_id="shared",
+            )
+        self.assertTrue(target.parent.is_symlink(), "the swap really happened mid-write")
+        self.assertEqual(twin.read_text(encoding="utf-8"), GOOD, "the twin must not change")
+        self.assertIn(
+            "- changed",
+            (moved_to / SKILL_FILENAME).read_text(encoding="utf-8"),
+            "the write landed in the directory the handle was opened on",
+        )
+        self.assertEqual(receipt.new_sha256, sha256_file(moved_to / SKILL_FILENAME))
+        self.assertFalse((moved_to / SKILL_FILENAME).is_symlink())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_the_handle_walk_refuses_a_linked_directory_on_its_own(self):
+        """Independent of the lstat walk: the handle walk is the second lock."""
+        target, twin = self._twin_and_target()
+        shutil.rmtree(target.parent)
+        self._link(target.parent, twin.parent)
+        with self.assertRaises(LinkedTargetRefused) as ctx:
+            self.store(read_only=False)._open_parent_pinned(target, verb="write")
+        self.assertIn("open handle", str(ctx.exception))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_the_pinned_read_refuses_a_linked_document_on_its_own(self):
+        target, twin = self._twin_and_target()
+        store = self.store(read_only=False)
+        parent_fd, leaf = store._open_parent_pinned(target, verb="write")
+        try:
+            target.unlink()
+            self._link(target, twin)
+            with self.assertRaises(LinkedTargetRefused):
+                store._read_pinned(parent_fd, leaf, target, verb="write")
+        finally:
+            os.close(parent_fd)
+        self.assertEqual(twin.read_text(encoding="utf-8"), GOOD)
+
+    def test_a_host_without_directory_handles_is_refused_rather_than_degraded(self):
+        """The gate is dead code on every supported host, so it is measured by
+        flipping it: the refusal must happen before the hash read."""
+        from unittest import mock
+
+        from agent_skill_improver.adapters import skill_fs as skill_fs_mod
+
+        target, _twin = self._twin_and_target()
+        with mock.patch.object(skill_fs_mod, "PINNED_IO_SUPPORTED", False):
+            with self.assertRaises(LinkedTargetRefused) as ctx:
+                self.store(read_only=False).write_canonical(
+                    target,
+                    GOOD + "\n- changed\n",
+                    expected_sha256=sha256_file(target),
+                    backup_dir=self.base / "bak",
+                )
+        self.assertIn("directory handle", str(ctx.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), GOOD)
+        self.assertFalse((self.base / "bak").exists(), "refused before any backup was taken")
+
+    def test_the_control_a_pinned_write_keeps_the_documents_mode_and_is_atomic(self):
+        from agent_skill_improver.adapters.skill_fs import _write_pinned
+
+        target, _twin = self._twin_and_target()
+        os.chmod(target, 0o640)
+        store = self.store(read_only=False)
+        parent_fd, leaf = store._open_parent_pinned(target, verb="write")
+        try:
+            _write_pinned(parent_fd, leaf, b"fresh\n", mode=0o640)
+            data, mode = store._read_pinned(parent_fd, leaf, target, verb="write")
+        finally:
+            os.close(parent_fd)
+        self.assertEqual(data, b"fresh\n")
+        self.assertEqual(oct(mode), oct(0o640))
+        leftovers = [p.name for p in target.parent.iterdir() if p.name.startswith(".tmp-")]
+        self.assertEqual(leftovers, [], "no temp file survives the rename")
+
+
 class BackupWriteSafetyTests(Harness):
     """The backup is the only copy of the original; it must land where it says."""
 
@@ -478,6 +596,19 @@ class RollbackSafetyTests(Harness):
             skill_id="shared",
         )
         return target, Path(receipt.backup_manifest_path), previous
+
+    def test_a_manifest_without_a_recorded_mode_restores_at_the_live_files_mode(self):
+        """Manifests written before ``target_mode`` existed carry none; the
+        restore then keeps the mode the file has now rather than guessing."""
+        target, manifest, previous = self.apply_a_change()
+        os.chmod(target, 0o640)
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        del raw["target_mode"]
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        result = self.store(read_only=False).rollback(manifest)
+        self.assertFalse(result["already_restored"])
+        self.assertEqual(target.read_text(encoding="utf-8"), previous)
+        self.assertEqual(oct(stat.S_IMODE(target.stat().st_mode)), oct(0o640))
 
     def test_the_control_rollback_restores_the_previous_text(self):
         target, manifest, previous = self.apply_a_change()

@@ -68,9 +68,9 @@ def write_text_atomic(path: Path, text: str, *, mode: int = FILE_MODE) -> None:
     run would read as complete.
 
     ``mode`` is applied to the temp file *before* the rename, so the destination
-    never exists at a wider mode even momentarily. Callers replacing a file
-    outside the state tree (a skill document, say) pass its existing mode, since
-    tightening somebody else's file is a surprise, not a safety improvement.
+    never exists at a wider mode even momentarily. This is the writer for the
+    state tree; a skill document is replaced through a pinned directory handle
+    instead (``skill_fs._write_pinned``), which carries the document's own mode.
     """
     write_bytes_atomic(path, text.encode("utf-8"), mode=mode)
 
@@ -78,9 +78,10 @@ def write_text_atomic(path: Path, text: str, *, mode: int = FILE_MODE) -> None:
 def write_bytes_atomic(path: Path, data: bytes, *, mode: int = FILE_MODE) -> None:
     """Byte-exact form of :func:`write_text_atomic`.
 
-    Used where the content is a verified copy of an existing file (a rollback
-    from backup) and must land byte-for-byte. ``os.replace`` swaps the directory
-    entry, so a symlink sitting at ``path`` is replaced rather than followed.
+    Used where the content is a verified copy of an existing file (the pre-apply
+    backup of a skill) and must land byte-for-byte. ``os.replace`` swaps the
+    directory entry, so a symlink sitting at ``path`` is replaced rather than
+    followed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".part")

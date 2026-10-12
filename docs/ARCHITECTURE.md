@@ -329,6 +329,19 @@ The interlock is structural, not a flag:
   into a canonical one is refused too (it reached the root through a link above
   or outside it); the root itself may be a link. `rollback` runs the same walk.
   `_assert_document` then refuses any target whose filename is not `SKILL.md`.
+  The walk judges one instant, so the document is then addressed through a
+  handle on its own directory, opened component by component below the root
+  with `O_NOFOLLOW` (`_open_parent_pinned`): the hash read, the backup bytes,
+  the write (a temp file created and renamed relative to that handle) and the
+  verifying re-read all concern the directory that was checked, and a directory
+  swapped for a link after the walk is simply not what the handle refers to.
+  `rollback` restores through the same handle. Two limits, stated rather than
+  hidden: the write is pinned but the *recorded path* is not, so after such a
+  swap the manifest names what is now a link and `rollback` refuses it (the
+  moved real file is intact; restoring it is a manual `cp`); and the root is
+  opened as declared, link or not, because a configured root is the trust
+  anchor: whoever can re-point it could have pointed it anywhere before the run,
+  and no check inside the run can tell that from the operator's declaration.
 
 ## Apply and rollback
 
