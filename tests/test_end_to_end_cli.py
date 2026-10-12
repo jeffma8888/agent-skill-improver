@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -1395,6 +1396,100 @@ class AListingThatHidesRecordsSaysSoTests(unittest.TestCase):
         payload = json.loads(run_cli([*self.cfg, "--json", "candidates", "--all"]).stdout)
         self.assertEqual((payload["listing"], payload["closed_not_listed"]), ("all", 0))
         self.assertIn(self.cid, [c["id"] for c in payload["candidates"]])
+
+
+class ACountIsNotAReasonTests(unittest.TestCase):
+    """Measured before: with the improver exiting non-zero, ``asi daily``
+    printed ``status=partial ... skills_deferred=1`` and nothing else about it;
+    the operator reading the cron log could not tell which skill was deferred,
+    at what stage, or why, without opening the receipt JSON. Every record the
+    run set aside (quarantined, deferred, refused) is now one line of text
+    under the summary, with its stage and reason, as the JSON already had it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path = Path(build_env(self.base, seed="reasons", use_subprocess_model=True))
+        self.cfg = ["--config", str(self.config_path)]
+
+    def _break_the_improver(self) -> None:
+        import re
+
+        text = self.config_path.read_text(encoding="utf-8")
+        pattern = re.compile(r"(\[model\.improver\]\n)argv = .*\n")
+        self.assertEqual(len(pattern.findall(text)), 1, text)
+        failing = (
+            f'argv = ["{sys.executable}", "-c", '
+            '"import sys; sys.stderr.write(chr(98) * 3 + chr(10)); sys.exit(7)"]\n'
+        )
+        self.config_path.write_text(pattern.sub(lambda m: m.group(1) + failing, text, count=1))
+
+    def _daily(self, day: str):
+        proc = run_cli([*self.cfg, "daily", "--commit", "--day", day])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        return proc.stdout.splitlines()
+
+    def test_a_deferred_skill_is_named_with_its_stage_and_the_models_own_words(self):
+        self._break_the_improver()
+        lines = self._daily("2026-01-01")
+        self.assertIn("status=partial", lines[0])
+        self.assertIn("skills_deferred=1", lines[0])
+        self.assertEqual(lines[1], "deferred skill 'tdd' at propose: role 'improver' exited 7: bbb")
+        self.assertTrue(lines[2].startswith("note: "), lines)
+
+    def test_the_quarantine_that_ends_a_deferral_streak_is_named_too(self):
+        self._break_the_improver()
+        for day in ("2026-01-01", "2026-01-02"):
+            self._daily(day)
+        lines = self._daily("2026-01-03")
+        self.assertIn("skills_quarantined=1", lines[0])
+        self.assertTrue(
+            lines[1].startswith(
+                "quarantined skill 'tdd' at propose:defer-exhausted: deferred 3 run(s) in a row"
+            ),
+            lines[1],
+        )
+        self.assertIn("Last reason: role 'improver' exited 7: bbb", lines[1])
+
+    def test_a_policy_refusal_is_named_as_a_refusal(self):
+        first = self._daily("2026-01-01")
+        self.assertIn("candidates=1", first[0])
+        lines = self._daily("2026-01-02")
+        refusals = [ln for ln in lines if ln.startswith("refused skill 'tdd' at propose: ")]
+        self.assertEqual(len(refusals), 1, lines)
+        self.assertIn("open candidate", refusals[0])
+
+    def test_the_control_a_clean_run_prints_the_summary_then_the_notes(self):
+        lines = self._daily("2026-01-01")
+        self.assertIn("status=ok", lines[0])
+        self.assertTrue(lines[1].startswith("note: "), lines)
+        self.assertFalse(
+            any(ln.split(" ")[0] in ("quarantined", "deferred", "refused") for ln in lines), lines
+        )
+
+    def test_conversations_are_listed_by_the_same_rule_in_id_order(self):
+        from types import SimpleNamespace
+
+        from agent_skill_improver.cli import _set_aside_lines
+
+        receipt = SimpleNamespace(
+            skills={"b": {"status": "scored", "stage": "score", "reason": ""}},
+            records={
+                "conv-2": {"status": "deferred", "stage": "ingest", "reason": ""},
+                "conv-1": {"status": "quarantined", "stage": "ingest", "reason": "bad\nbytes"},
+                "conv-3": {"status": "scored", "stage": "score", "reason": ""},
+            },
+        )
+        self.assertEqual(
+            _set_aside_lines(receipt),
+            [
+                "quarantined conversation 'conv-1' at ingest: bad\nbytes",
+                "deferred conversation 'conv-2' at ingest: no reason recorded",
+            ],
+        )
+        # The break in the reason is the receipt's; `_emit` spells it at print.
 
 
 class TwoRootsTiedOnPrecedenceAreRefusedNotPickedByIdTests(unittest.TestCase):

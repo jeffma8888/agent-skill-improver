@@ -790,13 +790,42 @@ def cmd_daily(args: argparse.Namespace) -> int:
     )
     # Notes carry skill ids and source errors, so the text goes out through
     # _emit like every other listing: one line each, breaks spelled.
-    lines = [receipt.summary_line(), *(f"note: {note}" for note in receipt.notes)]
+    lines = [
+        receipt.summary_line(),
+        *_set_aside_lines(receipt),
+        *(f"note: {n}" for n in receipt.notes),
+    ]
     if receipt.dry_run:
         lines.append("receipt: not written (dry run); --json prints it, --commit persists it")
     else:
         lines.append(f"receipt: {state.receipt_path(receipt.day, dry_run=False)}")
     _emit(receipt.to_dict(), as_json=args.json, lines=lines)
     return exit_code_for(receipt.status)
+
+
+#: Record statuses that mean the run did not finish with that record: each
+#: one is named in the text summary with its stage and reason.
+SET_ASIDE_STATUSES = ("quarantined", "deferred", "refused")
+
+
+def _set_aside_lines(receipt: Any) -> list[str]:
+    """One line per skill or conversation the run set aside, with the reason.
+
+    The summary line counts them; a count is not a reason. Measured before: a
+    failing improver produced ``status=partial ... skills_deferred=1`` and
+    nothing else on screen, so the operator reading the log could not tell
+    which skill was deferred or why without opening the receipt.
+    """
+    out: list[str] = []
+    for kind, table in (("skill", receipt.skills), ("conversation", receipt.records)):
+        for record_id in sorted(table):
+            info = table[record_id]
+            status = str(info.get("status", ""))
+            if status not in SET_ASIDE_STATUSES:
+                continue
+            reason = str(info.get("reason", "")) or "no reason recorded"
+            out.append(f"{status} {kind} {record_id!r} at {info.get('stage', '?')}: {reason}")
+    return out
 
 
 def cmd_candidates(args: argparse.Namespace) -> int:

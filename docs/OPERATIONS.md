@@ -169,7 +169,9 @@ reading first, in order:
 
 **`status`** — `ok`, `partial`, `stood-down`, or `blocked`. `partial` is normal: it
 means at least one record or skill was quarantined or deferred while the rest
-completed. `stood-down` carries a `stand_down_reason`. One stand-down, "no skill
+completed; the text output names each one under the summary line, with its
+stage and reason, so the log says what was set aside and why. `stood-down`
+carries a `stand_down_reason`. One stand-down, "no skill
 to improve" (no configured root is a directory, or the present roots hold no
 skill document), is decided before discovery, so no conversation is read or
 scored for a proposal that could not exist; `doctor` reports the same state as a
