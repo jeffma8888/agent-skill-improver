@@ -145,6 +145,54 @@ class CandidateScan:
     unreadable: tuple[UnreadableRecord, ...]
 
 
+#: The kinds of record a run sets aside, each in its own directory, in the
+#: order the listing prints them: what to investigate, then what the guard
+#: refused, then what is waiting for a retry.
+SET_ASIDE_KINDS: tuple[tuple[str, str], ...] = (
+    ("quarantined", "quarantine"),
+    ("refused", "refusals"),
+    ("deferred", "deferred"),
+)
+
+
+@dataclass(frozen=True)
+class SetAsideRecord:
+    """One record a run set aside: quarantined, refused or deferred, with why.
+
+    The ``daily`` text summary names the records *that run* set aside; this is
+    the same information read back from the state tree, for every run, so an
+    operator reading yesterday's ``quarantined=3`` does not have to open the
+    reason files (whose names flatten the stage) to learn what and why.
+    """
+
+    kind: str
+    record_id: str
+    stage: str
+    reason: str
+    at: str
+    attempts: int | None
+    path: Path
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "record_id": self.record_id,
+            "stage": self.stage,
+            "reason": self.reason,
+            "at": self.at,
+            "attempts": self.attempts,
+            "path": str(self.path),
+        }
+
+
+@dataclass(frozen=True)
+class SetAsideScan:
+    """Every set-aside record on disk: the ones that read, and the ones that did not."""
+
+    readable: tuple[SetAsideRecord, ...]
+    unreadable: tuple[UnreadableRecord, ...]
+
+
 @dataclass(frozen=True)
 class RecordStatus:
     record_id: str
@@ -623,6 +671,54 @@ class StateStore:
         if not path.is_symlink() and path.is_file():
             self._persist(path, path.unlink)
 
+    def scan_set_aside(self) -> SetAsideScan:
+        """Every quarantine, refusal and deferral record, newest first.
+
+        Same rules as ``scan_candidates``: a link or other non-file is not a
+        record and is skipped (``foreign_entries`` names it); a regular file
+        that does not read as a record of the expected shape is listed as
+        unreadable with the reason, never dropped. Newest first because the
+        question this answers is "what went wrong lately"; ties keep the kind
+        order of ``SET_ASIDE_KINDS``, then path order within a kind.
+        """
+        readable: list[SetAsideRecord] = []
+        unreadable: list[UnreadableRecord] = []
+        for kind, directory in SET_ASIDE_KINDS:
+            for path in sorted(self.dir(directory).glob("*.json")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    raw = _read_state_json(path)
+                except (ValueError, StateUnreadable) as exc:
+                    unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
+                    continue
+                problem = _set_aside_shape_problem(raw)
+                if problem:
+                    unreadable.append(
+                        UnreadableRecord(
+                            path=path, reason=f"refusing to list the record {path}: {problem}"
+                        )
+                    )
+                    continue
+                attempts = raw.get("attempts")
+                readable.append(
+                    SetAsideRecord(
+                        kind=kind,
+                        record_id=raw["record_id"],
+                        stage=raw["stage"],
+                        reason=str(raw.get("reason", "")),
+                        at=str(raw.get("at", "")),
+                        attempts=(
+                            attempts
+                            if isinstance(attempts, int) and not isinstance(attempts, bool)
+                            else None
+                        ),
+                        path=path,
+                    )
+                )
+        readable.sort(key=lambda r: r.at, reverse=True)
+        return SetAsideScan(readable=tuple(readable), unreadable=tuple(unreadable))
+
     def deferred_ids(self) -> list[str]:
         out: list[str] = []
         for path in sorted(self.dir("deferred").glob("*.json")):
@@ -866,6 +962,18 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
             ),
         )
     return data
+
+
+def _set_aside_shape_problem(raw: Any) -> str:
+    """Why ``raw`` is not a set-aside record, or an empty string when it is one."""
+    if not isinstance(raw, dict):
+        return f"the record is {type(raw).__name__}, not an object"
+    for key in ("record_id", "stage"):
+        if not isinstance(raw.get(key), str) or not raw[key]:
+            return f"field {key!r} is missing or not a non-empty string"
+    if "reason" in raw and not isinstance(raw["reason"], str):
+        return "field 'reason' is not a string"
+    return ""
 
 
 def _checkpoint_shape_refusal(path: Path, key: str, what: str) -> StateUnreadable:

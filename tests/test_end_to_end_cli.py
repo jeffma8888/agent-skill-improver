@@ -2309,6 +2309,8 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         ("rubrics",),
         ("--json", "discover"),
         ("candidates",),
+        ("set-aside",),
+        ("--json", "set-aside", "--kind", "deferred"),
         ("--json", "review", "{candidate}"),
         ("scheduler-template", "launchd"),
         ("scheduler-template", "cron"),
@@ -2355,7 +2357,7 @@ class ReadOnlyCommandsTests(unittest.TestCase):
                 proc = run_cli([*self.cfg, *args])
                 self.assertEqual(proc.returncode, RC_OK, proc.stderr)
                 self.assertFalse(state.exists(), f"{args} created a state tree")
-        for args in (("--json", "discover"), ("candidates",)):
+        for args in (("--json", "discover"), ("candidates",), ("set-aside",)):
             with self.subTest(command=args):
                 proc = run_cli([*self.cfg, *args])
                 self.assertEqual(proc.returncode, RC_OK, proc.stderr)
@@ -2363,7 +2365,9 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         # without a state tree; it must still create no file on the way out.
         proc = run_cli([*self.cfg, "review", "CAND-2026-01-01-01-none"])
         self.assertEqual(proc.returncode, RC_MISSING_FILE, proc.stderr)
-        self.assertTrue(state.is_dir(), "discover and candidates create the tree they read")
+        self.assertTrue(
+            state.is_dir(), "discover, candidates and set-aside create the tree they read"
+        )
         files = [p for p in state.rglob("*") if not p.is_dir()]
         self.assertEqual(files, [], "a read-only command wrote a file")
         wide = [p for p in [state, *state.rglob("*")] if p.stat().st_mode & 0o077]

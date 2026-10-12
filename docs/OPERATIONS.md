@@ -323,6 +323,12 @@ asi review <candidate-id>
 `candidates` lists open records. Its footer counts the closed ones (applied,
 rolled-back, gate-failed, blocked-run) it is not listing; `--all` shows them.
 
+`set-aside` is the other side of the ledger: every record a run quarantined,
+refused or deferred, newest first, each with its stage and reason (a deferral
+also shows its attempt count). The `daily` summary names only that run's; this
+reads them all back. A file under those directories that does not read as a
+record is listed as unreadable, by name and with the reason, never dropped.
+
 `review` prints the failing cases with their evidence, the diff, the validation
 result (fixes, regressions, holdouts, judge preference), and the approval token.
 Read the *evidence*, not the summary. The question to ask is not "does this edit
@@ -416,9 +422,12 @@ waits for you to review or close the existing one rather than queue a competitor
 A `gate-failed` candidate is closed and does not hold the skill; a skill whose
 proposals keep failing the gate is re-proposed each run.
 
-**Records keep landing in quarantine.** Read the reason files; each one names the
-defect. A repeating shape defect usually means the source changed its export
-format, which is a normalizer fix, not a data problem.
+**Records keep landing in quarantine.** `asi set-aside` lists every quarantined,
+refused and deferred record on disk, newest first, with its stage and reason
+(`--kind quarantined` for one kind; `--json` for the fields and file paths), so
+you do not have to open the reason files, whose names flatten the stage. A
+repeating shape defect usually means the source changed its export format,
+which is a normalizer fix, not a data problem.
 
 **The same record defers every day.** Deferral is for transient failures, and a
 deferred record is retried first on the next run. That priority is a ratchet if
@@ -432,7 +441,7 @@ proposal or validation keeps deferring (a model that times out on that one
 skill); a completed propose-and-validate resets that streak too. A persistent
 miss is not transient; read the reason rather than waiting for the retry to work.
 The quarantine *file name* flattens `:` to `_`, so match on the `stage` field
-inside the JSON, not on the name.
+inside the JSON, not on the name; `asi set-aside` prints the stage as recorded.
 
 **A skill tree mutation was detected.** The run is `blocked` and exits 5. Do not
 re-run. Find out what wrote to the tree. The candidate evidence gathered during

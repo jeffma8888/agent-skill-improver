@@ -115,6 +115,7 @@ what wrote to the tree first, and treat any candidate from that run as suspect.
 
 ```bash
 asi candidates                 # the queue
+asi set-aside                  # what runs quarantined, refused or deferred, and why
 asi review <candidate-id>      # the full argument, diff, evidence, token
 ```
 

@@ -56,7 +56,7 @@ from .domain.isolation import (
 from .errors import AsiError, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
-from .app.state import DIR_MODE, OPEN_STATUSES, STATE_FILE_MODE, StateStore
+from .app.state import DIR_MODE, OPEN_STATUSES, SET_ASIDE_KINDS, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
 ENV_CONFIG = "ASI_CONFIG"
@@ -876,6 +876,49 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set_aside(args: argparse.Namespace) -> int:
+    """List what runs set aside: quarantined, refused and deferred records.
+
+    The ``daily`` summary names the records of one run; this reads them all
+    back from the state tree, newest first. Measured before: the only way to
+    learn what yesterday's ``quarantined=3`` referred to was to open the files
+    under the quarantine directory, whose names flatten the stage.
+    """
+    config = _load(args)
+    state = StateStore(config.state_dir)
+    scan = state.scan_set_aside()
+    kinds = [k for k, _ in SET_ASIDE_KINDS]
+    wanted = [args.kind] if args.kind else kinds
+    items = [r for r in scan.readable if r.kind in wanted]
+    not_listed = len(scan.readable) - len(items)
+    counts = {k: sum(1 for r in scan.readable if r.kind == k) for k in kinds}
+    payload = {
+        "listing": args.kind or "all",
+        "not_listed": not_listed,
+        "counts": counts,
+        "unreadable": [u.to_dict() for u in scan.unreadable],
+        "records": [r.to_dict() for r in items],
+    }
+    lines = []
+    for r in items:
+        attempts = f" (attempt {r.attempts})" if r.kind == "deferred" and r.attempts else ""
+        lines.append(
+            f"{r.at or '?':<20} {r.kind:<11} {r.record_id!r} at {r.stage}{attempts}: "
+            f"{r.reason or 'no reason recorded'}"
+        )
+    for record in scan.unreadable:
+        lines.append(f"UNREADABLE  {record.path.name}  {record.reason}")
+    counted = ", ".join(f"{counts[k]} {k}" for k in kinds)
+    footer = f"{len(items)} set-aside record(s)"
+    if args.kind:
+        footer = f"{len(items)} {args.kind} record(s)"
+        if not_listed:
+            footer += f", {not_listed} of other kinds not listed"
+    lines.append(f"{footer} ({counted}); {len(scan.unreadable)} unreadable record(s)")
+    _emit(payload, as_json=args.json, lines=lines)
+    return 0
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from .app.promote import read_live_base_text, review_report
 
@@ -1523,6 +1566,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="include closed candidates (applied, rolled-back, gate-failed, blocked-run)",
     )
     p_candidates.set_defaults(func=cmd_candidates)
+
+    p_set_aside = add("set-aside", "list what runs set aside: quarantined, refused, deferred")
+    p_set_aside.add_argument(
+        "--kind",
+        choices=[k for k, _ in SET_ASIDE_KINDS],
+        help="list one kind only; the footer still counts the others",
+    )
+    p_set_aside.set_defaults(func=cmd_set_aside)
 
     p_review = add("review", "print a candidate's full argument, diff and approval token")
     p_review.add_argument("candidate_id")
