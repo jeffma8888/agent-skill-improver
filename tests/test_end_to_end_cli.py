@@ -1001,6 +1001,73 @@ class AMisnamedCandidateRecordIsUnreachableAndSaysSoTests(unittest.TestCase):
         self.assertEqual(review.returncode, RC_OK, review.stderr)
 
 
+class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
+    """Measured before: a second ``SKILL.md`` for ``tdd`` nested elsewhere in
+    the canonical root became the canonical copy by walk order, ``skills``
+    listed the real document as a mirror in its own root, ``doctor`` said
+    ready, and ``daily --commit`` proposed against the newcomer with exit 0.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, seed="duplicate-copy"))]
+        self.real = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        self.newcomer = self.base / "skills-canonical" / "group" / "tdd" / "SKILL.md"
+        self.newcomer.parent.mkdir(parents=True)
+        self.newcomer.write_text(
+            self.real.read_text(encoding="utf-8").replace("description:", "description: COPY"),
+            encoding="utf-8",
+        )
+        self.before = {p: sha256_file(p) for p in (self.real, self.newcomer)}
+
+    def test_skills_and_doctor_name_both_copies_and_daily_proposes_against_neither(self):
+        skills = run_cli([*self.cfg, "--json", "skills"])
+        self.assertEqual(skills.returncode, RC_OK, skills.stderr)
+        group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertIsNone(group["canonical"])
+        self.assertEqual(
+            sorted(group["ambiguous_copy_paths"]), sorted([str(self.real), str(self.newcomer)])
+        )
+        text = run_cli([*self.cfg, "skills"])
+        self.assertIn(
+            "tdd  [NO CANONICAL EDITABLE COPY -- proposals refused]  ambiguous=canonical,canonical"
+            "  mirrors=mirror",
+            text.stdout,
+        )
+        self.assertIn("why: editable root 'canonical' holds 2 copies of this skill", text.stdout)
+
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, RC_OK, doctor.stderr)
+        warnings = [w for w in json.loads(doctor.stdout)["warnings"] if "'tdd'" in w]
+        self.assertEqual(len(warnings), 1, json.loads(doctor.stdout)["warnings"])
+        self.assertIn("has 2 copies in editable root 'canonical'", warnings[0])
+        self.assertIn(str(self.newcomer), warnings[0])
+        self.assertIn("until one copy remains", warnings[0])
+
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.assertEqual(receipt["status"], "partial")
+        self.assertEqual(receipt["candidates"], [], "no proposal at either document")
+        row = receipt["skills"]["tdd"]
+        self.assertEqual((row["status"], row["stage"]), ("quarantined", "propose"))
+        self.assertIn("ambiguous", row["reason"])
+        self.assertEqual({p: sha256_file(p) for p in self.before}, self.before, "untouched")
+
+    def test_removing_the_newcomer_restores_the_skill_without_any_other_change(self):
+        self.newcomer.unlink()
+        skills = run_cli([*self.cfg, "--json", "skills"])
+        group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertEqual(group["canonical"]["path"], str(self.real))
+        self.assertEqual(group["ambiguous_copy_paths"], [])
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.assertEqual([c["canonical_path"] for c in receipt["candidates"]], [str(self.real)])
+
+
 class ACheckpointDailyWouldRefuseIsNamedByDoctorTests(unittest.TestCase):
     """Measured before: with today's checkpoint truncated, ``doctor`` printed
     ``verdict: ready`` and exited 0; the next ``daily`` then refused by name

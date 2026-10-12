@@ -298,6 +298,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"skill document passed over in root {document.root_id}: {document.path} is "
             f"{document.reason}"
         )
+    # Two documents claiming one skill in the root that would be edited: the
+    # resolver refuses to pick by walk order, so `daily` quarantines the skill
+    # at propose until one copy remains. Measured before: the newcomer was
+    # proposed against and this report said ready.
+    for group in store.groups():
+        if group.ambiguous_copies:
+            listed = ", ".join(str(c.path) for c in group.ambiguous_copies)
+            warnings.append(
+                f"skill {group.skill_id!r} has {len(group.ambiguous_copies)} copies in editable "
+                f"root {group.ambiguous_copies[0].root_id!r} ({listed}); `daily` refuses to "
+                "propose for it until one copy remains"
+            )
     state = build_state(config)
 
     # The layout is judged before anything touches the state tree, the runner's
@@ -530,8 +542,13 @@ def cmd_skills(args: argparse.Namespace) -> int:
             head += f"  canonical={canonical.root_id} sha={canonical.sha256[:12]}"
             if not canonical.loads:
                 head += "  [DOES NOT LOAD]"
-        if group.mirrors:
-            head += f"  mirrors={','.join(m.root_id for m in group.mirrors)}"
+        # A copy in the root that would be edited is not a mirror; when that
+        # root holds several, they are listed as what they are.
+        if group.ambiguous_copies:
+            head += f"  ambiguous={','.join(c.root_id for c in group.ambiguous_copies)}"
+        mirrors = [m for m in group.mirrors if m not in group.ambiguous_copies]
+        if mirrors:
+            head += f"  mirrors={','.join(m.root_id for m in mirrors)}"
         if group.divergent_mirrors:
             head += f"  DIVERGENT={','.join(m.root_id for m in group.divergent_mirrors)}"
         lines.append(head)

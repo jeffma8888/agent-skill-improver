@@ -164,6 +164,12 @@ class SkillGroup:
     canonical: SkillSnapshot | None
     mirrors: tuple[SkillSnapshot, ...]
     canonical_reason: str = ""
+    #: The copies in the editable root that would have been selected, when that
+    #: root holds more than one; ``canonical`` is then None. Measured before:
+    #: a second ``SKILL.md`` for a skill nested elsewhere in the canonical root
+    #: became the canonical copy by walk order, the real one was listed as a
+    #: "mirror" in its own root, and ``daily`` proposed against the newcomer.
+    ambiguous_copies: tuple[SkillSnapshot, ...] = ()
 
     @property
     def all_copies(self) -> tuple[SkillSnapshot, ...]:
@@ -207,6 +213,7 @@ class SkillGroup:
             "mirrors": [m.to_dict() for m in self.mirrors],
             "is_mirrored": self.is_mirrored,
             "divergent_mirror_root_ids": [m.root_id for m in self.divergent_mirrors],
+            "ambiguous_copy_paths": [str(c.path) for c in self.ambiguous_copies],
         }
 
 
@@ -224,6 +231,12 @@ def resolve_groups(
     2. roots that are merely ``editable``, lowest precedence first;
     3. otherwise no canonical copy exists and proposals against the skill are
        refused rather than pointed at a mirror.
+
+    The selected root must hold exactly one copy of the skill. Two documents
+    claiming the same skill id in one editable root (a nested duplicate, a
+    copy left behind by a move) are an ambiguity this function refuses to
+    resolve by walk order: the group then has no canonical copy, names both
+    documents, and proposals are refused until one remains.
 
     ``passed_over`` is ``(root_id, skill_id, reason)`` for every document
     discovery saw and did not take. A copy passed over in an editable root is
@@ -257,16 +270,22 @@ def resolve_groups(
         reason = ""
         if skill_id in withheld:
             root_id, why = withheld[skill_id][0]
-            groups.append(
-                SkillGroup(
-                    skill_id,
-                    None,
-                    tuple(ordered),
-                    f"the copy in editable root {root_id!r} was passed over by discovery "
-                    f"({why}); proposals are refused until it reads, rather than pointed "
-                    "at another copy",
-                )
+            reason = (
+                f"the copy in editable root {root_id!r} was passed over by discovery "
+                f"({why}); proposals are refused until it reads, rather than pointed "
+                "at another copy"
             )
+            # The unreadable copy is the actionable fact, so it leads; but a
+            # readable copy in the same root means the skill is claimed twice
+            # there, and saying so now saves the operator a second round.
+            also = [s for s in ordered if s.root_id == root_id]
+            if also:
+                listed = ", ".join(str(s.path) for s in also)
+                reason += (
+                    f"; that root also holds {len(also)} readable document(s) claiming this "
+                    f"skill ({listed}), which is an ambiguity once the passed-over copy reads"
+                )
+            groups.append(SkillGroup(skill_id, None, tuple(ordered), reason))
             continue
         for snap in ordered:
             root = by_root.get(snap.root_id)
@@ -284,6 +303,23 @@ def resolve_groups(
                     break
         if canonical is None:
             reason = "no editable root holds this skill; proposals will be refused"
+            groups.append(SkillGroup(skill_id, None, tuple(ordered), reason))
+            continue
+        same_root = tuple(s for s in ordered if s.root_id == canonical.root_id)
+        if len(same_root) > 1:
+            listed = ", ".join(str(s.path) for s in same_root)
+            groups.append(
+                SkillGroup(
+                    skill_id,
+                    None,
+                    tuple(ordered),
+                    f"editable root {canonical.root_id!r} holds {len(same_root)} copies of "
+                    f"this skill ({listed}); which one is the skill is ambiguous, so proposals "
+                    "are refused until one copy remains",
+                    ambiguous_copies=same_root,
+                )
+            )
+            continue
         mirrors = tuple(s for s in ordered if s is not canonical)
         groups.append(SkillGroup(skill_id, canonical, mirrors, reason))
     return groups

@@ -1183,6 +1183,94 @@ class CanonicalResolutionTests(Harness):
             only.canonical_reason, "no editable root holds this skill; proposals will be refused"
         )
 
+    def test_two_copies_in_the_selected_root_withhold_the_canonical_slot_and_name_both(self):
+        # Measured before: the nested newcomer became canonical by walk order and
+        # the real document was listed as a "mirror" in its own root.
+        newcomer = self.canonical_dir / "group" / "shared" / SKILL_FILENAME
+        write(newcomer, GOOD + "\n- a second document claiming the same skill\n")
+        store = self.store()
+        shared = group_for(store.groups(), "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertEqual(
+            [c.path for c in shared.ambiguous_copies],
+            [newcomer.resolve(), (self.canonical_dir / "shared" / SKILL_FILENAME).resolve()],
+            "path-sorted within the root, not walk order",
+        )
+        self.assertIn("holds 2 copies of this skill", shared.canonical_reason)
+        self.assertIn(str(newcomer.resolve()), shared.canonical_reason)
+        self.assertIn("ambiguous", shared.canonical_reason)
+        self.assertEqual(len(shared.all_copies), 3, "both canonical-root copies and the mirror")
+        self.assertEqual(shared.divergent_mirrors, (), "nothing to diverge from")
+        payload = shared.to_dict()
+        self.assertIsNone(payload["canonical"])
+        self.assertEqual(len(payload["ambiguous_copy_paths"]), 2)
+        self.assertEqual([], [d for d in store.passed_over()], "both documents were readable")
+
+    def test_two_copies_in_a_lower_precedence_editable_root_leave_the_selected_root_unambiguous(
+        self,
+    ):
+        second = self.base / "second"
+        write(second / "shared" / SKILL_FILENAME, GOOD)
+        write(second / "group" / "shared" / SKILL_FILENAME, GOOD)
+        roots = [
+            self.roots[0],
+            SkillRoot(
+                id="second",
+                path=second,
+                precedence=50,
+                canonical=False,
+                editable=True,
+                kind="custom",
+            ),
+            self.roots[1],
+        ]
+        store = FilesystemSkillStore(roots, read_only=True)
+        shared = group_for(store.groups(), "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "canonical")
+        self.assertEqual(shared.ambiguous_copies, ())
+        self.assertEqual(sorted(m.root_id for m in shared.mirrors), ["mirror", "second", "second"])
+        # ...but when that lower root IS the one selected, its two copies are
+        # the ambiguity.
+        only_second = FilesystemSkillStore([roots[1], roots[2]], read_only=True)
+        shared = group_for(only_second.groups(), "shared")
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertEqual({c.root_id for c in shared.ambiguous_copies}, {"second"})
+        self.assertIn("editable root 'second' holds 2 copies", shared.canonical_reason)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_passed_over_copy_leads_the_reason_and_the_readable_duplicate_is_named_too(self):
+        # Cycle 72 and this cycle at once: the unreadable copy is the actionable
+        # fact and withholds the slot; the readable copy beside it is named so the
+        # operator does not learn of the second problem only after fixing the first.
+        newcomer = self.canonical_dir / "group" / "shared" / SKILL_FILENAME
+        write(newcomer, GOOD)
+        real = self.canonical_dir / "shared" / SKILL_FILENAME
+        os.chmod(real, 0o000)
+        try:
+            shared = group_for(self.store().groups(), "shared")
+        finally:
+            os.chmod(real, 0o644)
+        assert shared is not None
+        self.assertIsNone(shared.canonical)
+        self.assertEqual(shared.ambiguous_copies, (), "not stated as ambiguity while one is unread")
+        self.assertTrue(shared.canonical_reason.startswith("the copy in editable root 'canonical'"))
+        self.assertIn("Permission denied", shared.canonical_reason)
+        self.assertIn(
+            "also holds 1 readable document(s) claiming this skill", shared.canonical_reason
+        )
+        self.assertIn(str(newcomer.resolve()), shared.canonical_reason)
+
+    def test_two_copies_in_a_root_that_is_not_editable_change_nothing(self):
+        write(self.mirror_dir / "group" / "shared" / SKILL_FILENAME, GOOD)
+        shared = group_for(self.store().groups(), "shared")
+        assert shared is not None and shared.canonical is not None
+        self.assertEqual(shared.canonical.root_id, "canonical")
+        self.assertEqual(shared.ambiguous_copies, ())
+        self.assertEqual([m.root_id for m in shared.mirrors], ["mirror", "mirror"])
+
     def test_a_passed_over_copy_in_a_root_that_is_not_editable_changes_nothing(self):
         snapshots = self.store().snapshots()
         groups = resolve_groups(

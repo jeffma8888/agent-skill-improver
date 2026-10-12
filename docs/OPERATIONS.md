@@ -14,8 +14,12 @@ many `SKILL.md` files discovery **passed over** (each one a `WARN` line naming
 the path and the reason: a dangling link, a link while links are not followed,
 a link that leaves its root, a document deeper than `max_depth`, a directory,
 fifo, socket or device carrying the name, a directory that could not be listed),
-the selection bound, and whether the judge is independent of the
-improver. `skills` lists the same passed-over documents under its table. It exits
+any skill with **two documents in the root that would be edited** (a `WARN`
+naming both; the resolver refuses to pick one by walk order, `skills` shows the
+skill with no canonical copy and a `why:` line, and `daily` quarantines it at
+propose until one copy remains), the selection bound, and whether the judge is
+independent of the improver. `skills` lists the same passed-over documents under
+its table. It exits
 non-zero if the configuration is not runnable. Run it after every config change;
 most problems in this system are configuration problems that otherwise surface as
 a strange result three stages later.
