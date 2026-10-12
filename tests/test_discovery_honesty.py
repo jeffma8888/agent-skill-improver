@@ -248,6 +248,37 @@ class SourceOutputBoundsTests(unittest.TestCase):
                 alive = True
             self.assertFalse(alive, "a timed-out conversation command must be killed")
 
+    def test_a_failing_export_names_the_exit_code_and_quotes_a_bounded_stderr_tail(self):
+        """The command, not the record, failed to answer, so this is the source
+        being unavailable. The operator gets the exit code and the END of stderr
+        (where a CLI puts its reason), at most 500 characters of it, and never
+        the partial stdout when stderr said anything at all."""
+        program = (
+            "import sys\n"
+            "sys.stdout.write('partial stdout')\n"
+            "sys.stderr.write('E' * 5000 + ' THE-REASON')\n"
+            "sys.exit(7)\n"
+        )
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(program).fetch("thread-5")
+        message = str(ctx.exception)
+        self.assertIn("exited 7: ", message)
+        quoted = message.split("exited 7: ", 1)[1]
+        self.assertTrue(quoted.endswith("THE-REASON"), quoted[-40:])
+        self.assertEqual(len(quoted), 500, "the documented bound is exactly 500 characters")
+        self.assertNotIn("partial stdout", quoted)
+
+    def test_a_failing_export_that_said_nothing_says_so(self):
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source("import sys; sys.exit(2)").fetch("thread-6")
+        self.assertIn("exited 2: <no output>", str(ctx.exception))
+
+    def test_a_failing_export_with_only_blank_stderr_is_quoted_from_stdout(self):
+        program = "import sys\nsys.stdout.write('reason on stdout')\nsys.stderr.write('  \\n')\nsys.exit(3)\n"
+        with self.assertRaises(SourceUnavailable) as ctx:
+            self._source(program).fetch("thread-7")
+        self.assertIn("exited 3: reason on stdout", str(ctx.exception))
+
     def test_the_control_export_under_the_cap_is_normalized(self):
         fixture = Path(__file__).parent / "fixtures" / "exports" / "compliant.json"
         program = "import sys;sys.stdout.write(open(sys.argv[1]).read())"

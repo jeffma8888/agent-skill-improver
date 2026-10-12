@@ -319,8 +319,11 @@ class ConversationCliSource:
                 raise RecordDefect(reason, record_id=record_id) from exc
             raise SourceUnavailable(reason) from exc
         if result.returncode != 0:
-            tail = (result.stderr_tail or result.stdout).decode("utf-8", errors="replace")
-            tail = tail.strip()[-500:]
+            # The end of stderr is where a CLI puts its reason; stdout stands in
+            # only when stderr said nothing, blank lines included.
+            stderr = result.stderr_tail.decode("utf-8", errors="replace").strip()
+            stdout = result.stdout.decode("utf-8", errors="replace").strip()
+            tail = (stderr or stdout)[-500:]
             raise SourceUnavailable(f"{shown} exited {result.returncode}: {tail or '<no output>'}")
         try:
             return result.stdout.decode("utf-8")
