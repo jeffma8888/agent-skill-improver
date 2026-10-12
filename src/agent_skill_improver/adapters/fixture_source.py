@@ -151,7 +151,8 @@ class FixtureConversationSource:
         return found
 
     def fetch(self, thread_id: str) -> NormalizedConversation:
-        for path, payload in self._payloads():
+        accepted, passed_over = self._scan()
+        for path, payload in accepted:
             thread = payload.get("thread")
             if isinstance(thread, dict) and thread.get("id") == thread_id:
                 return normalize_export(
@@ -159,6 +160,21 @@ class FixtureConversationSource:
                     output_excerpt_chars=self.output_excerpt_chars,
                     max_messages=self.max_messages,
                 )
+        if not passed_over:
+            raise RecordDefect(
+                f"no fixture for thread {thread_id!r} in {self.directory}", record_id=thread_id
+            )
+        # Measured before: an export discovered a moment ago and then made
+        # unreadable (mode 000, truncated mid-write) was reported as "no
+        # fixture", as if the thread had never been there. The directory holds
+        # entries this scan could not take as a thread; one of them may be it.
+        shown = "; ".join(f"{entry} {reason}" for entry, reason in passed_over[:5])
+        more = len(passed_over) - 5
+        if more > 0:
+            shown += f"; +{more} more"
         raise RecordDefect(
-            f"no fixture for thread {thread_id!r} in {self.directory}", record_id=thread_id
+            f"no readable fixture for thread {thread_id!r} in {self.directory}; "
+            f"{len(passed_over)} entr{'y' if len(passed_over) == 1 else 'ies'} there did not "
+            f"read as a thread and may be it: {shown}",
+            record_id=thread_id,
         )

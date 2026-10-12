@@ -202,7 +202,9 @@ compute a rate over a page and call it a rate over the corpus.
 not take as a thread, with the reason. For the fixtures source: an export this
 process cannot read, one that is not UTF-8 or not JSON, a JSON value that is not
 an object, an object with no thread or a thread without an id; `doctor` lists the
-same entries as `WARN` lines under the source. For the command-line source: a
+same entries as `WARN` lines under the source, and a fetch that cannot find a
+discovered thread while such entries exist quarantines the record as "no readable
+fixture" naming them, not as a thread that was never there. For the command-line source: a
 listed "Thread:" line whose id is option-shaped, empty, over-long or carries
 whitespace or control characters (shown as a cut-short repr, since a listing is
 derived from conversation content and can carry a forged line), a listed entry

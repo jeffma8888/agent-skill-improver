@@ -236,6 +236,45 @@ class FixtureSourcePassedOverTests(unittest.TestCase):
         finally:
             os.chmod(locked, 0o644)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_a_discovered_export_made_unreadable_before_fetch_is_not_called_absent(self):
+        # Measured before: "no fixture for thread X", as if it had never been
+        # listed, when the file was there and this process could not read it.
+        page = self.source().discover_page(since="", limit=50)
+        thread_id = page.threads[0].thread_id
+        victim = next(
+            path
+            for path, payload in self.source()._payloads()
+            if payload["thread"]["id"] == thread_id
+        )
+        os.chmod(victim, 0o000)
+        try:
+            with self.assertRaises(RecordDefect) as caught:
+                self.source().fetch(thread_id)
+        finally:
+            os.chmod(victim, 0o644)
+        message = str(caught.exception)
+        self.assertIn(f"no readable fixture for thread {thread_id!r}", message)
+        self.assertIn("1 entry there did not read as a thread and may be it", message)
+        self.assertIn(f"{victim} cannot be read (Permission denied)", message)
+        self.assertEqual(caught.exception.record_id, thread_id)
+
+    def test_a_thread_never_in_a_clean_directory_is_still_simply_absent(self):
+        with self.assertRaises(RecordDefect) as caught:
+            self.source().fetch("1700000000999-9")
+        self.assertTrue(str(caught.exception).startswith("no fixture for thread '1700000000999-9'"))
+        self.assertNotIn("may be it", str(caught.exception))
+
+    def test_fetch_names_at_most_five_passed_over_entries_and_counts_the_rest(self):
+        for n in range(7):
+            (self.exports / f"0-bad{n}.json").write_text("[]", encoding="utf-8")
+        with self.assertRaises(RecordDefect) as caught:
+            self.source().fetch("1700000000999-9")
+        message = str(caught.exception)
+        self.assertIn("7 entries there did not read as a thread", message)
+        self.assertEqual(message.count("is JSON but not an object (list)"), 5)
+        self.assertTrue(message.endswith("; +2 more"))
+
     def test_a_clean_directory_passes_nothing_over(self):
         self.assertEqual(self.source().passed_over(), [])
         self.assertEqual(self.source().discover_page(since="", limit=50).passed_over, ())
