@@ -725,10 +725,22 @@ class PassedOverDocumentsReachTheOperatorTests(unittest.TestCase):
         deep = root / "a" / "b" / "c" / "d"
         deep.mkdir(parents=True)
         (deep / "SKILL.md").write_text("---\nname: deep\n---\n# deep\n", encoding="utf-8")
+        (root / "SKILL.md").write_text("---\nname: atroot\n---\n# at the root\n", encoding="utf-8")
+        (root / "tdd" / "examples").mkdir()
+        (root / "tdd" / "examples" / "SKILL.md").write_text(
+            "---\nname: examples\n---\n# an example shipped inside tdd\n", encoding="utf-8"
+        )
         cls.expected = {
             str(
                 root / "a" / "b" / "c" / "d" / "SKILL.md"
             ): "deeper than max_depth=3 below the root",
+            str(root / "SKILL.md"): (
+                "at the root itself, not in a skill directory; a skill is <root>/<name>/SKILL.md"
+            ),
+            str(root / "tdd" / "examples" / "SKILL.md"): (
+                f"below {root / 'tdd' / 'SKILL.md'}, the place of skill 'tdd'; a document "
+                "under another skill's directory is that skill's material, not a skill"
+            ),
             str(
                 root / "dangling" / "SKILL.md"
             ): "a symlink whose target does not exist or cannot be reached",
@@ -755,13 +767,13 @@ class PassedOverDocumentsReachTheOperatorTests(unittest.TestCase):
         self.assertEqual(payload["skills_discovered"], 4, "the same four skills as a clean tree")
         lines = as_text.stdout.split("\n")
         warned = [ln for ln in lines if ln.startswith("WARN  skill document passed over")]
-        self.assertEqual(len(warned), 4, as_text.stdout)
+        self.assertEqual(len(warned), 6, as_text.stdout)
         for path, reason in self.expected.items():
             self.assertIn(
                 f"WARN  skill document passed over in root canonical: {path} is {reason}", lines
             )
         self.assertTrue(
-            any(ln.startswith("skills ") and ln.endswith("4 passed over") for ln in lines),
+            any(ln.startswith("skills ") and ln.endswith("6 passed over") for ln in lines),
             as_text.stdout,
         )
 
@@ -771,11 +783,15 @@ class PassedOverDocumentsReachTheOperatorTests(unittest.TestCase):
         self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
         payload = json.loads(as_json.stdout)
         self.assertEqual({d["path"]: d["reason"] for d in payload["passed_over"]}, self.expected)
+        ids = {g["skill_id"] for g in payload["groups"]}
+        self.assertEqual(ids, {"broken-frontmatter", "code-review", "mirror-only", "tdd"})
+        self.assertNotIn(self.base.name, ids, "no skill named after the root folder")
+        self.assertNotIn("examples", ids, "the example inside tdd is not a skill")
         lines = as_text.stdout.split("\n")
         for path, reason in self.expected.items():
             self.assertIn(f"passed over (canonical): {path} is {reason}", lines)
-        self.assertEqual(sum(1 for ln in lines if ln.startswith("passed over (")), 4)
-        self.assertTrue(lines[-2].endswith("4 document(s) passed over"), as_text.stdout)
+        self.assertEqual(sum(1 for ln in lines if ln.startswith("passed over (")), 6)
+        self.assertTrue(lines[-2].endswith("6 document(s) passed over"), as_text.stdout)
         self.assertNotIn("alias", [ln.split("  ")[0] for ln in lines], "the link was not taken")
 
 

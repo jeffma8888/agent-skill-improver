@@ -1020,6 +1020,11 @@ class FilesystemSkillStore:
 
         unlistable: list[tuple[Path, str]] = []
         entries = self._entries_named_like_a_document(base, unlistable=unlistable)
+        # Every directory that carries an entry named like a document, whatever
+        # the entry turns out to be: a document below one of these is inside
+        # another skill's directory, and that holds whether or not the owning
+        # document reads.
+        skill_dirs = {entry.parent for entry in entries}
         for directory, error in unlistable:
             skip(
                 directory,
@@ -1046,6 +1051,37 @@ class FilesystemSkillStore:
                     copy_of_a_skill=False,
                 )
                 continue
+            # A skill is ``<root>/<name>/SKILL.md``: the name is the directory.
+            # A document at the root itself has no directory of its own to be
+            # named by. Measured before: it was inventoried under the root
+            # directory's basename, so the skill's identity changed with the
+            # folder's name, and a proposal against it would have written the
+            # root's own ``SKILL.md``.
+            if len(rel.parts) < 2:
+                skip(
+                    candidate,
+                    "at the root itself, not in a skill directory; a skill is "
+                    f"<root>/<name>/{SKILL_FILENAME}",
+                    copy_of_a_skill=False,
+                )
+                continue
+            # A document below another skill's directory is that skill's
+            # material (a template, an example, a reference), not a skill of
+            # its own. The owner is judged by the entry at its place, whatever
+            # that entry is (a dangling link named like a document still marks
+            # the directory as a skill's), so the owner it names need not have
+            # been inventoried. Measured before: ``tdd/sub/SKILL.md`` was
+            # inventoried as a skill named ``sub``, and a proposal against it
+            # would have written inside ``tdd``.
+            owner = self._enclosing_skill_dir(base, candidate, skill_dirs)
+            if owner is not None:
+                skip(
+                    candidate,
+                    f"below {owner / SKILL_FILENAME}, the place of skill {owner.name!r}; a "
+                    f"document under another skill's directory is that skill's material, not a skill",
+                    copy_of_a_skill=False,
+                )
+                continue
             if is_link and not self._follow_symlinks:
                 skip(candidate, "a symlink; this store does not follow links")
                 continue
@@ -1057,17 +1093,27 @@ class FilesystemSkillStore:
             found.append(candidate)
         return found
 
+    @staticmethod
+    def _enclosing_skill_dir(base: Path, document: Path, skill_dirs: set[Path]) -> Path | None:
+        """The nearest directory strictly above ``document``'s own, below
+        ``base``, that carries an entry named like a document; None if there is
+        none. Judged on the entry's own place, no link followed."""
+        for ancestor in document.parent.parents:
+            if ancestor == base or base not in ancestor.parents:
+                return None
+            if ancestor in skill_dirs:
+                return ancestor
+        return None
+
     def _skill_id_at(self, base: Path, document: Path) -> str | None:
         """The skill id discovery would give a ``SKILL.md`` at this place, or None.
 
         Judged on the entry's own place under the root (no link is followed):
         ``<root>/<skill>/SKILL.md`` or deeper up to ``max_depth``, named by the
         parent directory as ``_snapshot`` names it. A deeper one is never
-        taken, so it is not a copy of a skill. A root-level document is left
-        out too, on purpose: a readable one is taken by ``_snapshot`` under the
-        root's own basename, but an unreadable one withholding whatever skill
-        happens to share that name would be the collision this rule exists to
-        avoid, so the withhold stays fail-open there.
+        taken, so it is not a copy of a skill, and neither is a document at the
+        root itself, which discovery passes over: the root has no skill
+        directory to be named by.
         """
         if document.name != SKILL_FILENAME:
             return None
@@ -1154,7 +1200,9 @@ class FilesystemSkillStore:
         fields, has_open, warnings = parse_frontmatter(text)
         warnings = undecodable + warnings
         rel = skill_file.resolve().relative_to(base)
-        skill_id = rel.parts[-2] if len(rel.parts) >= 2 else skill_file.parent.name
+        # ``_iter_skill_files`` passes a root-level document over, so the
+        # parent here is always a directory below the root.
+        skill_id = rel.parts[-2]
         declared = fields.get("name", "")
         if declared and declared != skill_id:
             warnings = warnings + [

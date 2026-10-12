@@ -16,7 +16,9 @@ were found, how many **do not load**, how many carry executable payloads (a
 since its count is then a floor), how
 many paths discovery **passed over** (each one a `WARN` line naming
 the path and the reason: a dangling link, a link while links are not followed,
-a link that leaves its root, a document deeper than `max_depth`, a directory,
+a link that leaves its root, a document deeper than `max_depth`, a `SKILL.md` at
+the root itself, a `SKILL.md` below a directory that carries its own `SKILL.md`
+entry (whatever it says, it sits inside another skill's directory), a directory,
 fifo, socket or device carrying the name, a directory that could not be listed,
 a configured root whose path is not a directory),
 any skill with **two documents in the root that would be edited** (a `WARN`
@@ -187,7 +189,14 @@ it is in `skill_documents_passed_over`.
 
 **`skill_tree.skill_documents_passed_over`** — every `SKILL.md` discovery saw and
 did not take this run, with its root and reason (a link, a fifo, a document too
-deep, a document this process cannot read). A skill whose every copy is here is in
+deep, one at the root itself or below another skill's directory, a document this
+process cannot read). A skill is `ROOT/NAME/SKILL.md`, or the same under a
+grouping folder: a document at the root has no directory to be named by (measured
+before: it was inventoried under the root folder's own basename), and one below
+a directory that carries an entry named `SKILL.md`, readable or not, sits inside
+that skill's directory and is treated as its material (measured before:
+`tdd/examples/SKILL.md` was a skill called `examples`, and a proposal against it
+would have written inside `tdd`). A skill whose every copy is here is in
 none of the counts beside it, and this list is the only unattended surface that
 says so; `doctor` and `skills` print the same entries. A copy passed over in an
 editable root also withholds that skill's canonical slot: `skills` shows the skill

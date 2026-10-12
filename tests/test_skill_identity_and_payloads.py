@@ -988,6 +988,100 @@ class PassedOverDocumentsAreReportedTests(Harness):
         taken = [s.path for s in following.snapshots()]
         self.assertIn(self.canonical_dir.resolve() / "alias" / SKILL_FILENAME, taken)
 
+    def test_a_document_at_the_root_itself_is_passed_over_not_named_after_the_folder(self):
+        # Measured before: inventoried as a skill called 'skills-canonical', the
+        # root directory's own basename, so the id moved with the folder's name
+        # and a proposal against it would have written the root's SKILL.md.
+        write(self.canonical_dir / SKILL_FILENAME, GOOD)
+        store = self.store()
+        self.assertEqual(
+            self.passed_over(store),
+            {
+                "SKILL.md": "at the root itself, not in a skill directory; a skill is "
+                "<root>/<name>/SKILL.md"
+            },
+        )
+        self.assertEqual([d.skill_id for d in store.passed_over()], [None])
+        self.assertEqual(
+            sorted(s.skill_id for s in store.snapshots()),
+            ["broken", "mirror-only", "shared", "shared"],
+            "no skill is named after the root directory",
+        )
+        self.assertNotIn(self.canonical_dir.name, store.known_skill_ids())
+
+    def test_a_document_below_another_skill_is_that_skills_material_not_a_skill(self):
+        # Measured before: tdd/sub/SKILL.md was inventoried as a skill named
+        # 'sub', so a template or example shipped inside a skill became a
+        # proposal target, and the proposal would have written inside 'shared'.
+        nested = self.canonical_dir / "shared" / "templates" / SKILL_FILENAME
+        write(nested, GOOD.replace("name: shared", "name: templates"))
+        store = self.store()
+        owner = self.canonical_dir.resolve() / "shared"
+        self.assertEqual(
+            self.passed_over(store),
+            {
+                "shared/templates/SKILL.md": f"below {owner / SKILL_FILENAME}, the place of "
+                f"skill 'shared'; a document under another skill's directory is that skill's "
+                f"material, not a skill"
+            },
+        )
+        self.assertEqual([d.skill_id for d in store.passed_over()], [None])
+        self.assertEqual(
+            sorted(s.skill_id for s in store.snapshots()),
+            ["broken", "mirror-only", "shared", "shared"],
+        )
+        canonical = next(
+            s for s in store.snapshots() if s.skill_id == "shared" and s.root_id == "canonical"
+        )
+        self.assertEqual(canonical.path, owner / SKILL_FILENAME, "the owner is untouched")
+
+    def test_the_nesting_rule_holds_when_the_owning_document_itself_does_not_read(self):
+        # The owner's SKILL.md may be a fifo, a dangling link or unreadable; the
+        # directory still belongs to that skill, so a document below it is
+        # still not a skill of its own.
+        (self.canonical_dir / "pipe").mkdir()
+        os.mkfifo(self.canonical_dir / "pipe" / SKILL_FILENAME)
+        write(self.canonical_dir / "pipe" / "example" / SKILL_FILENAME, GOOD)
+        with deadline(20):
+            reasons = self.passed_over(self.store())
+        self.assertEqual(reasons["pipe/SKILL.md"], "not a regular file (a fifo)")
+        self.assertTrue(
+            reasons["pipe/example/SKILL.md"].endswith(
+                ", the place of skill 'pipe'; a document "
+                "under another skill's directory is that skill's material, not a skill"
+            ),
+            reasons,
+        )
+        self.assertNotIn("example", self.store().known_skill_ids())
+        # A dangling link named like a document marks its directory the same
+        # way: the owner it names was never inventoried, and both entries say so.
+        (self.canonical_dir / "group").mkdir()
+        (self.canonical_dir / "group" / SKILL_FILENAME).symlink_to(
+            self.canonical_dir / "nowhere.md"
+        )
+        write(self.canonical_dir / "group" / "real" / SKILL_FILENAME, GOOD)
+        with deadline(20):
+            store = self.store()
+            reasons = self.passed_over(store)
+        self.assertEqual(
+            reasons["group/SKILL.md"], "a symlink whose target does not exist or cannot be reached"
+        )
+        self.assertIn("the place of skill 'group'", reasons["group/real/SKILL.md"])
+        self.assertNotIn("real", store.known_skill_ids())
+        self.assertNotIn("group", store.known_skill_ids())
+
+    def test_the_control_a_grouping_directory_without_a_document_is_not_an_owner(self):
+        # <root>/group/<name>/SKILL.md is a skill under a grouping folder, as
+        # before: only a directory that carries its own SKILL.md owns what is
+        # below it.
+        write(
+            self.canonical_dir / "group" / "grouped" / SKILL_FILENAME,
+            GOOD.replace("name: shared", "name: grouped"),
+        )
+        store = self.store()
+        self.assertEqual(store.passed_over(), [])
+        self.assertIn("grouped", store.known_skill_ids())
+
     def test_a_link_that_leaves_its_root_is_named_as_one(self):
         outside = self.base / "elsewhere" / SKILL_FILENAME
         write(outside, GOOD)
