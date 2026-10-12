@@ -14,6 +14,10 @@
 
 [run]
 # Everything the loop reads or writes lands here. Gitignored, local only.
+# Paths may use ~ and $VARIABLE; a variable that is not set where the run
+# happens (a scheduler's environment is small), or a form like ${VARIABLE:-x},
+# is a config error, never a directory named "$VARIABLE". There is no escape
+# for a directory whose real name contains a dollar sign.
 state_dir = "state"
 # DRY RUN IS THE DEFAULT. `asi daily` does the whole pass and prints the receipt
 # but writes nothing under state/ until `--commit`. Even with --commit it never

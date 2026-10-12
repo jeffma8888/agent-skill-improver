@@ -47,6 +47,17 @@ exactly as it is.
 A config that does not load is a `ConfigError` here as everywhere, exit 3: a job
 for a config that cannot run is not worth printing.
 
+Configured paths may use `~` and `$VARIABLE`, and a scheduler's environment is
+smaller than a shell's. A path naming a variable that is **not set** where the
+run happens is a `ConfigError` naming the variable, not a directory called
+`$VARIABLE`: before this check a scheduled run with `state_dir = "$ASI_HOME/state"`
+and no `ASI_HOME` created a second private state tree, holding candidates that
+`asi review` from a shell never saw. Set the variable in the job (launchd
+`EnvironmentVariables`, a cron `NAME=value` line) or write the path out. Only the
+plain `$NAME` and `${NAME}` forms expand; `${NAME:-default}` and the other shell
+modifiers are refused outright. The `--config` argument itself is not expanded at
+all: a literal `$NAME` there is a missing config file, exit 3.
+
 To install the launchd job yourself, copy the output into your user LaunchAgents
 directory and load it with `launchctl`. To install the cron entry, paste it into
 `crontab -e`. Both steps are yours on purpose: a tool that installs its own

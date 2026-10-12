@@ -16,6 +16,7 @@ loop that can rewrite its own scoring criteria has no gate at all.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,8 +63,40 @@ SOURCE_KINDS = (SOURCE_CLI, SOURCE_FIXTURES)
 FAIRNESS_DIMENSIONS = ("class", "workspace", "date")
 
 
+#: A ``$NAME`` or ``${...}`` that ``os.path.expandvars`` left in place: an unset
+#: variable, or a braced form it does not understand at all (``${NAME:-x}`` and
+#: the other shell modifiers), which it also keeps literally.
+_UNEXPANDED_VARIABLE = re.compile(r"\$(?:\{([^}]*)\}?|([A-Za-z_][A-Za-z0-9_]*))")
+
+
 def _expand(raw: str, *, base: Path) -> Path:
-    path = Path(os.path.expandvars(os.path.expanduser(str(raw))))
+    """A configured path with ``~`` and ``$VARIABLE`` expanded, or a refusal.
+
+    ``expandvars`` keeps an unset variable as literal text, so a path such as
+    ``$ASI_HOME/state`` under a scheduler whose environment lacks the variable
+    would quietly become a directory named ``$ASI_HOME``: a second, private
+    state tree the operator never looks at, holding the candidates they are
+    waiting to review. Measured before this check existed. The same goes for a
+    ``~user`` that names no user. Both are refused with the name, before any
+    path is created.
+    """
+    expanded = os.path.expandvars(os.path.expanduser(str(raw)))
+    leftover = _UNEXPANDED_VARIABLE.search(expanded)
+    if leftover:
+        shown = leftover.group(0)
+        raise ConfigError(
+            f"path {raw!r} still contains {shown} after expansion: the variable is not set "
+            "here, or the form is one the expansion does not understand. Refusing to use the "
+            "literal text as a directory. A scheduled run has a smaller environment than an "
+            "interactive shell, so set the variable where the run happens, spell the plain "
+            "$NAME form, or write the path out."
+        )
+    if expanded.startswith("~"):
+        raise ConfigError(
+            f"path {raw!r} starts with a ~ that names no known user; refusing to use the "
+            "literal text as a directory."
+        )
+    path = Path(expanded)
     return path if path.is_absolute() else (base / path)
 
 

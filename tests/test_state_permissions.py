@@ -873,5 +873,95 @@ class LockFileTests(StateTreeHarness):
             self.assertEqual(oct(mode_of(path)), oct(0o600))
 
 
+class ConfigPathsFailClosedTests(unittest.TestCase):
+    """A configured path may use ``~`` and ``$VARIABLE``. Measured before this
+    class existed, an unset variable was kept as literal text, so ``state_dir =
+    "$ASI_HOME/state"`` under a scheduler without ``ASI_HOME`` created a second
+    private tree at ``<base>/$ASI_HOME/state``: the scheduled run's candidates
+    landed where ``asi review`` from a shell would never look. Refused by name.
+    """
+
+    VAR = "ASI_TEST_UNSET_VARIABLE_7F3A"
+
+    def _config_with_state_dir(self, base: Path, value: str) -> Path:
+        config = Path(build_env(base, dry_run=True))
+        text = config.read_text(encoding="utf-8")
+        lines = [ln for ln in text.splitlines() if ln.startswith("state_dir = ")]
+        assert len(lines) == 1, lines
+        config.write_text(text.replace(lines[0], f'state_dir = "{value}"'), encoding="utf-8")
+        return config
+
+    def setUp(self) -> None:
+        os.environ.pop(self.VAR, None)
+
+    def test_a_path_naming_an_unset_variable_is_refused_with_the_name(self):
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_state_dir(Path(tmp), f"${self.VAR}/state")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(config)
+            self.assertIn(self.VAR, str(ctx.exception))
+            self.assertFalse((Path(tmp) / f"${self.VAR}").exists(), "nothing was created")
+
+    def test_the_braced_form_is_refused_too(self):
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_state_dir(Path(tmp), f"${{{self.VAR}}}/state")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(config)
+            self.assertIn(self.VAR, str(ctx.exception))
+
+    def test_a_braced_form_with_a_shell_modifier_is_refused_even_when_the_variable_is_set(self):
+        """``${NAME:-default}`` is what a shell user writes; ``expandvars`` does
+        not understand it and keeps it literally whether or not NAME is set."""
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with TemporaryDirectory() as tmp:
+            os.environ[self.VAR] = str(Path(tmp) / "elsewhere")
+            try:
+                config = self._config_with_state_dir(Path(tmp), f"${{{self.VAR}:-/tmp}}/state")
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(config)
+            finally:
+                os.environ.pop(self.VAR, None)
+            self.assertIn(self.VAR, str(ctx.exception))
+
+    def test_a_tilde_naming_no_user_is_refused(self):
+        from agent_skill_improver.config import load_config
+        from agent_skill_improver.errors import ConfigError
+
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_state_dir(Path(tmp), "~no-such-user-7f3a/state")
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(config)
+            self.assertIn("~", str(ctx.exception))
+
+    def test_the_control_a_set_variable_expands(self):
+        from agent_skill_improver.config import load_config
+
+        with TemporaryDirectory() as tmp:
+            os.environ[self.VAR] = str(Path(tmp) / "elsewhere")
+            try:
+                config = self._config_with_state_dir(Path(tmp), f"${self.VAR}/state")
+                loaded = load_config(config)
+            finally:
+                os.environ.pop(self.VAR, None)
+            self.assertEqual(loaded.state_dir, (Path(tmp) / "elsewhere" / "state").resolve())
+
+    def test_doctor_reports_it_as_a_config_error_rather_than_creating_the_tree(self):
+        with TemporaryDirectory() as tmp:
+            config = self._config_with_state_dir(Path(tmp), f"${self.VAR}/state")
+            proc = run_cli(["--config", str(config), "doctor"])
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("config error", proc.stderr)
+            self.assertIn(self.VAR, proc.stderr)
+            self.assertFalse((Path(tmp) / f"${self.VAR}").exists())
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
