@@ -636,6 +636,26 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cron_quote(value: str) -> str:
+    """Spell ``value`` for a crontab command.
+
+    Shell-quoted first. Then for cron itself, which rewrites the command before
+    any shell sees it and knows nothing of quotes: a bare ``%`` becomes a
+    newline, and a backslash escapes the character after it and is consumed. So
+    every backslash is doubled (cron collapses the pair back to one) and every
+    ``%`` is escaped (cron hands the shell the percent sign). Vixie cron, cronie
+    and macOS share this loop verbatim; busybox crond has no such rewriting.
+    """
+    return shlex.quote(value).replace("\\", "\\\\").replace("%", "\\%")
+
+
+def _xml_quote(value: str) -> str:
+    """Spell ``value`` for the text of an XML element."""
+    from xml.sax.saxutils import escape
+
+    return escape(value)
+
+
 def cmd_scheduler_template(args: argparse.Namespace) -> int:
     path = (
         repo_root()
@@ -659,10 +679,19 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     ).resolve()
     config = load_config(config_path)
     text = path.read_text(encoding="utf-8")
-    text = text.replace("__REPO__", str(repo_root()))
-    text = text.replace("__PYTHON__", sys.executable)
-    text = text.replace("__CONFIG__", str(config_path))
-    text = text.replace("__STATE__", str(config.state_dir))
+    # Each path lands in a foreign syntax and must be spelled for it. The cron
+    # line is split by the shell on spaces, and cron itself turns a bare ``%``
+    # into a newline before the shell ever sees the command; the plist is XML.
+    # A plain path is left byte-for-byte as it was, so quoting only appears
+    # where it is needed.
+    quote = _cron_quote if args.flavor == "cron" else _xml_quote
+    for marker, value in (
+        ("__REPO__", str(repo_root())),
+        ("__PYTHON__", sys.executable),
+        ("__CONFIG__", str(config_path)),
+        ("__STATE__", str(config.state_dir)),
+    ):
+        text = text.replace(marker, quote(value))
     _say(text)
     _err(
         "\nThis template was printed, not installed. Nothing is scheduled. "

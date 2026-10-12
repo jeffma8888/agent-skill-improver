@@ -429,5 +429,123 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         self.assertEqual([p for p in state.rglob("*") if not p.is_dir()], [], "still no file")
 
 
+class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
+    """The templates drop four paths into two foreign syntaxes: a crontab line,
+    which the shell splits on spaces and cron turns ``%`` into a newline on, and
+    a property list, which is XML. Measured before this class existed, a
+    configured tree under a directory such as ``My Projects & co 100%`` rendered
+    a cron job that ran ``cd /.../My`` and a plist that did not parse. A path with
+    a space or an ampersand is ordinary on macOS (``Application Support``), so the
+    substitution must speak each syntax: shell quoting plus ``\\%`` for cron,
+    entity escaping for XML.
+    """
+
+    AWKWARD = "My Projects & co 100%"
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name).resolve() / self.AWKWARD
+        self.base.mkdir()
+        self.config_path = Path(build_env(self.base, dry_run=False)).resolve()
+        self.state = self.base / "state"
+
+    def _job_line(self, text: str) -> str:
+        jobs = [
+            line
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "daily --commit" in line
+        ]
+        self.assertEqual(len(jobs), 1, text)
+        return jobs[0]
+
+    def test_the_cron_job_survives_the_shell_and_cron_percent_handling(self):
+        import shlex
+
+        proc = run_cli(["--config", str(self.config_path), "scheduler-template", "cron"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        line = self._job_line(proc.stdout)
+        command = line.split(None, 5)[5]
+        # Every percent sign cron would see must be escaped for it.
+        self.assertNotIn("%", command.replace("\\%", ""))
+        # What cron hands the shell after consuming the backslashes.
+        shell_sees = command.replace("\\%", "%")
+        tokens = shlex.split(shell_sees)
+        self.assertEqual(tokens[tokens.index("cd") + 1], str(REPO_ROOT))
+        self.assertEqual(tokens[tokens.index("--config") + 1], str(self.config_path))
+        self.assertEqual(tokens[tokens.index(">>") + 1], str(self.state / "daily.out.log"))
+        self.assertEqual(tokens[tokens.index("2>>") + 1], str(self.state / "daily.err.log"))
+        self.assertIn("daily", tokens)
+        self.assertIn("--commit", tokens)
+
+    def test_the_launchd_plist_still_parses_and_names_the_exact_paths(self):
+        import plistlib
+
+        proc = run_cli(["--config", str(self.config_path), "scheduler-template", "launchd"])
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        parsed = plistlib.loads(proc.stdout.encode("utf-8"))
+        argv = parsed["ProgramArguments"]
+        self.assertEqual(argv[argv.index("--config") + 1], str(self.config_path))
+        self.assertEqual(parsed["WorkingDirectory"], str(REPO_ROOT))
+        self.assertEqual(parsed["StandardOutPath"], str(self.state / "daily.out.log"))
+        self.assertEqual(parsed["StandardErrorPath"], str(self.state / "daily.err.log"))
+
+    def test_cron_quoting_round_trips_through_crons_own_rewrite(self):
+        """cron's command rewrite (Vixie ``do_command.c``, shared by cronie and
+        macOS): a backslash escapes the next character and is consumed, a bare
+        ``%`` ends the command. Modelled here on the quoted text, then handed
+        to a real shell, the original path must come back whole."""
+        import shlex
+        import subprocess
+
+        from agent_skill_improver.cli import _cron_quote
+
+        def cron_rewrites(command: str) -> str:
+            out, escaped = [], False
+            for ch in command:
+                if escaped:
+                    out.append(ch if ch in "%\\" else "\\" + ch)
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == "%":
+                    raise AssertionError(f"cron would cut the command at a bare %: {command!r}")
+                else:
+                    out.append(ch)
+            return "".join(out)
+
+        for value in (
+            "/plain/path",
+            "/My Projects & co 100%/state",
+            "/a/100%",
+            "/a/b\\%c",
+            "/a/b\\\\c",
+            "/it's/here",
+        ):
+            with self.subTest(value=value):
+                shell_sees = cron_rewrites(_cron_quote(value))
+                self.assertEqual(shlex.split(shell_sees), [value])
+                proc = subprocess.run(
+                    ["/bin/sh", "-c", f"printf %s {shell_sees}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.stdout, value, proc.stderr)
+
+    def test_the_control_a_plain_path_renders_byte_for_byte_as_before(self):
+        """Quoting must be invisible when nothing needs it: an operator who has
+        pasted this line for months must see the same text."""
+        with TemporaryDirectory() as plain_tmp:
+            plain = Path(plain_tmp).resolve() / "plain"
+            plain.mkdir()
+            cfg = Path(build_env(plain, dry_run=False)).resolve()
+            proc = run_cli(["--config", str(cfg), "scheduler-template", "cron"])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            line = self._job_line(proc.stdout)
+            self.assertIn(f"--config {cfg} daily --commit >> {plain / 'state'}/daily.out.log", line)
+            self.assertNotIn("'", line)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
