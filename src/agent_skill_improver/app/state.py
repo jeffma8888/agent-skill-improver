@@ -48,7 +48,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from ..clock import Clock, iso
 from ..domain.candidate import (
@@ -183,6 +183,40 @@ class SetAsideRecord:
             "attempts": self.attempts,
             "path": str(self.path),
         }
+
+
+@dataclass(frozen=True)
+class LastRun:
+    """What the newest daily receipt says, for the health questions the
+    operations doc asks: is the newest receipt recent, did the run detect a
+    skill tree mutation, and does it name a confinement mode."""
+
+    day: str
+    status: str
+    finished_at: str
+    dry_run: bool
+    mutation_detected: bool | None
+    isolation_mode: str
+    path: Path
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "day": self.day,
+            "status": self.status,
+            "finished_at": self.finished_at,
+            "dry_run": self.dry_run,
+            "mutation_detected": self.mutation_detected,
+            "isolation_mode": self.isolation_mode,
+            "path": str(self.path),
+        }
+
+
+@dataclass(frozen=True)
+class ReceiptScan:
+    """The newest daily receipt that reads, and every receipt file that did not."""
+
+    last_run: LastRun | None
+    unreadable: tuple[UnreadableRecord, ...]
 
 
 @dataclass(frozen=True)
@@ -820,6 +854,74 @@ class StateStore:
         stem = f"{keyed_name(day)}{'-dry-run' if dry_run else ''}.json"
         return self.dir("receipts") / stem
 
+    def scan_receipts(self) -> ReceiptScan:
+        """The newest daily receipt, by its own ``finished_at`` (then ``started_at``).
+
+        Only daily receipts (``SCHEMA_RECEIPT``) count as a run; apply and
+        rollback receipts share the directory under their own schemas and are
+        passed over. A link or other non-file is not a record and is skipped;
+        a regular file that does not read as a receipt is listed as unreadable,
+        never dropped, and never chosen. Read without creating the directory
+        (so not through ``dir``, whose guards are for writers): this scan adds
+        nothing to the state tree, and a symlinked directory reads as absent,
+        which ``doctor`` names separately as a layout problem.
+        """
+        from .. import SCHEMA_RECEIPT
+
+        directory = self.root / "receipts"
+        newest: LastRun | None = None
+        newest_key = ""
+        unreadable: list[UnreadableRecord] = []
+        if not directory.is_dir() or directory.is_symlink():
+            return ReceiptScan(last_run=None, unreadable=())
+        for path in sorted(directory.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                raw = _read_state_json(path)
+            except (ValueError, StateUnreadable) as exc:
+                unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
+                continue
+            if not isinstance(raw, dict):
+                unreadable.append(
+                    UnreadableRecord(
+                        path=path, reason=f"the record is {type(raw).__name__}, not an object"
+                    )
+                )
+                continue
+            if raw.get("schema") != SCHEMA_RECEIPT:
+                continue
+            problem = _receipt_shape_problem(raw)
+            if problem:
+                unreadable.append(
+                    UnreadableRecord(
+                        path=path, reason=f"refusing to read the receipt {path}: {problem}"
+                    )
+                )
+                continue
+            at = str(raw.get("finished_at") or raw.get("started_at") or "")
+            skill_tree: dict[str, Any] = (
+                raw["skill_tree"] if isinstance(raw.get("skill_tree"), dict) else {}
+            )
+            isolation: dict[str, Any] = (
+                raw["isolation"] if isinstance(raw.get("isolation"), dict) else {}
+            )
+            detected = skill_tree.get("mutation_detected")
+            run = LastRun(
+                day=raw["day"],
+                status=raw["status"],
+                finished_at=at,
+                dry_run=bool(raw.get("dry_run")),
+                mutation_detected=detected if isinstance(detected, bool) else None,
+                isolation_mode=str(isolation.get("mode", "")),
+                path=path,
+            )
+            # Ties keep the first in path order; a later file with the same
+            # stamp does not displace it, so the answer is stable across scans.
+            if newest is None or at > newest_key:
+                newest, newest_key = run, at
+        return ReceiptScan(last_run=newest, unreadable=tuple(unreadable))
+
     def write_receipt(self, day: str, payload: dict[str, Any], *, dry_run: bool) -> Path:
         path = self.receipt_path(day, dry_run=dry_run)
         return self._persist(path, lambda: write_json(path, payload))
@@ -962,6 +1064,14 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
             ),
         )
     return data
+
+
+def _receipt_shape_problem(raw: Mapping[str, Any]) -> str:
+    """Why ``raw`` is not a daily receipt the health line can read, or an empty string."""
+    for key in ("day", "status"):
+        if not isinstance(raw.get(key), str) or not raw[key]:
+            return f"field {key!r} is missing or not a non-empty string"
+    return ""
 
 
 def _set_aside_shape_problem(raw: Any) -> str:

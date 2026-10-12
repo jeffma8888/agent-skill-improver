@@ -56,6 +56,7 @@ from .domain.isolation import (
 from .errors import AsiError, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
+from .domain.redaction import quoted_value
 from .app.state import DIR_MODE, OPEN_STATUSES, SET_ASIDE_KINDS, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
@@ -76,6 +77,10 @@ RC_BLOCKED = 5
 RC_INTERNAL_ERROR = 70
 
 BENIGN_RUN_STATUSES = ("ok", "stood-down", "partial")
+#: ``doctor`` warns when the newest daily receipt is older than this many
+#: whole days: a daily schedule that fires leaves a receipt every day, so
+#: a gap this long means the scheduler is not running the job.
+STALE_RUN_DAYS = 2
 
 
 def exit_code_for(run_status: str) -> int:
@@ -253,6 +258,40 @@ def _emit(payload: Any, *, as_json: bool, lines: Sequence[str] = ()) -> None:
 
 
 # -- commands ------------------------------------------------------------
+def _age_in_days(stamp: str, now: Any) -> int | None:
+    """Whole days from an ISO stamp the tool wrote to ``now``; None if it does not parse.
+
+    Negative when the stamp is ahead of the clock: a future finish time is
+    impossible for a receipt this build wrote, so it is reported as such
+    rather than clamped to "today" and read as a recent run.
+    """
+    import datetime as _dt
+
+    try:
+        then = _dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+    except ValueError:
+        return None
+    return int((now - then).total_seconds() // 86400)
+
+
+def _last_run_text(last_run: Any, age_days: int | None) -> str:
+    """One line answering the health questions; the tool's words plus fields it wrote."""
+    if last_run is None:
+        return "none recorded (no daily receipt yet)"
+    when = last_run.finished_at or "time unknown"
+    if age_days is not None and age_days < 0:
+        when += f" ({-age_days} day(s) in the future)"
+    elif age_days is not None:
+        when += f" ({age_days} day(s) ago)"
+    elif last_run.finished_at:
+        when += " (time does not parse)"
+    mutation = "unknown" if last_run.mutation_detected is None else str(last_run.mutation_detected)
+    return one_line(
+        f"{last_run.day} {last_run.status}{' (dry run)' if last_run.dry_run else ''} at {when}; "
+        f"skill tree mutation={mutation}; isolation={last_run.isolation_mode or 'unknown'}"
+    )
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems: list[str] = []
     warnings: list[str] = []
@@ -421,6 +460,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"{'a symlink' if todays.is_symlink() else 'something that is not a regular file'}"
                 ", which `daily` refuses to read; remove it if you did not put it there"
             )
+    # The health questions the operations doc asks, answered from the newest
+    # daily receipt: is it recent, did it detect a skill tree mutation, does
+    # it name a confinement mode. Measured before: `doctor` said `ready` with
+    # the schedule silent for a week and a mutation in the last receipt.
+    last_run = None
+    last_run_age: int | None = None
+    unreadable_receipts: list[dict[str, str]] = []
+    if state_present and not layout_problems:
+        receipts = state.scan_receipts()
+        last_run = receipts.last_run
+        unreadable_receipts = [u.to_dict() for u in receipts.unreadable]
+        for record in unreadable_receipts:
+            warnings.append(f"a receipt cannot be read: {record['reason']}")
+        if last_run is not None and last_run.mutation_detected:
+            problems.append(
+                f"the last run ({last_run.day}) detected a skill tree mutation; do not re-run "
+                f"before reading skill_tree.changes in {last_run.path}"
+            )
+        if last_run is not None and last_run.mutation_detected is None:
+            warnings.append(
+                f"the last run's receipt ({last_run.path}) does not say whether the skill tree "
+                "was mutated; it was edited or written by an older build"
+            )
+        # Question 1 is judged, not only printed: a stale, future or unreadable
+        # finish time each gets its own warning, so a clock-skewed or hand-edited
+        # stamp cannot answer "is it recent" with a silent yes.
+        if last_run is not None:
+            last_run_age = _age_in_days(last_run.finished_at, SystemClock().now())
+            if not last_run.finished_at:
+                warnings.append(
+                    f"the last run's receipt ({last_run.path}) records no finish time; "
+                    "it was edited or written by an older build"
+                )
+            elif last_run_age is None:
+                warnings.append(
+                    f"the last run's receipt ({last_run.path}) carries a finish time that does "
+                    f"not parse: {quoted_value(last_run.finished_at)}; it was edited"
+                )
+            elif last_run_age < 0:
+                warnings.append(
+                    f"the last run's receipt ({last_run.path}) says it finished in the future "
+                    f"({last_run.finished_at}); the clock or the receipt was edited"
+                )
+            elif last_run_age > STALE_RUN_DAYS:
+                warnings.append(
+                    f"the last run finished {last_run_age} day(s) ago; a daily schedule that is "
+                    "firing leaves a receipt every day, so check the scheduler, not the job"
+                )
+
     # The run lock is the first thing `daily` touches. A link, a directory or a
     # fifo there is refused by name (a directory is not even a foreign entry,
     # so the left-alone warning would not mention it). Measured before: both
@@ -566,6 +654,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "skill_documents_passed_over": [d.to_dict() for d in passed_over],
         "candidate_records_unreadable": unreadable_candidates,
         "checkpoint_records_unreadable": unreadable_checkpoints,
+        "last_run": (
+            {**last_run.to_dict(), "age_days": last_run_age} if last_run is not None else None
+        ),
+        "receipt_records_unreadable": unreadable_receipts,
         "skills_with_executable_payloads": [
             {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
             for s in snapshots
@@ -612,6 +704,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"judge        {'independent of the improver' if independence['judge_independent'] else 'NOT independent of the improver'}",
         f"rubrics      {', '.join(r.id for r in config.rubrics)}",
         f"dry run      {config.dry_run} (default for `asi daily`)",
+        "last run     " + _last_run_text(last_run, last_run_age),
     ]
     for warning in warnings:
         lines.append(f"WARN  {warning}")

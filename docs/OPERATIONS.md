@@ -477,7 +477,7 @@ diagnosing a crash.
 
 ## Health, honestly
 
-There is no dashboard, and one would be misleading. Two questions cover it:
+There is no dashboard, and one would be misleading. Three questions cover it:
 
 1. Is the newest receipt recent? If not, the schedule is not firing, whatever the
    scheduler says about the job existing.
@@ -487,6 +487,22 @@ There is no dashboard, and one would be misleading. Two questions cover it:
 3. Does every receipt for a private source name a confinement mode? A missing one
    cannot happen through this code path, so its absence means somebody edited a
    receipt or ran an older build.
+
+`asi doctor` answers all three from the newest daily receipt, on one line:
+
+```text
+last run     2026-10-11 ok at 2026-10-11T09:00:12Z (1 day(s) ago); skill tree mutation=False; isolation=none
+```
+
+A detected mutation is a problem (exit 1, with the receipt path to read); a receipt
+that does not say whether the tree was mutated prints `mutation=unknown` with a
+warning; a receipt that does not read as one is a warning with its reason, never a
+silent skip. Recency is judged, not only printed: a finish time more than two days
+old warns that the scheduler, not the job, is what to check; one in the future or
+one that does not parse warns that the clock or the receipt was edited, rather than
+reading as today. Dry runs write no receipt, so they do not count as a run here. With
+`--json` the same facts are the `last_run` object (`age_days` included) and the
+`receipt_records_unreadable` list.
 
 Everything else — counts, rates, verdict mixes — is input to your judgement about
 the *rubrics*, not a health signal about the loop.

@@ -110,7 +110,7 @@ hosted-model option for a private source, are in
 
 | Command | Writes | Notes |
 | --- | --- | --- |
-| `doctor` | `state/` modes only | validates config, reports the source class and isolation mode, repairs state permissions, exits non-zero if not runnable |
+| `doctor` | `state/` modes only | validates config, reports the source class and isolation mode, repairs state permissions, reads back the last run (day, status, age, whether the skill tree was mutated, confinement mode) from the newest daily receipt, exits non-zero if not runnable or if that run detected a mutation |
 | `skills` | nothing | inventory: canonical vs mirror, files that never load, executable payloads |
 | `rubrics` | nothing | loaded rubrics with versions and content hashes |
 | `discover` | `state/` directory modes only (created empty and owner-only if absent) | what the source would ingest, with pagination honesty |
