@@ -1326,6 +1326,77 @@ class ReviewAsksTheQuestionTheWriteWillAskTests(unittest.TestCase):
         self.assertIn("--i-reviewed-this", proc.stdout)
 
 
+class AListingThatHidesRecordsSaysSoTests(unittest.TestCase):
+    """Measured before: right after ``asi apply``, ``asi candidates`` printed
+    ``0 candidate(s); 0 unreadable record(s)``: the record the operator had just
+    promoted read as vanished, and nothing on the screen said closed records
+    are hidden by default. The footer now counts what it lists as open and
+    names how many closed records it is not listing, with the flag that shows
+    them; the JSON carries the same two facts.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = ["--config", str(build_env(self.base, seed="hidden-records"))]
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.cid = next(c["candidate_id"] for c in receipt["candidates"] if c["skill_id"] == "tdd")
+        self.open_count = len(receipt["candidates"])
+
+    def _apply(self) -> None:
+        review = run_cli([*self.cfg, "--json", "review", self.cid])
+        token = json.loads(review.stdout)["approval_token"]
+        applied = run_cli([*self.cfg, "apply", self.cid, "--approve", token, "--i-reviewed-this"])
+        self.assertEqual(applied.returncode, RC_OK, applied.stderr)
+
+    def test_before_anything_closes_the_footer_counts_open_records_and_hides_nothing(self):
+        text = run_cli([*self.cfg, "candidates"])
+        self.assertEqual(text.returncode, RC_OK, text.stderr)
+        self.assertIn(
+            f"{self.open_count} open candidate(s); 0 unreadable record(s)",
+            text.stdout.splitlines(),
+        )
+        self.assertNotIn("closed not listed", text.stdout)
+        payload = json.loads(run_cli([*self.cfg, "--json", "candidates"]).stdout)
+        self.assertEqual((payload["listing"], payload["closed_not_listed"]), ("open", 0))
+
+    def test_after_an_apply_the_hidden_record_is_counted_and_the_flag_named(self):
+        self._apply()
+        text = run_cli([*self.cfg, "candidates"])
+        self.assertEqual(text.returncode, RC_OK, text.stderr)
+        self.assertIn(
+            f"{self.open_count - 1} open candidate(s), 1 closed not listed (--all shows them); "
+            "0 unreadable record(s)",
+            text.stdout.splitlines(),
+        )
+        self.assertNotIn(self.cid, text.stdout)
+        payload = json.loads(run_cli([*self.cfg, "--json", "candidates"]).stdout)
+        self.assertEqual((payload["listing"], payload["closed_not_listed"]), ("open", 1))
+        self.assertNotIn(self.cid, [c["id"] for c in payload["candidates"]])
+
+    def test_all_lists_the_closed_record_and_reports_nothing_hidden(self):
+        self._apply()
+        text = run_cli([*self.cfg, "candidates", "--all"])
+        self.assertEqual(text.returncode, RC_OK, text.stderr)
+        self.assertIn(
+            f"{self.open_count} candidate(s); 0 unreadable record(s)", text.stdout.splitlines()
+        )
+        self.assertNotIn("closed not listed", text.stdout)
+        self.assertTrue(
+            any(
+                ln.startswith(self.cid) and "applied" in ln and "(closed)" in ln
+                for ln in text.stdout.splitlines()
+            ),
+            text.stdout,
+        )
+        payload = json.loads(run_cli([*self.cfg, "--json", "candidates", "--all"]).stdout)
+        self.assertEqual((payload["listing"], payload["closed_not_listed"]), ("all", 0))
+        self.assertIn(self.cid, [c["id"] for c in payload["candidates"]])
+
+
 class TwoRootsTiedOnPrecedenceAreRefusedNotPickedByIdTests(unittest.TestCase):
     """Measured before: the harness mirror root renamed ``alpha`` and made
     canonical and editable at the canonical root's precedence had its ``tdd``

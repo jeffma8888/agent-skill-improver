@@ -318,6 +318,9 @@ asi candidates
 asi review <candidate-id>
 ```
 
+`candidates` lists open records. Its footer counts the closed ones (applied,
+rolled-back, gate-failed, blocked-run) it is not listing; `--all` shows them.
+
 `review` prints the failing cases with their evidence, the diff, the validation
 result (fixes, regressions, holdouts, judge preference), and the approval token.
 Read the *evidence*, not the summary. The question to ask is not "does this edit

@@ -806,7 +806,13 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     items = (
         list(scan.readable) if args.all else [c for c in scan.readable if c.status in OPEN_STATUSES]
     )
+    # A listing that hides records says it hides them. Measured before: right
+    # after an apply, `candidates` printed `0 candidate(s)` and the record the
+    # operator had just promoted read as vanished; `--all` was the only clue.
+    closed_not_listed = len(scan.readable) - len(items)
     payload = {
+        "listing": "all" if args.all else "open",
+        "closed_not_listed": closed_not_listed,
         "unreadable": [u.to_dict() for u in scan.unreadable],
         "candidates": [
             {
@@ -833,7 +839,10 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     # queue look like an empty one (see ``UnreadableRecord``).
     for record in scan.unreadable:
         lines.append(f"UNREADABLE  {record.path.name}  {record.reason}")
-    lines.append(f"{len(items)} candidate(s); {len(scan.unreadable)} unreadable record(s)")
+    footer = f"{len(items)} candidate(s)" if args.all else f"{len(items)} open candidate(s)"
+    if closed_not_listed:
+        footer += f", {closed_not_listed} closed not listed (--all shows them)"
+    lines.append(f"{footer}; {len(scan.unreadable)} unreadable record(s)")
     _emit(payload, as_json=args.json, lines=lines)
     return 0
 
@@ -1479,7 +1488,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_daily.set_defaults(func=cmd_daily)
 
     p_candidates = add("candidates", "list candidate proposals")
-    p_candidates.add_argument("--all", action="store_true", help="include applied and rejected")
+    p_candidates.add_argument(
+        "--all",
+        action="store_true",
+        help="include closed candidates (applied, rolled-back, gate-failed, blocked-run)",
+    )
     p_candidates.set_defaults(func=cmd_candidates)
 
     p_review = add("review", "print a candidate's full argument, diff and approval token")
