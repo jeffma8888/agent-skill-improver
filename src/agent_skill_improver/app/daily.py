@@ -55,7 +55,7 @@ from ..domain.authorship import (
 )
 from ..domain.candidate import STATUS_BLOCKED_RUN, STATUS_GATE_FAILED, STATUS_VALIDATED
 from ..domain.conversation import NormalizedConversation
-from ..domain.discovery import error_page, merge_pages
+from ..domain.discovery import error_page, merge_pages, passed_over_note
 from ..domain.failure import FailureCase
 from ..domain.isolation import decide as decide_isolation
 from ..domain.rubric import Rubric
@@ -480,6 +480,7 @@ def _discover(config: Config, source: Any, receipt: RunReceipt) -> list[Any]:
         "any_page_truncated_by_limit": summary["any_page_truncated_by_limit"],
         "pages": summary["pages"],
         "errors": summary["errors"],
+        "passed_over": summary["passed_over"],
         "since": config.source.since,
         "limit": limit,
         "class_histogram_discovered": class_histogram(classes, declared=DISCOVERY_CLASSES),
@@ -499,6 +500,8 @@ def _discover(config: Config, source: Any, receipt: RunReceipt) -> list[Any]:
             receipt.note(page["honesty_note"])
     for error in summary["errors"]:
         receipt.note(f"discovery error: {error}")
+    if summary["passed_over"]:
+        receipt.note(passed_over_note(summary["passed_over"]))
     return found
 
 

@@ -198,6 +198,14 @@ a deferred skill is almost always a model problem. Either kind makes the run
 `false`, `any_page_truncated_by_limit` is `true` and `honesty_note` says so. Do not
 compute a rate over a page and call it a rate over the corpus.
 
+**`discovery.passed_over`** — every entry the source saw in its window and could
+not take as a thread, with the reason (for the fixtures source: an export this
+process cannot read, one that is not UTF-8 or not JSON, a JSON value that is not
+an object, an object with no thread or a thread without an id). Each is in no
+count on the receipt, a note names them, and `doctor` lists the same entries as
+`WARN` lines under the source. `is_total` is unaffected: the window was read
+whole; part of it did not parse.
+
 **`selection.bucket_coverage`** — fraction of buckets that contributed. A run that
 touched one bucket of five looks fine by count and is not representative.
 

@@ -20,7 +20,7 @@ limit-bound page a total anywhere in its output.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 #: Longest thread id accepted. Real ids are tens of characters; the cap exists so
 #: a forged line cannot push kilobytes onto a command line or into a filename.
@@ -76,6 +76,12 @@ class DiscoveryPage:
     #: true for a page that came back full.
     truncated_by_limit: bool = False
     error: str = ""
+    #: Entries the source saw in its window and could not take as a thread, as
+    #: ``(entry, reason)`` pairs: an export it cannot read, one that is not
+    #: JSON, one with no thread id. Measured before this field existed: three
+    #: such files beside five good ones gave a receipt of five ingested, an
+    #: ``is_total`` of true and no word about the three.
+    passed_over: tuple[tuple[str, str], ...] = ()
 
     @property
     def returned(self) -> int:
@@ -117,6 +123,7 @@ class DiscoveryPage:
             "is_total": self.is_total,
             "error": self.error,
             "honesty_note": self.honesty_note,
+            "passed_over": [{"entry": e, "reason": r} for e, r in self.passed_over],
         }
 
 
@@ -127,6 +134,7 @@ def page_from_threads(
     since: str = "",
     workspace: str = "",
     query: str = "",
+    passed_over: Sequence[tuple[str, str]] = (),
 ) -> DiscoveryPage:
     """Build a page, deriving ``truncated_by_limit`` rather than trusting a caller.
 
@@ -141,6 +149,7 @@ def page_from_threads(
         workspace=workspace,
         query=query,
         truncated_by_limit=limit > 0 and len(threads) >= limit,
+        passed_over=tuple(passed_over),
     )
 
 
@@ -149,6 +158,23 @@ def error_page(
 ) -> DiscoveryPage:
     return DiscoveryPage(
         threads=(), limit=limit, since=since, workspace=workspace, query=query, error=error
+    )
+
+
+def passed_over_note(entries: Sequence[Mapping[str, str]], *, limit: int = 5) -> str:
+    """The receipt note for entries the source passed over, naming up to ``limit``.
+
+    Empty when nothing was passed over: a note that says "0 entries" is noise
+    on every clean receipt.
+    """
+    if not entries:
+        return ""
+    shown = "; ".join(f"{e['entry']} {e['reason']}" for e in entries[:limit])
+    more = "" if len(entries) <= limit else f"; +{len(entries) - limit} more"
+    noun = "entry" if len(entries) == 1 else "entries"
+    return (
+        f"discovery passed over {len(entries)} source {noun} that did not read as a thread, "
+        f"so they are in no count here: {shown}{more}"
     )
 
 
@@ -165,11 +191,20 @@ def merge_pages(pages: Iterable[DiscoveryPage]) -> tuple[list[DiscoveredThread],
             threads.append(thread)
     any_truncated = any(p.truncated_by_limit for p in materialized)
     errors = [p.error for p in materialized if p.error]
+    # One source scanned once per workspace reports the same unreadable export
+    # on every page; it is one entry, named once.
+    passed_over: list[dict[str, str]] = []
+    for page in materialized:
+        for entry, reason in page.passed_over:
+            item = {"entry": entry, "reason": reason}
+            if item not in passed_over:
+                passed_over.append(item)
     summary = {
         "pages": [p.to_dict() for p in materialized],
         "threads_returned": len(threads),
         "is_total": (not any_truncated) and not errors,
         "any_page_truncated_by_limit": any_truncated,
         "errors": errors,
+        "passed_over": passed_over,
     }
     return threads, summary

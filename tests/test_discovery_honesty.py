@@ -15,10 +15,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import json
+import shutil
+
 from agent_skill_improver.adapters.conversation_cli import (
     ConversationCliSource,
     parse_discovery_output,
 )
+from agent_skill_improver.adapters.fixture_source import FixtureConversationSource
 from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.errors import RecordDefect, SourceUnavailable
 from agent_skill_improver.domain.discovery import (
@@ -28,6 +32,7 @@ from agent_skill_improver.domain.discovery import (
     is_safe_thread_id,
     merge_pages,
     page_from_threads,
+    passed_over_note,
 )
 
 
@@ -136,6 +141,103 @@ class MergeTests(unittest.TestCase):
         merged, summary = merge_pages([])
         self.assertEqual(merged, [])
         self.assertTrue(summary["is_total"])
+
+    def test_what_a_page_passed_over_reaches_the_summary_named_once(self):
+        # The same directory is scanned once per workspace, so the same bad
+        # export is on every page; the summary names it once.
+        skipped = (("/x/a.json", "is not valid JSON"), ("/x/b.json", "has no thread object"))
+        a = page_from_threads(threads(2, "a"), limit=10, workspace="w1", passed_over=skipped)
+        b = page_from_threads(threads(1, "b"), limit=10, workspace="w2", passed_over=skipped[:1])
+        _, summary = merge_pages([a, b])
+        self.assertEqual(
+            summary["passed_over"],
+            [
+                {"entry": "/x/a.json", "reason": "is not valid JSON"},
+                {"entry": "/x/b.json", "reason": "has no thread object"},
+            ],
+        )
+        self.assertEqual(a.to_dict()["passed_over"], summary["passed_over"])
+        self.assertTrue(summary["is_total"], "the window was read whole; some of it did not parse")
+        self.assertEqual(page_from_threads(threads(1), limit=10).passed_over, ())
+        self.assertEqual(merge_pages([])[1]["passed_over"], [])
+
+    def test_the_note_names_at_most_five_entries_and_counts_the_rest(self):
+        entries = [{"entry": f"/x/{i}.json", "reason": "is not valid JSON"} for i in range(7)]
+        note = passed_over_note(entries)
+        self.assertTrue(note.startswith("discovery passed over 7 source entries that did not"))
+        for i in range(5):
+            self.assertIn(f"/x/{i}.json is not valid JSON", note)
+        self.assertNotIn("/x/5.json", note)
+        self.assertTrue(note.endswith("; +2 more"))
+        one = passed_over_note(entries[:1])
+        self.assertIn("1 source entry that", one)
+        self.assertNotIn("more", one)
+        self.assertEqual(passed_over_note([]), "", "a clean receipt gets no note")
+
+
+class FixtureSourcePassedOverTests(unittest.TestCase):
+    """Measured before: five good exports beside an export at mode 000, one
+    that was not JSON and one that was a JSON array gave a receipt of five
+    ingested, ``is_total`` true, and no word about the three; ``doctor`` said
+    the source was ok. Stepping over them is right; silently was not.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.exports = Path(self._tmp.name) / "exports"
+        shutil.copytree(Path(__file__).parent / "fixtures" / "exports", self.exports)
+        self.good = sorted(p.name for p in self.exports.glob("*.json"))
+
+    def source(self) -> FixtureConversationSource:
+        return FixtureConversationSource(self.exports)
+
+    def test_each_way_an_export_fails_to_read_as_a_thread_is_named(self):
+        (self.exports / "0-garbage.json").write_text("{not json", encoding="utf-8")
+        (self.exports / "0-list.json").write_text("[1, 2]", encoding="utf-8")
+        (self.exports / "0-nothread.json").write_text('{"x": 1}', encoding="utf-8")
+        (self.exports / "0-noid.json").write_text(
+            json.dumps({"thread": {"title": "t"}}), encoding="utf-8"
+        )
+        (self.exports / "0-emptyid.json").write_text(
+            json.dumps({"thread": {"id": ""}}), encoding="utf-8"
+        )
+        (self.exports / "0-latin1.json").write_bytes(b'{"thread": {"id": "\xff"}}')
+        passed = dict(self.source().passed_over())
+        by_name = {Path(k).name: v for k, v in passed.items()}
+        self.assertTrue(by_name["0-garbage.json"].startswith("is not valid JSON ("))
+        self.assertEqual(by_name["0-list.json"], "is JSON but not an object (list)")
+        self.assertEqual(by_name["0-nothread.json"], "has no thread object")
+        self.assertEqual(by_name["0-noid.json"], "has a thread without an id")
+        self.assertEqual(by_name["0-emptyid.json"], "has a thread without an id")
+        self.assertTrue(by_name["0-latin1.json"].startswith("is not UTF-8 text ("))
+        self.assertEqual(len(by_name), 6, "the good exports are not in the list")
+        page = self.source().discover_page(since="", limit=50)
+        self.assertEqual(len(page.threads), 5, "discovery is unchanged by what it steps over")
+        self.assertEqual(dict(page.passed_over), passed, "the page carries the same list")
+        self.assertFalse(page.truncated_by_limit)
+        self.assertTrue(page.is_total)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
+    def test_an_export_this_process_cannot_read_is_passed_over_not_fatal(self):
+        locked = self.exports / "0-locked.json"
+        locked.write_text("{}", encoding="utf-8")
+        os.chmod(locked, 0o000)
+        try:
+            page = self.source().discover_page(since="", limit=50)
+            self.assertEqual(len(page.threads), 5)
+            self.assertEqual(
+                page.passed_over, ((str(locked), "cannot be read (Permission denied)"),)
+            )
+            # fetch reads the same scan and still finds a good thread
+            thread_id = page.threads[0].thread_id
+            self.assertEqual(self.source().fetch(thread_id).thread_id, thread_id)
+        finally:
+            os.chmod(locked, 0o644)
+
+    def test_a_clean_directory_passes_nothing_over(self):
+        self.assertEqual(self.source().passed_over(), [])
+        self.assertEqual(self.source().discover_page(since="", limit=50).passed_over, ())
 
 
 class RawExportConfinementTests(unittest.TestCase):

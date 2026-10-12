@@ -46,16 +46,53 @@ class FixtureConversationSource:
         if not self.directory.is_dir():
             raise SourceUnavailable(f"fixtures_dir {self.directory} is not a directory")
 
-    def _payloads(self) -> list[tuple[Path, dict[str, Any]]]:
-        out: list[tuple[Path, dict[str, Any]]] = []
+    def _scan(self) -> tuple[list[tuple[Path, dict[str, Any]]], list[tuple[str, str]]]:
+        """Every export in the directory that reads as a thread, and every entry
+        that does not, with the reason.
+
+        Measured before the second list existed: an export at mode 000, one
+        that was not JSON and one that was a JSON array sat beside five good
+        ones, and the run reported five ingested with ``is_total`` true and no
+        word about the three. Stepping over them is right (one bad file must
+        not end the run); doing it silently was not.
+        """
+        accepted: list[tuple[Path, dict[str, Any]]] = []
+        passed_over: list[tuple[str, str]] = []
         for path in sorted(self.directory.glob("*.json")):
             try:
-                payload = loads_untrusted(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                passed_over.append((str(path), f"cannot be read ({exc.strerror or exc})"))
                 continue
-            if isinstance(payload, dict):
-                out.append((path, payload))
-        return out
+            except ValueError as exc:
+                passed_over.append((str(path), f"is not UTF-8 text ({exc})"))
+                continue
+            try:
+                payload = loads_untrusted(text)
+            except ValueError as exc:
+                passed_over.append((str(path), f"is not valid JSON ({exc})"))
+                continue
+            if not isinstance(payload, dict):
+                passed_over.append(
+                    (str(path), f"is JSON but not an object ({type(payload).__name__})")
+                )
+                continue
+            thread = payload.get("thread")
+            if not isinstance(thread, dict):
+                passed_over.append((str(path), "has no thread object"))
+                continue
+            if not isinstance(thread.get("id"), str) or not thread.get("id"):
+                passed_over.append((str(path), "has a thread without an id"))
+                continue
+            accepted.append((path, payload))
+        return accepted, passed_over
+
+    def _payloads(self) -> list[tuple[Path, dict[str, Any]]]:
+        return self._scan()[0]
+
+    def passed_over(self) -> list[tuple[str, str]]:
+        """Entries in the directory that do not read as a thread, with reasons."""
+        return self._scan()[1]
 
     def discover_page(
         self,
@@ -71,12 +108,14 @@ class FixtureConversationSource:
         run exercises the same limit-honesty path as production instead of
         pretending the corpus is always small enough.
         """
+        accepted, passed_over = self._scan()
         return page_from_threads(
-            self._discover_all(workspace=workspace),
+            self._threads_of(accepted, workspace=workspace),
             limit=limit,
             since=since,
             workspace=workspace or "",
             query=query or "",
+            passed_over=passed_over,
         )
 
     def discover(
@@ -91,15 +130,13 @@ class FixtureConversationSource:
             self.discover_page(since=since, limit=limit, workspace=workspace, query=query).threads
         )
 
-    def _discover_all(self, *, workspace: str | None = None) -> list[DiscoveredThread]:
+    def _threads_of(
+        self, accepted: list[tuple[Path, dict[str, Any]]], *, workspace: str | None = None
+    ) -> list[DiscoveredThread]:
         found: list[DiscoveredThread] = []
-        for _, payload in self._payloads():
-            thread = payload.get("thread")
-            if not isinstance(thread, dict):
-                continue
-            thread_id = thread.get("id")
-            if not isinstance(thread_id, str) or not thread_id:
-                continue
+        for _, payload in accepted:
+            thread = payload["thread"]  # _scan accepted only payloads with one
+            thread_id = str(thread["id"])
             ws = str(thread.get("workspacePath", ""))
             if workspace and ws != workspace:
                 continue

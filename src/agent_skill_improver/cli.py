@@ -449,6 +449,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except AsiError as exc:
         source_status = str(exc)
         problems.append(f"source unavailable: {exc}")
+    # A source that reads a directory can say what in it does not read as a
+    # thread; each such entry is a finding here, as a passed-over SKILL.md is,
+    # so an export the run will step over never looks like one that was taken.
+    source_passed_over: list[dict[str, str]] = []
+    if source_status == "ok" and hasattr(source, "passed_over"):
+        try:
+            skipped = list(source.passed_over())
+        except (OSError, ValueError, AsiError) as exc:
+            # The report must not fall over on the way to its verdict.
+            skipped = []
+            warnings.append(f"source could not say what it passed over: {exc}")
+        for entry, reason in skipped:
+            source_passed_over.append({"entry": entry, "reason": reason})
+            warnings.append(f"source entry passed over: {entry} {reason}")
 
     payload = {
         "version": __version__,
@@ -459,6 +473,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "kind": config.source.kind,
             "status": source_status,
             "source_class": isolation.source_class,
+            "passed_over": source_passed_over,
         },
         "isolation": isolation.to_dict(),
         "state_permissions": {

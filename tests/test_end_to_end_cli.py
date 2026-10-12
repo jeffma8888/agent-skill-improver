@@ -1068,6 +1068,56 @@ class ADuplicateCopyInTheEditableRootIsRefusedNotPickedTests(unittest.TestCase):
         self.assertEqual([c["canonical_path"] for c in receipt["candidates"]], [str(self.real)])
 
 
+class AnExportThatDoesNotReadAsAThreadIsNamedTests(unittest.TestCase):
+    """Measured before: a non-JSON export and a JSON array beside the five good
+    ones gave ``doctor`` a clean source and ``daily`` a receipt of five ingested
+    with ``is_total`` true and no word about the two.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.exports = self.base / "exports"
+        shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "exports", self.exports)
+        (self.exports / "0-garbage.json").write_text("{not json", encoding="utf-8")
+        (self.exports / "0-list.json").write_text("[1, 2]", encoding="utf-8")
+        self.cfg = [
+            "--config",
+            str(build_env(self.base, seed="passed-over-export", fixtures_dir=self.exports)),
+        ]
+
+    def test_doctor_warns_and_the_receipt_names_each_entry_in_no_count(self):
+        doctor = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(doctor.returncode, RC_OK, doctor.stderr)
+        payload = json.loads(doctor.stdout)
+        self.assertEqual(payload["source"]["status"], "ok")
+        self.assertEqual(
+            [Path(e["entry"]).name for e in payload["source"]["passed_over"]],
+            ["0-garbage.json", "0-list.json"],
+        )
+        warned = [w for w in payload["warnings"] if w.startswith("source entry passed over: ")]
+        self.assertEqual(len(warned), 2, payload["warnings"])
+        self.assertIn("is JSON but not an object (list)", warned[1])
+        text = run_cli([*self.cfg, "doctor"])
+        self.assertIn("0-garbage.json is not valid JSON", text.stdout)
+
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.assertEqual(receipt["counts"]["conversations_ingested"], 5, "the good five")
+        self.assertTrue(receipt["discovery"]["is_total"])
+        self.assertEqual(
+            [Path(e["entry"]).name for e in receipt["discovery"]["passed_over"]],
+            ["0-garbage.json", "0-list.json"],
+        )
+        notes = [n for n in receipt["notes"] if n.startswith("discovery passed over 2 source")]
+        self.assertEqual(len(notes), 1, receipt["notes"])
+        self.assertIn("0-garbage.json is not valid JSON", notes[0])
+        self.assertIn("0-list.json is JSON but not an object (list)", notes[0])
+        self.assertIn("in no count here", notes[0])
+
+
 class ACheckpointDailyWouldRefuseIsNamedByDoctorTests(unittest.TestCase):
     """Measured before: with today's checkpoint truncated, ``doctor`` printed
     ``verdict: ready`` and exited 0; the next ``daily`` then refused by name
