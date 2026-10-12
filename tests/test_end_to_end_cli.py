@@ -543,8 +543,12 @@ class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
             proc = run_cli(["--config", str(cfg), "scheduler-template", "cron"])
             self.assertEqual(proc.returncode, RC_OK, proc.stderr)
             line = self._job_line(proc.stdout)
+            # Only the two paths this test controls are held to "unquoted": the
+            # repository and interpreter paths are the machine's, and a checkout
+            # under a directory with a space is entitled to see them quoted.
             self.assertIn(f"--config {cfg} daily --commit >> {plain / 'state'}/daily.out.log", line)
-            self.assertNotIn("'", line)
+            self.assertNotIn(f"'{cfg}'", line)
+            self.assertNotIn(f"'{plain / 'state'}'", line)
 
 
 if __name__ == "__main__":  # pragma: no cover

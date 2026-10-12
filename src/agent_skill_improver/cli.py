@@ -123,13 +123,18 @@ def escape_for_terminal(text: str) -> str:
     verbatim in its messages, so any of them can carry such a byte. Here each
     one becomes the Python escape it is (``\\x1b``, ``\\r``, ``\\u202e``), which
     a person reads as a warning rather than a terminal acting on it. Newline
-    and tab are kept: they are the structure of the output itself.
+    and tab are kept: they are the structure of the output itself. A lone
+    surrogate (how a file name that is not valid UTF-8 reaches Python) is shown
+    the same way, because a strict UTF-8 stream refuses to encode it and the
+    refusal would turn one odd file name into an internal error.
     """
     out: list[str] = []
     for ch in text:
         if ch in _SHOWN_AS_IS:
             out.append(ch)
-        elif ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) == "Cc":
+        elif (
+            ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) in ("Cc", "Cs")
+        ):
             code = ord(ch)
             if ch == "\r":
                 out.append("\\r")

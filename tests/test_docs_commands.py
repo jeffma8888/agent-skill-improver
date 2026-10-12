@@ -806,6 +806,18 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         self.assertEqual(cli.escape_for_terminal(self.HOSTILE), self.SHOWN)
         self.assertEqual(cli.escape_for_terminal("\U000e0041"), "\\U000e0041")
 
+    def test_a_lone_surrogate_is_shown_rather_than_crashing_the_write(self):
+        """A file name that is not valid UTF-8 reaches Python as a lone
+        surrogate (``surrogateescape``). A strict UTF-8 stdout refuses to
+        encode it, which would turn ``asi skills`` into an internal error on
+        the one tree that has such a name; shown as its escape it is just an
+        odd-looking path."""
+        self.assertEqual(cli.escape_for_terminal("bad\udcffskill"), "bad\\udcffskill")
+        self.assertEqual(
+            cli.escape_for_terminal("bad\udcffskill").encode("utf-8", "strict"),
+            b"bad\\udcffskill",
+        )
+
     def test_newlines_tabs_and_ordinary_unicode_pass_through(self):
         plain = "line one\n\tindented caf\u00e9 \u65e5\u672c \U0001f469\u200d\U0001f4bb"
         self.assertEqual(cli.escape_for_terminal(plain), plain)
@@ -834,6 +846,20 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         self.assertEqual(rc, cli.RC_REFUSED)
         self.assertEqual(err, f"SafetyRefusal: {self.SHOWN}\n")
         self.assertEqual(out, "")
+
+    def test_text_for_stdout_is_escaped_at_its_choke_point(self):
+        """The static check proves the shape; this proves the stdout side
+        behaves. Measured without it, dropping the escape inside ``_say`` passed
+        every test in the suite."""
+
+        def prints_hostile_text(_args):
+            cli._emit({"ignored": True}, as_json=False, lines=[self.HOSTILE, "second line"])
+            return 0
+
+        rc, out, err = self._main_streams(["doctor"], patch=("cmd_doctor", prints_hostile_text))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, f"{self.SHOWN}\nsecond line\n")
+        self.assertEqual(err, "")
 
     def test_a_not_found_message_and_an_internal_error_are_escaped_too(self):
         rc, _, err = self._main_streams(
@@ -885,34 +911,91 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         self.assertNotIn("\x1b", err.getvalue())
         self.assertNotIn("\u202e", err.getvalue())
 
-    def test_every_text_write_in_the_cli_goes_through_the_escape(self):
-        """Static: the only places ``cli.py`` touches ``sys.stdout`` or
-        ``sys.stderr`` directly are the two choke points (``_say`` and ``_err``)
-        and the JSON branches, where the argument is a ``dumps(...)`` call.
-        A new ``sys.stdout.write(f"...")`` anywhere else fails this test."""
+    STREAMS = ("sys.stdout", "sys.stderr", "sys.__stdout__", "sys.__stderr__")
+    PRINTERS = ("print", "traceback.print_exc", "traceback.print_exception", "logging")
+
+    def _stream_references(self, source: str) -> list[str]:
+        """Every mention of a standard stream in ``source`` that is not one of
+        the sanctioned forms, as ``scope:line text``.
+
+        Sanctioned: any use inside ``_say``, ``_err`` or the parser's
+        ``_print_message``; and the exact call ``sys.stdout.write(dumps(...))``
+        (JSON for programs). Everything else is an offender: a write with any
+        other argument, ``.buffer``, ``.writelines``, aliasing the stream into a
+        variable, a module-level reference, a ``print`` or a ``logging`` use.
+        """
         import ast
 
-        tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
-        offenders: list[str] = []
+        tree = ast.parse(source)
+        sanctioned_scopes = {"_say", "_err", "_print_message"}
+        scope_of: dict[int, str] = {}
         for func in ast.walk(tree):
-            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(func):
-                if not isinstance(node, ast.Call):
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for node in ast.walk(func):
+                    scope_of.setdefault(id(node), func.name)
+        json_writes: set[int] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "sys.stdout.write"
+                and len(node.args) == 1
+                and not node.keywords
+                and isinstance(node.args[0], ast.Call)
+                and ast.unparse(node.args[0].func) == "dumps"
+            ):
+                json_writes.update(id(n) for n in ast.walk(node.func))
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            text = ast.unparse(node) if isinstance(node, (ast.Attribute, ast.Name)) else ""
+            scope = scope_of.get(id(node), "<module>")
+            if isinstance(node, ast.Attribute) and text in self.STREAMS:
+                if scope in sanctioned_scopes or id(node) in json_writes:
                     continue
-                target = ast.unparse(node.func)
-                if target in ("print", "traceback.print_exc", "traceback.print_exception"):
-                    offenders.append(f"{func.name}:{node.lineno} {target}")
-                    continue
-                if target not in ("sys.stdout.write", "sys.stderr.write"):
-                    continue
-                if func.name in ("_say", "_err"):
-                    continue
-                arg = node.args[0] if node.args else None
-                is_json = isinstance(arg, ast.Call) and ast.unparse(arg.func) == "dumps"
-                if not is_json:
-                    offenders.append(f"{func.name}:{node.lineno} {ast.unparse(node)[:60]}")
-        self.assertEqual(offenders, [])
+                offenders.append(f"{scope}:{node.lineno} {text}")
+            elif isinstance(node, ast.Call) and ast.unparse(node.func) in self.PRINTERS:
+                offenders.append(f"{scope}:{node.lineno} {ast.unparse(node.func)}")
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = {alias.name for alias in node.names}
+                if "logging" in names or getattr(node, "module", None) == "logging":
+                    offenders.append(f"{scope}:{node.lineno} import logging")
+        return offenders
+
+    def test_every_text_write_in_the_cli_goes_through_the_escape(self):
+        """Static: the only places ``cli.py`` touches a standard stream are the
+        choke points (``_say``, ``_err``, the parser's ``_print_message``) and
+        the JSON branches, where the one argument is a ``dumps(...)`` call.
+        Any other mention of the stream, not only a ``.write`` call, fails."""
+        source = Path(cli.__file__).read_text(encoding="utf-8")
+        self.assertEqual(self._stream_references(source), [])
+
+    def test_the_static_check_catches_each_way_of_sidestepping_the_escape(self):
+        """A checker nobody has watched fail proves nothing. Each snippet is one
+        evasion the previous version of this check let through."""
+        evasions = {
+            "buffer": "def f():\n    sys.stdout.buffer.write(b'x')\n",
+            "writelines": "def f():\n    sys.stderr.writelines(['x'])\n",
+            "alias": "def f():\n    w = sys.stdout.write\n    w('x')\n",
+            "stream alias": "def f():\n    out = sys.stdout\n    out.write('x')\n",
+            "module level": "sys.stdout.write('x')\n",
+            "lambda": "f = lambda: sys.stdout.write('x')\n",
+            "dunder": "def f():\n    sys.__stderr__.write('x')\n",
+            "print": "def f():\n    print('x')\n",
+            "print_exc": "def f():\n    traceback.print_exc()\n",
+            "logging": "import logging\n",
+            "json plus text": "def f():\n    sys.stdout.write(dumps(x) + 'y')\n",
+            "json keyword": "def f():\n    sys.stdout.write(dumps(x), extra=1)\n",
+        }
+        for name, snippet in evasions.items():
+            with self.subTest(evasion=name):
+                self.assertNotEqual(self._stream_references(snippet), [], snippet)
+        sanctioned = (
+            "def _say(t):\n    sys.stdout.write(t)\n"
+            "def _err(t):\n    sys.stderr.write(t)\n"
+            "def g():\n    sys.stdout.write(dumps(payload))\n"
+            "class P:\n    def _print_message(self, m, file=None):\n"
+            "        (file or sys.stderr).write(m)\n"
+        )
+        self.assertEqual(self._stream_references(sanctioned), [])
 
 
 if __name__ == "__main__":  # pragma: no cover
