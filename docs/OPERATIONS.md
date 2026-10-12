@@ -98,7 +98,7 @@ the remedy in each reason is to move it aside or repair it by hand.
 | 2 | usage error: an unknown subcommand or flag, or a value argparse refuses before any config is read (a `--day` that could not name a candidate, a `--limit` below 1); argparse's code, never returned by a command |
 | 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, `ConfigError`, ...) |
 | 4 | a required file was missing |
-| 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree |
+| 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree. The next `daily` exits 5 as well (`BlockedRunUnreviewed`, before the lock, any write or any conversation) until one is started with `--mutation-reviewed 2026-01-01` naming the blocked run's day |
 | 70 | an exception no command anticipated, with its traceback on stderr. A bug report, never a negative answer; 70 is `EX_SOFTWARE` from `sysexits.h` |
 
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
@@ -371,6 +371,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
 | `UndecodableDocument` | on `review` or `apply`: the skill document is not valid UTF-8 at the byte named. In `daily` the same finding quarantines that one skill (`skills --json` carries the warning on its snapshot) and the run goes on; nothing is proposed, shown or applied against text the tool cannot read exactly. Fix the encoding and re-run |
 | `LinkedTargetRefused` | on `review`, `apply` or `rollback`: the skill document (judged `O_NOFOLLOW` on every read of it, so `review` shows no token for it), or a directory beneath its root on the way to it, is now a symbolic link, or the target is spelled outside every configured root yet resolves into a canonical one, so the write would land wherever the link points (a same-text twin would pass the hash check). Nothing was read through the link, backed up or written; replace the link with the real file and re-run `review` |
+| `BlockedRunUnreviewed` (`daily`, exit 5) | the newest daily receipt recorded a skill tree mutation and no run since has stated it was reviewed. Read `skill_tree.changes` in the receipt the message names, find out what wrote to the tree, then run once with `--mutation-reviewed 2026-01-01` naming that run's day |
 | `BackupUnusable` | rollback's backup or manifest does not verify, or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
 | `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config or rubrics). Never a proposal target and never writable, by design |
@@ -453,6 +454,25 @@ persisted was closed as `blocked-run` with that reason in its notes; `apply`
 refuses them, and the proposal text stays readable for the post-mortem. If the
 receipt says a candidate could NOT be rewritten, its file may still read
 `validated`: do not apply it.
+
+"Do not re-run" is enforced, not only asked: while the newest daily receipt
+records a mutation, the next `daily` refuses with `BlockedRunUnreviewed` and the
+same exit 5, before the lock is taken, before anything under `state/` is written
+and before a conversation is read (the source is only preflighted), so a scheduler
+that fires every morning keeps paging instead of quietly running again. The signal
+is the receipt's own `skill_tree.mutation_detected`, not its `status`: a status is a
+word anyone can edit, and a receipt without the field (an older build, a hand edit)
+does not block; `doctor` is what warns about such a receipt. A receipt under
+`state/receipts/` that cannot be read at all refuses the run too (`StateUnreadable`,
+exit 3), and that includes a torn `apply` or `rollback` receipt, which shares the
+directory: which run was newest cannot be known while any one is unreadable, and the
+blocked receipt is the one most worth truncating; read it, then move it aside.
+`doctor` names such a file in a warning. When you know what wrote to the tree, start one
+run by hand naming the blocked run's day, `asi daily --commit --mutation-reviewed 2026-01-01`;
+its receipt records that statement and becomes the newest, and the schedule resumes
+on its own. The flag names a day, so one left behind in a cron line can waive only
+that run, never a later block; a day that names no blocked run is a `ConfigError`.
+A dry run with the flag proceeds but writes no receipt, so the block stands.
 
 **`StateUnreadable: refusing to use the checkpoint record ...`** (exit 3). A state
 file under `state/` is truncated, hand-edited, or not a JSON object. Nothing is

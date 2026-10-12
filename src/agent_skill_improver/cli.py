@@ -53,7 +53,7 @@ from .domain.isolation import (
     denied_env_names,
     source_class,
 )
-from .errors import AsiError, ConfigError
+from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
 from .domain.redaction import quoted_value
@@ -472,7 +472,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         last_run = receipts.last_run
         unreadable_receipts = [u.to_dict() for u in receipts.unreadable]
         for record in unreadable_receipts:
-            warnings.append(f"a receipt cannot be read: {record['reason']}")
+            warnings.append(f"a receipt cannot be read ({record['path']}): {record['reason']}")
         if last_run is not None and last_run.mutation_detected:
             problems.append(
                 f"the last run ({last_run.day}) detected a skill tree mutation; do not re-run "
@@ -880,6 +880,7 @@ def cmd_daily(args: argparse.Namespace) -> int:
         day=args.day,
         commit=bool(args.commit),
         seed=args.seed,
+        mutation_reviewed=args.mutation_reviewed or None,
     )
     # Notes carry skill ids and source errors, so the text goes out through
     # _emit like every other listing: one line each, breaks spelled.
@@ -1699,6 +1700,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_daily.add_argument("--seed", help="deterministic seed for nonces and blind judging")
     p_daily.add_argument(
+        "--mutation-reviewed",
+        metavar="DAY",
+        type=_run_day_argument,
+        default="",
+        help=(
+            "the day of a blocked run whose recorded skill tree mutation you have read; "
+            "without it a run after a blocked one is refused (exit 5)"
+        ),
+    )
+    p_daily.add_argument(
         "--allow-missing-roles",
         action="store_true",
         help="do not fail fast when a model role is unconfigured (for partial runs)",
@@ -1759,6 +1770,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.config = None
     try:
         return int(args.func(args))
+    except BlockedRunUnreviewed as exc:
+        # The condition exit 5 reports is still standing: a scheduler must keep
+        # paging on it rather than file the morning after as an ordinary refusal.
+        _err(f"{type(exc).__name__}: {exc}\n")
+        return RC_BLOCKED
     except AsiError as exc:
         _err(f"{type(exc).__name__}: {exc}\n")
         return RC_REFUSED

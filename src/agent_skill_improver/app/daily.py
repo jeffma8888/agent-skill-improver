@@ -57,6 +57,7 @@ from ..domain.candidate import (
     STATUS_BLOCKED_RUN,
     STATUS_GATE_FAILED,
     STATUS_VALIDATED,
+    one_line_label,
     validate_candidate_id,
     validate_run_day,
 )
@@ -72,7 +73,15 @@ from ..domain.skills import (
     group_for,
     tree_digest_of,
 )
-from ..errors import AsiError, ConfigError, RecordDefect, SafetyRefusal, TransientFailure
+from ..errors import (
+    AsiError,
+    BlockedRunUnreviewed,
+    ConfigError,
+    RecordDefect,
+    SafetyRefusal,
+    StateUnreadable,
+    TransientFailure,
+)
 from ..ports import ModelRunner
 from .lock import RunLock
 from .pipeline import propose_candidate, read_canonical_text, score_and_isolate
@@ -181,8 +190,14 @@ def run_daily(
     day: str | None = None,
     commit: bool | None = None,
     seed: str | None = None,
+    mutation_reviewed: str | None = None,
 ) -> RunReceipt:
-    """Run one bounded, checkpointed, non-mutating daily pass."""
+    """Run one bounded, checkpointed, non-mutating daily pass.
+
+    ``mutation_reviewed`` names the day of a blocked run whose recorded skill
+    tree mutation the operator has read; without it, a run after a blocked one
+    is refused (``BlockedRunUnreviewed``).
+    """
     # FIRST, before the lock, before any state is written and before a single
     # byte of conversation is read: is this configuration allowed to handle this
     # source at all? Ordering is the whole point. Everything below this line
@@ -211,6 +226,57 @@ def run_daily(
     run_day = day or day_key(started)
     run_seed = seed or config.seed or run_day
     dry_run = config.dry_run if commit is None else not commit
+    # The newest daily receipt is read before anything is written. A run that
+    # recorded a skill tree mutation blocks the next one too: the operations doc
+    # says do not re-run until you know what wrote to the tree, and a scheduler
+    # that fires every morning would otherwise do exactly that. The operator
+    # clears it by naming the blocked run's day, so a flag left behind in a cron
+    # line can waive only the run it was written for, never the next block.
+    if mutation_reviewed:
+        try:
+            validate_run_day(mutation_reviewed)
+        except ValueError as exc:
+            raise ConfigError(f"--mutation-reviewed: {exc}") from None
+    receipts = state.scan_receipts()
+    if receipts.unreadable:
+        # Fail closed: the newest receipt is only known once every receipt reads,
+        # and the blocked one is the one most worth truncating. Same recovery as
+        # any other state artifact: read it, then move it aside.
+        first = receipts.unreadable[0]
+        more = f" and {len(receipts.unreadable) - 1} more" if len(receipts.unreadable) > 1 else ""
+        raise StateUnreadable(
+            f"refusing to run: the receipt {one_line_label(str(first.path))} cannot be read "
+            f"({one_line_label(first.reason)}){more}; whether the last run was blocked cannot be "
+            "known while a receipt is unreadable. Read it, then move it aside to continue."
+        )
+    blocked = receipts.last_run
+    # The signal is the receipt's own ``skill_tree.mutation_detected``, not its
+    # status: a status can be edited to anything, and a receipt without the
+    # field (an older build, a hand edit) does not block; ``doctor`` names it.
+    # The day and the path are read back from the tree, so each is spelled
+    # onto one line before it reaches the message a pager shows.
+    blocked_day = one_line_label(blocked.day) if blocked is not None else ""
+    if blocked is not None and blocked.mutation_detected:
+        if mutation_reviewed != blocked.day:
+            named = (
+                f" (the flag named {mutation_reviewed}, which is not that run)"
+                if mutation_reviewed
+                else ""
+            )
+            raise BlockedRunUnreviewed(
+                f"the {blocked_day} run recorded a skill tree mutation and no later run has "
+                f"finished; read skill_tree.changes in {one_line_label(str(blocked.path))}, "
+                "find out what wrote to "
+                f"the tree, then re-run with --mutation-reviewed {blocked_day}{named}"
+            )
+    elif mutation_reviewed:
+        newest = (
+            f"the newest daily receipt ({blocked_day}, {one_line_label(blocked.status)}) "
+            "recorded no mutation"
+            if blocked is not None
+            else "there is no daily receipt"
+        )
+        raise ConfigError(f"--mutation-reviewed {mutation_reviewed} names no blocked run: {newest}")
     # Set on the shared store rather than on a copy: the source may hold this same
     # object as its raw-export store, and a dry run must withhold that write too.
     state.dry_run = dry_run
@@ -229,6 +295,17 @@ def run_daily(
     receipt.source = config.source.to_dict()
     receipt.caps = config.caps.to_dict()
     receipt.isolation = isolation.to_dict()
+    if blocked is not None and blocked.mutation_detected:
+        receipt.note(
+            f"the operator stated that the skill tree mutation recorded by the {blocked.day} run "
+            f"was reviewed (--mutation-reviewed {blocked.day}); this run proceeded on that "
+            "statement"
+            + (
+                "; a dry run writes no receipt, so the next run must state it again"
+                if dry_run
+                else ""
+            )
+        )
 
     with RunLock(state.lock_path()), AutomationMarker():
         entries_before = skill_store.tree_entries()

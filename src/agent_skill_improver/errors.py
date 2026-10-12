@@ -138,6 +138,18 @@ class ApprovalRequired(SafetyRefusal):
     """Promotion attempted without a valid human approval token."""
 
 
+class BlockedRunUnreviewed(SafetyRefusal):
+    """The newest daily receipt recorded a skill tree mutation nobody has reviewed.
+
+    A blocked run means a foreign actor wrote to the tree during the pass. The
+    operations doc says do not re-run until you know what did; a scheduler that
+    fires every morning would re-run regardless, so the next ``daily`` refuses
+    until the operator names the blocked run's day with ``--mutation-reviewed``.
+    Raised before the lock, before any state is written and before the source
+    is read; the exit code stays 5, so the page repeats until someone looks.
+    """
+
+
 class CandidateTampered(SafetyRefusal):
     """A candidate's derived fields do not recompute to the values it stores.
 

@@ -161,6 +161,8 @@ class NoLiveMutationTests(DailyHarness):
 
         # And through the real command entry point, not just the pure mapping:
         # the same mutating runner, wired in where `asi daily` builds its own.
+        # The committed run above left a blocked receipt, so this run has to
+        # state that its mutation was reviewed or it is refused before starting.
         import io
         from contextlib import redirect_stdout
         from unittest import mock
@@ -171,7 +173,17 @@ class NoLiveMutationTests(DailyHarness):
         target.write_text(before)
         with mock.patch.object(cli, "build_runner", lambda *_: EditsASkillWhileScoring()):
             with redirect_stdout(io.StringIO()) as out:
-                rc = cli.main(["--config", str(config.config_path), "daily", "--day", "2026-01-03"])
+                rc = cli.main(
+                    [
+                        "--config",
+                        str(config.config_path),
+                        "daily",
+                        "--day",
+                        "2026-01-03",
+                        "--mutation-reviewed",
+                        DAY,
+                    ]
+                )
         self.assertEqual(rc, RC_BLOCKED, out.getvalue())
         self.assertIn("status=blocked", out.getvalue())
 

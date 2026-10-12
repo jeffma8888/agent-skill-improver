@@ -855,7 +855,7 @@ class StateStore:
         return self.dir("receipts") / stem
 
     def scan_receipts(self) -> ReceiptScan:
-        """The newest daily receipt, by its own ``finished_at`` (then ``started_at``).
+        """The newest daily receipt, by its own ``finished_at`` (then ``started_at``), then day.
 
         Only daily receipts (``SCHEMA_RECEIPT``) count as a run; apply and
         rollback receipts share the directory under their own schemas and are
@@ -870,7 +870,7 @@ class StateStore:
 
         directory = self.root / "receipts"
         newest: LastRun | None = None
-        newest_key = ""
+        newest_key = ("", "")
         unreadable: list[UnreadableRecord] = []
         if not directory.is_dir() or directory.is_symlink():
             return ReceiptScan(last_run=None, unreadable=())
@@ -881,6 +881,14 @@ class StateStore:
                 raw = _read_state_json(path)
             except (ValueError, StateUnreadable) as exc:
                 unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
+                continue
+            except OSError as exc:
+                # A receipt this process cannot open (a mode someone changed, a
+                # vanished file) is listed like a torn one: the scan sits on the
+                # scheduled ``daily`` path, where a traceback is a 70, not an answer.
+                unreadable.append(
+                    UnreadableRecord(path=path, reason=f"cannot be opened: {exc.strerror or exc}")
+                )
                 continue
             if not isinstance(raw, dict):
                 unreadable.append(
@@ -916,10 +924,13 @@ class StateStore:
                 isolation_mode=str(isolation.get("mode", "")),
                 path=path,
             )
-            # Ties keep the first in path order; a later file with the same
-            # stamp does not displace it, so the answer is stable across scans.
-            if newest is None or at > newest_key:
-                newest, newest_key = run, at
+            # Two runs that finished within the same second are told apart by
+            # their day (two days' runs a second apart happen in tests and in a
+            # catch-up); a full tie keeps the first in path order, so the answer
+            # is stable across scans.
+            key = (at, str(raw["day"]))
+            if newest is None or key > newest_key:
+                newest, newest_key = run, key
         return ReceiptScan(last_run=newest, unreadable=tuple(unreadable))
 
     def write_receipt(self, day: str, payload: dict[str, Any], *, dry_run: bool) -> Path:

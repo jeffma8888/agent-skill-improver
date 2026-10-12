@@ -89,6 +89,13 @@ class TheStoreFindsTheNewestDailyReceiptTests(unittest.TestCase):
         assert first is not None
         self.assertEqual(first.path.name, "y.json")
         self.assertEqual(self.store.scan_receipts().last_run, first, "stable across scans")
+        # The same second, a later day: the later day's run is the newer one,
+        # whatever its file is called (this one sorts last, so path order alone
+        # would not pick it).
+        self._write("zz.json", _receipt("2026-01-03", "2026-01-02T05:00:00Z"))
+        later = self.store.scan_receipts().last_run
+        assert later is not None
+        self.assertEqual(later.path.name, "zz.json")
         started_only = _receipt("2026-01-06", "2026-01-06T00:00:00Z")
         started_only["finished_at"] = None
         self._write("s.json", started_only)
@@ -290,12 +297,12 @@ class DoctorAnswersTheHealthQuestionsTests(unittest.TestCase):
             [Path(u["path"]).name for u in doc["receipt_records_unreadable"]], ["torn.json"]
         )
         self.assertTrue(
-            any(w.startswith("a receipt cannot be read: ") for w in doc["warnings"]),
+            any(w.startswith("a receipt cannot be read (") for w in doc["warnings"]),
             doc["warnings"],
         )
         self.assertTrue(
             any(
-                re.match(r"^WARN  a receipt cannot be read: ", ln)
+                re.match(r"^WARN  a receipt cannot be read \(.*torn\.json\): ", ln)
                 for ln in text.stdout.splitlines()
             )
         )
