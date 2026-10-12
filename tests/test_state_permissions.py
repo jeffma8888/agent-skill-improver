@@ -885,7 +885,8 @@ class CheckpointShapeIsCheckedOnReadTests(StateTreeHarness):
                 message = str(caught.exception)
                 self.assertIn(str(path), message)
                 self.assertIn("'candidates'", message)
-                self.assertIn("not strings", message)
+                odd = [c for c in planted if not isinstance(c, str)]
+                self.assertIn("not a string" if len(odd) == 1 else "not strings", message)
         path.write_text(json.dumps({"candidates": ["a", "b"]}), encoding="utf-8")
         self.assertEqual(store.read_checkpoint("2026-01-02")["candidates"], ["a", "b"])
 
@@ -902,6 +903,45 @@ class CheckpointShapeIsCheckedOnReadTests(StateTreeHarness):
         store.write_checkpoint("2026-01-02", payload)
         self.assertEqual(store.read_checkpoint("2026-01-02"), payload)
         self.assertEqual(store.processed_record_ids("2026-01-02"), {"a"})
+
+
+class UnreadableCheckpointsAreNamedTests(StateTreeHarness):
+    """``unreadable_checkpoints`` lists exactly the checkpoint files
+    ``read_checkpoint`` would refuse, each with the refusal's own reason."""
+
+    def test_a_truncated_and_a_wrong_shaped_checkpoint_are_named_with_reasons(self):
+        store = self.store()
+        store.ensure()
+        truncated = store.checkpoint_path("2026-01-01")
+        truncated.write_text('{"records": {"a": ', encoding="utf-8")
+        shaped = store.checkpoint_path("2026-01-02")
+        shaped.write_text(json.dumps({"candidates": [1]}), encoding="utf-8")
+        store.write_checkpoint("2026-01-03", {"runs": 1})
+        found = store.unreadable_checkpoints()
+        self.assertEqual([u.path for u in found], [truncated, shaped])
+        self.assertIn("could not be read", found[0].reason)
+        self.assertIn("1 entry that is not a string (int)", found[1].reason)
+        for record in found:
+            with self.assertRaises(StateUnreadable) as caught:
+                store.read_checkpoint(record.path.name.split("--")[0])
+            self.assertEqual(str(caught.exception), record.reason, "the same refusal")
+
+    def test_a_link_is_a_foreign_entry_not_an_unreadable_checkpoint(self):
+        store = self.store()
+        store.ensure()
+        outside = self.root.parent / "keep.json"
+        outside.write_text("{garbage", encoding="utf-8")
+        link = store.checkpoint_path("2026-01-01")
+        link.symlink_to(outside)
+        self.assertEqual(store.unreadable_checkpoints(), [])
+        self.assertEqual(store.foreign_entries(), [f"checkpoints/{link.name} is a symlink"])
+
+    def test_the_control_an_empty_or_sound_directory_lists_nothing(self):
+        store = self.store()
+        store.ensure()
+        self.assertEqual(store.unreadable_checkpoints(), [])
+        store.write_checkpoint("2026-01-01", {"runs": 1, "records": {}, "skills": {}})
+        self.assertEqual(store.unreadable_checkpoints(), [])
 
 
 class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):

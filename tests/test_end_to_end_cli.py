@@ -16,7 +16,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.cli import RC_MISSING_FILE, RC_OK, RC_REFUSED
+from agent_skill_improver.clock import SystemClock, day_key
 from agent_skill_improver.domain.approval import AUTOMATION_ENV_VAR
 from agent_skill_improver.hashing import sha256_file
 
@@ -926,6 +928,85 @@ class AMisnamedCandidateRecordIsUnreachableAndSaysSoTests(unittest.TestCase):
         self.assertEqual(payload["unreadable"], [])
         review = run_cli([*self.cfg, "--json", "review", self.declared_id])
         self.assertEqual(review.returncode, RC_OK, review.stderr)
+
+
+class ACheckpointDailyWouldRefuseIsNamedByDoctorTests(unittest.TestCase):
+    """Measured before: with today's checkpoint truncated, ``doctor`` printed
+    ``verdict: ready`` and exited 0; the next ``daily`` then refused by name
+    with exit 3. The refusal is right; a preflight that cannot see it coming is
+    not. Today's is a PROBLEM (the next run refuses), a past day's a WARN.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.cfg = ["--config", str(build_env(self.base, seed="checkpoint-doctor"))]
+        ready = run_cli([*self.cfg, "--json", "doctor"])
+        assert ready.returncode == RC_OK, ready.stderr
+        self.state = StateStore(self.base / "state")
+        self.today = day_key(SystemClock().now())
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_todays_truncated_checkpoint_is_a_problem_and_daily_confirms_the_refusal(self):
+        bad = self.state.checkpoint_path(self.today)
+        bad.write_text('{"schema": "asi.checkpoint.v1", "records": {"a": ', encoding="utf-8")
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, 1, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual([u["path"] for u in payload["checkpoint_records_unreadable"]], [str(bad)])
+        self.assertTrue(any("today's checkpoint cannot be read" in p for p in payload["problems"]))
+        as_text = run_cli([*self.cfg, "doctor"])
+        self.assertIn("PROBLEM  today's checkpoint cannot be read", as_text.stdout)
+        self.assertIn("verdict: problems found", as_text.stdout)
+        daily = run_cli([*self.cfg, "daily", "--commit"])
+        self.assertEqual(daily.returncode, RC_REFUSED, "the preflight predicted this")
+        self.assertIn(str(bad), daily.stderr)
+
+    def test_a_past_days_wrong_shaped_checkpoint_is_a_warning_not_a_problem(self):
+        bad = self.state.checkpoint_path("2026-01-01")
+        bad.write_text(json.dumps({"records": []}), encoding="utf-8")
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual([u["path"] for u in payload["checkpoint_records_unreadable"]], [str(bad)])
+        self.assertIn("'records' holds list, not dict", payload["warnings"][-1])
+        self.assertFalse(any("checkpoint" in p for p in payload["problems"]))
+        as_text = run_cli([*self.cfg, "doctor"])
+        self.assertIn("WARN  another day's checkpoint cannot be read", as_text.stdout)
+        self.assertIn("verdict: ready", as_text.stdout)
+        self.assertEqual(bad.read_text(encoding="utf-8"), json.dumps({"records": []}), "untouched")
+
+    def test_a_link_at_todays_checkpoint_path_is_a_problem_not_only_a_left_alone_warning(self):
+        # Measured by the cycle-69 audit: a link here left the verdict at
+        # ready while the next daily exited 3 refusing to read the leaf.
+        outside = self.base / "keep.json"
+        outside.write_text(json.dumps({"runs": 1, "records": {}}), encoding="utf-8")
+        link = self.state.checkpoint_path(self.today)
+        link.symlink_to(outside)
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, 1, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual(payload["checkpoint_records_unreadable"], [], "a link is not a record")
+        self.assertTrue(
+            any("today's checkpoint path" in p and "symlink" in p for p in payload["problems"])
+        )
+        self.assertTrue(any(link.name in w for w in payload["state_permissions"]["left_alone"]))
+        daily = run_cli([*self.cfg, "daily", "--commit"])
+        self.assertEqual(daily.returncode, RC_REFUSED, "the preflight predicted this")
+        self.assertTrue(link.is_symlink(), "neither command touched the link")
+        self.assertEqual(json.loads(outside.read_text(encoding="utf-8"))["runs"], 1)
+
+    def test_the_control_a_genuine_checkpoint_is_not_reported(self):
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        self.assertTrue(self.state.checkpoint_path("2026-01-01").is_file())
+        as_json = run_cli([*self.cfg, "--json", "doctor"])
+        self.assertEqual(as_json.returncode, RC_OK, as_json.stderr)
+        payload = json.loads(as_json.stdout)
+        self.assertEqual(payload["checkpoint_records_unreadable"], [])
+        self.assertFalse(any("checkpoint" in w for w in payload["warnings"] + payload["problems"]))
 
 
 class ReadOnlyCommandsTests(unittest.TestCase):

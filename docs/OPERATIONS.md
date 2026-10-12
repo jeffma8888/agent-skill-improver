@@ -54,6 +54,17 @@ hash instead, so a link to the right bytes is harmless), and a write replaces
 rather than follows it. `doctor` lists such entries as `left_alone` and
 prints a `WARN`, so a tree is never called clean while a foreign entry sits in it.
 
+`doctor` also reads every record `daily` would refuse before `daily` has to. A
+candidate record that does not parse is a `PROBLEM` (`candidate_records_unreadable`
+in JSON): the next run stands down with the queue uncounted. A day checkpoint that
+does not parse, or parses to the wrong shape, is listed under
+`checkpoint_records_unreadable`; today's is a `PROBLEM`, because the next `daily`
+refuses by name before it scores anything, and another day's is a `WARN`, because
+only `daily --day` for that day would. A foreign entry at today's checkpoint path
+is a `PROBLEM` for the same reason: it is the next run's first read, and a read
+refuses it. Both reads leave the file as found; the remedy in each reason is to
+move it aside or repair it by hand.
+
 ## Exit codes
 
 | Code | Meaning |

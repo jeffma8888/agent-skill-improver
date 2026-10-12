@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
-from .clock import SystemClock, iso
+from .clock import SystemClock, day_key, iso
 from .config import SOURCE_FIXTURES, Config, load_config, package_dir
 from .domain.approval import HumanApproval, automation_active
 from .domain.candidate import BIDI_CONTROLS, HIDDEN_CONTROLS, STATUS_VALIDATED, one_line_label
@@ -323,6 +323,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 "candidate record cannot be read and `daily` will stand down until it is moved "
                 f"or repaired: {record['reason']}"
             )
+    # A checkpoint `daily` would refuse is a problem when it is today's (the
+    # next run refuses by name before anything is scored) and a warning for a
+    # past day (only `daily --day` for that day would). Measured before: with
+    # today's checkpoint truncated, this report said ready.
+    unreadable_checkpoints: list[dict[str, str]] = []
+    if state_present and not layout_problems and (config.state_dir / "checkpoints").is_dir():
+        todays = state.checkpoint_path(day_key(SystemClock().now()))
+        for checkpoint in state.unreadable_checkpoints():
+            unreadable_checkpoints.append(checkpoint.to_dict())
+            if checkpoint.path == todays:
+                problems.append(
+                    "today's checkpoint cannot be read and `daily` will refuse to run until "
+                    f"it is moved aside or repaired: {checkpoint.reason}"
+                )
+            else:
+                warnings.append(
+                    "another day's checkpoint cannot be read; `daily --day` for that day "
+                    f"would refuse until it is moved aside or repaired: {checkpoint.reason}"
+                )
+        # A foreign entry elsewhere in the tree is a warning (left alone, stepped
+        # over); at today's checkpoint path it is the next run's first read, which
+        # refuses it by name, so here it is a problem. Measured before: a link
+        # at this path left the verdict at ready and the next run exited 3.
+        if todays.is_symlink() or (todays.exists() and not todays.is_file()):
+            problems.append(
+                f"today's checkpoint path {todays} holds "
+                f"{'a symlink' if todays.is_symlink() else 'something that is not a regular file'}"
+                ", which `daily` refuses to read; remove it if you did not put it there"
+            )
 
     # The isolation decision comes BEFORE anything touches the source, so
     # `doctor` on a host with no sandbox mechanism reports the refusal rather
@@ -420,6 +449,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "skills_that_do_not_load": [{"skill_id": s.skill_id, "path": str(s.path)} for s in broken],
         "skill_documents_passed_over": [d.to_dict() for d in passed_over],
         "candidate_records_unreadable": unreadable_candidates,
+        "checkpoint_records_unreadable": unreadable_checkpoints,
         "skills_with_executable_payloads": [
             {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
             for s in snapshots
