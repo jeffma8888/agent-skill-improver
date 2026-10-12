@@ -9,6 +9,7 @@ wearing a documentation-change costume.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -733,6 +734,126 @@ class UndecodableDocumentsAreOneDefectNotAFatalityTests(Harness):
         snapshot = self.canonical_snapshots()["shared"]
         self.assertFalse(any("UTF-8" in w for w in snapshot.warnings), snapshot.warnings)
         self.assertEqual(self.store().read_text(snapshot.path), GOOD)
+
+
+class ARootThatIsNotADirectoryIsMisplacedNotMissingTests(Harness):
+    """Measured before: a canonical root whose path held a regular file read as
+    "skill root(s) not present on this machine" in ``doctor`` and as
+    ``roots_missing`` in the receipt, so the operator was sent to check the
+    spelling of a path that was right. What sits there is now named, at the
+    root itself, with no skill id.
+    """
+
+    def test_the_control_an_absent_root_is_missing_and_passes_nothing_over(self):
+        shutil.rmtree(self.canonical_dir)
+        store = self.store()
+        self.assertEqual([r.id for r in store.missing_roots()], ["canonical"])
+        self.assertEqual(store.misplaced_roots(), ())
+        self.assertEqual(store.passed_over(), [])
+
+    def test_a_regular_file_at_the_root_is_named_at_the_root_itself(self):
+        shutil.rmtree(self.canonical_dir)
+        self.canonical_dir.write_text("not a directory\n", encoding="utf-8")
+        store = self.store()
+        self.assertEqual(store.missing_roots(), ())
+        self.assertEqual([r.id for r in store.existing_roots()], ["mirror"])
+        self.assertEqual(
+            [(r.id, p) for r, p in store.misplaced_roots()],
+            [("canonical", "a regular file, not a directory")],
+        )
+        self.assertEqual(
+            [(d.root_id, d.path, d.reason, d.skill_id) for d in store.passed_over()],
+            [
+                (
+                    "canonical",
+                    self.canonical_dir,
+                    "the configured root itself and is a regular file, not a directory",
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(sorted(s.skill_id for s in store.snapshots()), ["mirror-only", "shared"])
+
+    def test_a_dangling_link_at_the_root_names_its_target(self):
+        shutil.rmtree(self.canonical_dir)
+        self.canonical_dir.symlink_to(self.base / "moved-away")
+        store = self.store()
+        self.assertEqual(store.missing_roots(), ())
+        self.assertEqual(
+            [(r.id, p) for r, p in store.misplaced_roots()],
+            [
+                (
+                    "canonical",
+                    f"a dangling symbolic link to {self.base / 'moved-away'}, not a directory",
+                )
+            ],
+        )
+
+    def test_a_link_to_a_file_at_the_root_names_its_target(self):
+        shutil.rmtree(self.canonical_dir)
+        target = write(self.base / "a-file.md", GOOD)
+        self.canonical_dir.symlink_to(target)
+        store = self.store()
+        self.assertEqual(
+            [(r.id, p) for r, p in store.misplaced_roots()],
+            [("canonical", f"a symbolic link to {target}, which is not a directory")],
+        )
+
+    def test_a_fifo_at_the_root_is_named_as_a_fifo(self):
+        shutil.rmtree(self.canonical_dir)
+        os.mkfifo(self.canonical_dir)
+        store = self.store()
+        self.assertEqual(
+            [(r.id, p) for r, p in store.misplaced_roots()],
+            [("canonical", "a fifo, not a directory")],
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root searches a mode-000 directory")
+    def test_a_root_under_a_parent_this_process_cannot_search_is_named_not_a_crash(self):
+        # Measured before: ``Path.is_dir`` raised PermissionError out of the
+        # presence check, so ``doctor`` and ``daily`` ended as exit 70 with a
+        # traceback before anything was discovered.
+        from agent_skill_improver.adapters.skill_fs import root_presence
+
+        locked = self.base / "locked"
+        locked.mkdir()
+        shutil.move(self.canonical_dir, locked / "canonical")
+        hidden = locked / "canonical"
+        self.roots = [
+            dataclasses.replace(r, path=hidden) if r.id == "canonical" else r for r in self.roots
+        ]
+        os.chmod(locked, 0o000)
+        try:
+            store = self.store()
+            self.assertEqual(store.missing_roots(), ())
+            self.assertEqual([r.id for r in store.existing_roots()], ["mirror"])
+            self.assertEqual(
+                [(r.id, p) for r, p in store.misplaced_roots()],
+                [("canonical", "a path this process cannot examine (Permission denied)")],
+            )
+            self.assertEqual(
+                [(d.path, d.skill_id) for d in store.passed_over()],
+                [(hidden, None)],
+            )
+            self.assertEqual(root_presence(hidden), (True, False))
+        finally:
+            os.chmod(locked, 0o755)
+
+    def test_a_link_to_a_directory_at_the_root_is_a_present_root(self):
+        real = self.base / "real-canonical"
+        shutil.move(self.canonical_dir, real)
+        self.canonical_dir.symlink_to(real)
+        store = self.store()
+        self.assertEqual(store.misplaced_roots(), ())
+        self.assertEqual(store.missing_roots(), ())
+        self.assertEqual([r.id for r in store.existing_roots()], ["canonical", "mirror"])
+        # The judgement itself, not only the callers that filter on is_dir first:
+        # a link that reaches a directory has no shape problem.
+        from agent_skill_improver.adapters.skill_fs import _root_shape_problem
+
+        self.assertIsNone(_root_shape_problem(self.canonical_dir))
+        self.assertIsNone(_root_shape_problem(real))
+        self.assertIsNone(_root_shape_problem(self.base / "never-made"))
 
 
 class PassedOverDocumentsAreReportedTests(Harness):

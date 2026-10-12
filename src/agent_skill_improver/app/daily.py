@@ -226,6 +226,10 @@ def run_daily(
             "digest_before": digest_before,
             "roots_present": [r.id for r in skill_store.existing_roots()],
             "roots_missing": [r.id for r in skill_store.missing_roots()],
+            "roots_misplaced": [
+                {"id": root.id, "path": str(root.path), "found": problem}
+                for root, problem in skill_store.misplaced_roots()
+            ],
             "skills_discovered": len(known_skill_ids),
             "mirrored_skills": sum(1 for g in groups if g.is_mirrored),
             "skills_with_divergent_mirrors": sum(1 for g in groups if g.divergent_mirrors),

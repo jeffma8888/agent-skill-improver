@@ -1127,6 +1127,60 @@ class ARoleCommandThatCannotStartIsAConfigProblemTests(unittest.TestCase):
         )
 
 
+class ARootThatIsARegularFileIsNotReportedAsAbsentTests(unittest.TestCase):
+    """Measured before: with ``skills-canonical`` a regular file, ``doctor``
+    warned "skill root(s) not present on this machine: canonical" with
+    ``exists`` false, and the receipt listed it under ``roots_missing``.
+    """
+
+    def test_doctor_and_the_receipt_name_what_sits_at_the_root(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            cfg = ["--config", str(build_env(base, seed="file-root"))]
+            root = base / "skills-canonical"
+            shutil.rmtree(root)
+            root.write_text("not a directory\n", encoding="utf-8")
+            doctor = run_cli([*cfg, "--json", "doctor"])
+            report = json.loads(doctor.stdout)
+            self.assertNotIn(
+                "skill root(s) not present on this machine: canonical", report["warnings"]
+            )
+            self.assertIn(
+                f"skill document passed over in root canonical: {root} is the configured root "
+                "itself and is a regular file, not a directory",
+                report["warnings"],
+            )
+            canonical = [r for r in report["skill_roots"] if r["id"] == "canonical"][0]
+            self.assertEqual((canonical["exists"], canonical["is_directory"]), (True, False))
+            daily = run_cli([*cfg, "--json", "daily", "--commit", "--day", "2026-01-01"])
+            self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+            tree = json.loads(daily.stdout)["skill_tree"]
+            self.assertEqual(tree["roots_missing"], [])
+            self.assertEqual(
+                tree["roots_misplaced"],
+                [
+                    {
+                        "id": "canonical",
+                        "path": str(root),
+                        "found": "a regular file, not a directory",
+                    }
+                ],
+            )
+            self.assertEqual(
+                [d["skill_id"] for d in tree["skill_documents_passed_over"]],
+                [None],
+                "the finding is at the root, not pinned on a skill",
+            )
+            # The control: with nothing at the path, it is missing again.
+            root.unlink()
+            report = json.loads(run_cli([*cfg, "--json", "doctor"]).stdout)
+            self.assertIn(
+                "skill root(s) not present on this machine: canonical", report["warnings"]
+            )
+            canonical = [r for r in report["skill_roots"] if r["id"] == "canonical"][0]
+            self.assertEqual((canonical["exists"], canonical["is_directory"]), (False, False))
+
+
 class AStateDirectoryThatCannotBeCreatedIsAConfigProblemTests(unittest.TestCase):
     """Measured before: with ``[run].state_dir`` under a mode-555 parent,
     ``doctor``, ``daily`` and ``candidates`` all exited 70 with a

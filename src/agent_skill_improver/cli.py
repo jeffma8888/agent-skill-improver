@@ -48,6 +48,7 @@ from .domain.isolation import (
 )
 from .errors import AsiError, ConfigError
 from .jsonio import dumps
+from .adapters.skill_fs import root_presence
 from .app.state import DIR_MODE, OPEN_STATUSES, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
@@ -252,7 +253,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if missing:
         warnings.append(f"skill root(s) not present on this machine: {', '.join(missing)}")
     if not store.existing_roots():
-        problems.append("no configured skill root exists; nothing can be discovered")
+        problems.append("no configured skill root is a directory; nothing can be discovered")
     for role in ("scorer", "improver", "judge"):
         if role not in config.model_roles:
             problems.append(f"no [model.{role}] command configured")
@@ -508,7 +509,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "left_alone": left_alone,
         },
         "roles_configured": sorted(config.model_roles),
-        "skill_roots": [{**r.to_dict(), "exists": r.path.is_dir()} for r in config.skill_roots],
+        "skill_roots": [
+            # ``exists`` is what is on disk; ``is_directory`` is what discovery
+            # can use. A root that is a regular file exists and is not usable.
+            {**r.to_dict(), "exists": presence[0], "is_directory": presence[1]}
+            for r in config.skill_roots
+            for presence in (root_presence(r.path),)
+        ],
         "skills_discovered": len(store.known_skill_ids()),
         "skills_that_do_not_load": [{"skill_id": s.skill_id, "path": str(s.path)} for s in broken],
         "skill_documents_passed_over": [d.to_dict() for d in passed_over],

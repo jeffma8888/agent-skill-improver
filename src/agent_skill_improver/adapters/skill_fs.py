@@ -135,11 +135,13 @@ def _entry_kind(path: Path) -> str:
 
 @dataclass(frozen=True)
 class PassedOverDocument:
-    """A ``SKILL.md`` discovery saw and did not take, with the reason.
+    """A path discovery saw and did not take, with the reason.
 
     Discovery steps over a link (unless the store follows links), a link that
-    resolves outside its root, a document deeper than ``max_depth`` and
-    anything that is not a regular file (a dangling link, a fifo, a device).
+    resolves outside its root, a document deeper than ``max_depth``, anything
+    that is not a regular file (a dangling link, a fifo, a device), a directory
+    it could not list, and a configured root whose path holds something other
+    than a directory (recorded at the root's own path, with no skill id).
     Each is the right refusal, and each used to be silent: ``doctor`` said
     ``ready`` and ``skills`` listed nothing for a tree whose only ``SKILL.md``
     was a dangling link, so the operator could not tell a skipped skill from
@@ -152,8 +154,9 @@ class PassedOverDocument:
     #: The skill this entry would have been a copy of, had discovery taken it:
     #: set only for a ``SKILL.md`` at a depth discovery accepts, by the same
     #: rule ``_snapshot`` uses (the parent directory's name). None for an
-    #: unlistable directory, a document too deep or a root-level document, none
-    #: of which is a copy of anything, so none of them withholds a skill's slot.
+    #: unlistable directory, a document too deep, a root-level document or the
+    #: root path itself, none of which is a copy of anything, so none of them
+    #: withholds a skill's slot.
     skill_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -163,6 +166,70 @@ class PassedOverDocument:
             "reason": self.reason,
             "skill_id": self.skill_id,
         }
+
+
+def _root_is_directory(path: Path) -> bool:
+    """Whether a configured root's path reaches a directory, without raising.
+
+    ``Path.is_dir`` swallows only not-found; a root under a parent this process
+    cannot search raised ``PermissionError`` out of it. Measured before: that
+    one root ended ``doctor`` and ``daily`` as exit 70 with a traceback from the
+    presence check, before anything was discovered.
+    """
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def root_presence(path: Path) -> tuple[bool, bool]:
+    """``(exists, is_directory)`` for a configured root, without raising.
+
+    ``exists`` is what is on disk at the path, a dangling link included;
+    ``is_directory`` is what discovery can use.
+    """
+    try:
+        exists = path.exists() or path.is_symlink()
+    except OSError:
+        # Something is there that this process cannot examine: it exists.
+        exists = True
+    return exists, _root_is_directory(path)
+
+
+def _root_shape_problem(path: Path) -> str | None:
+    """What sits at a configured root's path when it is not a directory.
+
+    ``None`` when the path is a directory (through a link or not) or when there
+    is nothing there at all: absence is the ``missing_roots`` case and is
+    reported as such. Measured with ``lstat`` first so a dangling link is named
+    as a link rather than as absence; the final fallback names a fifo, socket
+    or device the way the document walk does.
+    """
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"a path this process cannot examine ({exc.strerror or exc})"
+    if stat.S_ISLNK(st.st_mode):
+        if _root_is_directory(path):
+            return None
+        try:
+            target = os.readlink(path)
+        except OSError as exc:
+            target = f"(unreadable: {exc.strerror or exc})"
+        try:
+            reachable = path.exists()
+        except OSError:
+            reachable = False
+        if not reachable:
+            return f"a dangling symbolic link to {target}, not a directory"
+        return f"a symbolic link to {target}, which is not a directory"
+    if stat.S_ISDIR(st.st_mode):
+        return None
+    if stat.S_ISREG(st.st_mode):
+        return "a regular file, not a directory"
+    return f"{_entry_kind(path)}, not a directory"
 
 
 class FilesystemSkillStore:
@@ -190,10 +257,33 @@ class FilesystemSkillStore:
         return self._roots
 
     def existing_roots(self) -> tuple[SkillRoot, ...]:
-        return tuple(r for r in self._roots if r.path.is_dir())
+        return tuple(r for r in self._roots if _root_is_directory(r.path))
 
     def missing_roots(self) -> tuple[SkillRoot, ...]:
-        return tuple(r for r in self._roots if not r.path.is_dir())
+        """Configured roots with nothing at their path.
+
+        A root whose path holds something that is not a directory is not
+        missing; it is misplaced, and reported as a passed-over entry with what
+        was found there. Measured before this distinction: a canonical root
+        that was a regular file read as "not present on this machine", so the
+        operator was sent to check the spelling of a path that was right.
+        """
+        return tuple(
+            r
+            for r in self._roots
+            if not _root_is_directory(r.path) and _root_shape_problem(r.path) is None
+        )
+
+    def misplaced_roots(self) -> tuple[tuple[SkillRoot, str], ...]:
+        """Configured roots whose path holds something other than a directory."""
+        found: list[tuple[SkillRoot, str]] = []
+        for root in self._roots:
+            if _root_is_directory(root.path):
+                continue
+            problem = _root_shape_problem(root.path)
+            if problem is not None:
+                found.append((root, problem))
+        return tuple(found)
 
     def snapshots(self, *, refresh: bool = False) -> list[SkillSnapshot]:
         if self._snapshot_cache is not None and not refresh:
@@ -201,7 +291,20 @@ class FilesystemSkillStore:
         found: list[SkillSnapshot] = []
         passed_over: list[PassedOverDocument] = []
         for root in self._roots:
-            if not root.path.is_dir():
+            if not _root_is_directory(root.path):
+                # Something at the root's path that is not a directory is a
+                # finding at the root itself, with no skill id: nothing below
+                # it can be discovered, and "not present" would be untrue.
+                problem = _root_shape_problem(root.path)
+                if problem is not None:
+                    passed_over.append(
+                        PassedOverDocument(
+                            root.id,
+                            root.path,
+                            f"the configured root itself and is {problem}",
+                            skill_id=None,
+                        )
+                    )
                 continue
             base = root.path.resolve()
             for skill_file in self._iter_skill_files(
