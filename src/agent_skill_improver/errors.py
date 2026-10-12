@@ -98,6 +98,17 @@ class NonDocumentWriteRefused(SafetyRefusal):
     """
 
 
+class LinkedTargetRefused(SafetyRefusal):
+    """A write was aimed at a skill document reached through a symbolic link.
+
+    The proposal was made against a regular file at a path below a canonical
+    root. A link planted at that path, or at any directory on the way to it,
+    redirects the write to whatever the link points at; with identical text at
+    both ends the hash check cannot tell. Raised before anything is read through
+    the link.
+    """
+
+
 class BaseHashMismatch(SafetyRefusal):
     """The live skill changed since the candidate was proposed."""
 

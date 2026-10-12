@@ -29,6 +29,7 @@ from agent_skill_improver.domain.skills import (
 from agent_skill_improver.errors import (
     BackupUnusable,
     BaseHashMismatch,
+    LinkedTargetRefused,
     MirrorEditRefused,
     NonDocumentWriteRefused,
     ReadOnlyViolation,
@@ -242,6 +243,87 @@ class WritePathRefusalTests(Harness):
             self.store(read_only=False).write_canonical(
                 payload, "x", expected_sha256="0" * 64, backup_dir=self.base / "bak"
             )
+
+    def _plant_twin(self) -> tuple[Path, Path, str]:
+        """A second canonical skill holding the same text as ``shared``.
+
+        Same text is the point: a link from one to the other passes the base
+        hash check, so only an lstat judgement can tell the write it is about to
+        land on the wrong skill. Measured before the check existed, the write
+        went through the link and the manifest named the twin.
+        """
+        twin = write(self.canonical_dir / "twin" / SKILL_FILENAME, GOOD)
+        shared = self.canonical_dir / "shared" / SKILL_FILENAME
+        return shared, twin, sha256_file(shared)
+
+    def _link(self, link: Path, to: Path) -> None:
+        try:
+            os.symlink(to, link)
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_skill_document_that_became_a_link_is_refused_and_the_twin_is_untouched(self):
+        shared, twin, base = self._plant_twin()
+        shared.unlink()
+        self._link(shared, twin)
+        with self.assertRaises(LinkedTargetRefused) as ctx:
+            self.store(read_only=False).write_canonical(
+                shared, GOOD + "\n- changed\n", expected_sha256=base, backup_dir=self.base / "bak"
+            )
+        self.assertIn(str(shared), str(ctx.exception))
+        self.assertEqual(twin.read_text(encoding="utf-8"), GOOD, "the twin must not change")
+        self.assertTrue(shared.is_symlink(), "the link itself is left in place")
+        self.assertFalse((self.base / "bak").exists(), "refused before any backup was taken")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_skill_directory_that_became_a_link_is_refused_too(self):
+        shared, twin, base = self._plant_twin()
+        shutil.rmtree(shared.parent)
+        self._link(shared.parent, twin.parent)
+        self.assertFalse(shared.is_symlink(), "the document itself is a regular file here")
+        with self.assertRaises(LinkedTargetRefused) as ctx:
+            self.store(read_only=False).write_canonical(
+                shared, GOOD + "\n- changed\n", expected_sha256=base, backup_dir=self.base / "bak"
+            )
+        self.assertIn(str(shared.parent), str(ctx.exception))
+        self.assertEqual(twin.read_text(encoding="utf-8"), GOOD)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_spelling_that_reaches_the_root_through_an_outside_link_is_refused(self):
+        """No root form prefixes this spelling, yet it resolves inside the
+        canonical root. The walk cannot see a link above or outside the root,
+        so the no-match case is a refusal rather than a pass-through to the
+        resolved-path checks, which would accept it."""
+        shared, twin, base = self._plant_twin()
+        via = self.base / "elsewhere" / "via"
+        via.parent.mkdir(parents=True)
+        self._link(via, self.canonical_dir)
+        spelled = via / "shared" / SKILL_FILENAME
+        with self.assertRaises(LinkedTargetRefused) as ctx:
+            self.store(read_only=False).write_canonical(
+                spelled, GOOD + "\n- changed\n", expected_sha256=base, backup_dir=self.base / "bak"
+            )
+        self.assertIn("canonical", str(ctx.exception))
+        self.assertEqual(shared.read_text(encoding="utf-8"), GOOD)
+        self.assertEqual(twin.read_text(encoding="utf-8"), GOOD)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_the_control_a_root_that_is_itself_a_link_still_takes_the_write(self):
+        """A skills directory that is a link to a checkout is an ordinary setup;
+        only links BELOW the root redirect a reviewed write."""
+        real_root = self.base / "real-canonical"
+        shutil.move(str(self.canonical_dir), str(real_root))
+        self._link(self.canonical_dir, real_root)
+        target = self.canonical_dir / "shared" / SKILL_FILENAME
+        receipt = self.store(read_only=False).write_canonical(
+            target,
+            GOOD + "\n- changed\n",
+            expected_sha256=sha256_file(target),
+            backup_dir=self.base / "bak",
+        )
+        self.assertEqual(Path(receipt.path), (real_root / "shared" / SKILL_FILENAME).resolve())
+        self.assertIn("- changed", target.read_text(encoding="utf-8"))
 
     def test_a_mirror_copy_is_refused_with_the_canonical_path_named(self):
         target = self.mirror_dir / "shared" / SKILL_FILENAME
@@ -565,6 +647,25 @@ class RollbackSafetyTests(Harness):
             self.store(read_only=False).rollback(manifest)
         self.assertTrue(target.is_symlink(), "the link itself must not be replaced or removed")
         self.assertEqual(decoy.read_text(encoding="utf-8"), applied)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_skill_directory_that_became_a_link_is_refused_on_rollback_too(self):
+        """The leaf check above sees a linked document; a linked DIRECTORY on
+        the recorded path leaves the leaf a regular file, hashes through to a
+        twin holding the applied text, and would restore over the twin."""
+        target, manifest, _previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        twin = write(self.canonical_dir / "twin" / SKILL_FILENAME, applied)
+        shutil.rmtree(target.parent)
+        try:
+            os.symlink(twin.parent, target.parent)
+        except (OSError, NotImplementedError):  # pragma: no cover - permissions
+            self.skipTest("cannot create a symlink here")
+        self.assertFalse(target.is_symlink(), "the document itself is a regular file here")
+        with self.assertRaises(LinkedTargetRefused):
+            self.store(read_only=False).rollback(manifest)
+        self.assertEqual(twin.read_text(encoding="utf-8"), applied, "the twin must not change")
+        self.assertTrue(target.parent.is_symlink(), "the link itself is left in place")
 
 
 class CanonicalResolutionTests(Harness):

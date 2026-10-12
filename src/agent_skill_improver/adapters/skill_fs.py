@@ -38,6 +38,7 @@ from ..domain.skills import (
 from ..errors import (
     BackupUnusable,
     BaseHashMismatch,
+    LinkedTargetRefused,
     MirrorEditRefused,
     NonDocumentWriteRefused,
     ReadOnlyViolation,
@@ -181,17 +182,22 @@ class FilesystemSkillStore:
         actor: str = "human",
     ) -> WriteReceipt:
         """The single method in this package that modifies a skill file."""
+        if self.read_only:
+            raise ReadOnlyViolation(
+                f"refusing to write {path}: this skill store is read-only. "
+                "The daily driver always opens the store read-only; only `asi apply` "
+                "opens it writable."
+            )
+        # Judged on the path as spelled, with lstat semantics, before anything
+        # resolves it: a link planted below the root between proposal and apply
+        # would otherwise be followed to a twin with the same text, and the
+        # hash check would pass while the write landed on the wrong skill.
+        self._assert_no_link_below_root(Path(path))
         # Resolved once, so every later step (hash, backup, manifest, verify)
         # describes the same file even when the caller spelled the path
         # differently. Two spellings of one path is how a check and the write it
         # guards end up looking at different things.
         target = Path(path).resolve() if Path(path).exists() else Path(path)
-        if self.read_only:
-            raise ReadOnlyViolation(
-                f"refusing to write {target}: this skill store is read-only. "
-                "The daily driver always opens the store read-only; only `asi apply` "
-                "opens it writable."
-            )
         self._assert_document(target)
         self._assert_not_protected(target)
         self._assert_canonical(target)
@@ -318,6 +324,10 @@ class FilesystemSkillStore:
                 f"not the regular file this apply wrote. Neither the link nor what it points "
                 f"to was touched."
             )
+        # The leaf is judged above; a directory on the way to it that became a
+        # link redirects the restore just as surely, and a same-text twin at the
+        # far end would pass the applied-hash check below.
+        self._assert_no_link_below_root(target)
         if not target.is_file():
             raise BaseHashMismatch(
                 f"refusing to roll back {target}: the recorded target is not a regular file "
@@ -429,6 +439,50 @@ class FilesystemSkillStore:
                     f"refusing to write {target}: it is inside a protected path ({guard}). "
                     "This tool never edits its own source, config, or rubrics -- a loop that "
                     "can rewrite its own scoring criteria has no gate at all."
+                )
+
+    def _assert_no_link_below_root(self, spelled: Path) -> None:
+        """Refuse a target reached through a symbolic link below its root.
+
+        The root itself may legitimately be a link (a skills directory pointing
+        at a checkout), so only the components beneath the configured root are
+        judged, each with ``lstat`` semantics. Shared by the write and the
+        rollback, which are the two places a skill file is ever replaced.
+        """
+        spelled = spelled if spelled.is_absolute() else spelled.absolute()
+        for root in self._roots:
+            for root_form in (Path(root.path), Path(root.path).resolve()):
+                try:
+                    below = spelled.relative_to(root_form)
+                except ValueError:
+                    continue
+                cursor = root_form
+                for part in below.parts:
+                    cursor = cursor / part
+                    if cursor.is_symlink():
+                        raise LinkedTargetRefused(
+                            f"refusing to replace {spelled}: {cursor} is a symbolic link, so the "
+                            f"replacement would land wherever it points rather than on the skill the "
+                            f"candidate was reviewed against. Neither the link nor its target "
+                            f"was touched."
+                        )
+                return
+        # No root form is a prefix of the spelling, yet it may still resolve into
+        # a canonical root: the spelling then reaches the skill through a link
+        # above or outside the root, which the walk above cannot see. Default
+        # deny. A spelling that resolves nowhere canonical is left to
+        # ``_assert_canonical``, which refuses it as a mirror or as unknown.
+        resolved = spelled.resolve()
+        for root in self._roots:
+            if not (root.canonical and root.editable):
+                continue
+            root_resolved = Path(root.path).resolve()
+            if resolved == root_resolved or root_resolved in resolved.parents:
+                raise LinkedTargetRefused(
+                    f"refusing to replace {spelled}: it is not spelled under any configured skill "
+                    f"root yet resolves to {resolved} inside root {root.id}, so it reaches the "
+                    f"skill through a symbolic link. Spell the target as the root does. Nothing "
+                    f"was touched."
                 )
 
     def _assert_canonical(self, target: Path) -> None:

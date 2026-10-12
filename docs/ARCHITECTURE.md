@@ -320,9 +320,15 @@ The interlock is structural, not a flag:
 - `daily` sets `ASI_AUTOMATED_RUN`, and `approval.HumanApproval.from_cli` refuses
   when that marker is present. An apply reached from inside a scheduled run fails
   even with a valid token.
-- The only filesystem write path for a skill is `skill_fs.write_canonical`, and
-  its first action is `_assert_document`, which refuses any target whose filename
-  is not `SKILL.md`.
+- The only filesystem write path for a skill is `skill_fs.write_canonical`.
+  After the read-only check, and before the path is resolved or a byte is read,
+  `_assert_no_link_below_root` judges every component beneath the configured
+  root with `lstat` and refuses a target reached through a symbolic link: a link
+  planted at a skill with a same-text twin would pass the hash check and land the
+  write on the twin. A spelling that matches no configured root yet resolves
+  into a canonical one is refused too (it reached the root through a link above
+  or outside it); the root itself may be a link. `rollback` runs the same walk.
+  `_assert_document` then refuses any target whose filename is not `SKILL.md`.
 
 ## Apply and rollback
 

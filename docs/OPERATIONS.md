@@ -199,6 +199,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `CredentialInSkill` | the skill file holds a token, key or key block, so no model role was shown it and nothing was proposed. Remove the credential from the skill; the next pass proposes normally |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
+| `LinkedTargetRefused` | on `apply` or `rollback`: the skill document, or a directory beneath its root on the way to it, is now a symbolic link, or the target is spelled outside every configured root yet resolves into a canonical one, so the write would land wherever the link points (a same-text twin would pass the hash check). Nothing was read through the link, backed up or written; replace the link with the real file and re-run `review` |
 | `BackupUnusable` | rollback's backup or manifest does not verify, or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
 | `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config or rubrics). Never a proposal target and never writable, by design |
