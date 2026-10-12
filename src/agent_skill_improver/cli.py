@@ -3,7 +3,7 @@
 Command surface, and which of them can change anything on disk:
 
     doctor              read-only. Validates config and reports what is wired.
-    skills              read-only. Skill inventory, canonical vs mirror, load warnings.
+    skills              read-only. Skill inventory, canonical vs mirror, discovery warnings.
     rubrics             read-only.
     discover            read-only. Lists thread ids the source would ingest.
     daily               writes only under the gitignored state directory.
@@ -116,6 +116,20 @@ def _load(args: argparse.Namespace) -> Config:
 _SHOWN_AS_IS = frozenset("\n\t")
 
 
+def one_line(text: str) -> str:
+    r"""A listing line made of untrusted text, kept to one line: a line break
+    inside it is spelled, not obeyed.
+
+    ``escape_for_terminal`` keeps ``\n`` because the listing's own structure is
+    made of them; a skill id, a payload file name or a conversation title is
+    not structure, and a newline inside one would otherwise start a forged line
+    in the very listing that exists to warn about such files. Applied by
+    ``_emit`` to every line it prints. Measured before: an executable named
+    ``run\n    warning: ...`` printed as two warnings in ``skills``.
+    """
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def escape_for_terminal(text: str) -> str:
     """Show every byte a terminal would otherwise obey.
 
@@ -197,8 +211,10 @@ def _emit(payload: Any, *, as_json: bool, lines: Sequence[str] = ()) -> None:
     if as_json:
         _say_json(payload)
     else:
+        # Each element is one line by construction; text inside it that came
+        # from a file name or a document must not be able to add another.
         for line in lines:
-            _say(line + "\n")
+            _say(one_line(line) + "\n")
 
 
 # -- commands ------------------------------------------------------------
@@ -424,6 +440,12 @@ def cmd_skills(args: argparse.Namespace) -> int:
         if group.divergent_mirrors:
             head += f"  DIVERGENT={','.join(m.root_id for m in group.divergent_mirrors)}"
         lines.append(head)
+        # What discovery noticed about each copy, one line each (``_emit`` keeps
+        # a file name's line break from becoming a line of its own).
+        for snapshot in ([canonical] if canonical is not None else []) + list(group.mirrors):
+            label = "" if snapshot is canonical else f" ({snapshot.root_id})"
+            for warning in snapshot.warnings:
+                lines.append(f"    warning{label}: {warning}")
     lines.append(
         f"{len(groups)} logical skill(s); "
         f"{sum(1 for g in groups if g.is_mirrored)} mirrored; "
@@ -516,16 +538,14 @@ def cmd_daily(args: argparse.Namespace) -> int:
         commit=bool(args.commit),
         seed=args.seed,
     )
-    if args.json:
-        _say_json(receipt.to_dict())
+    # Notes carry skill ids and source errors, so the text goes out through
+    # _emit like every other listing: one line each, breaks spelled.
+    lines = [receipt.summary_line(), *(f"note: {note}" for note in receipt.notes)]
+    if receipt.dry_run:
+        lines.append("receipt: not written (dry run); --json prints it, --commit persists it")
     else:
-        _say(receipt.summary_line() + "\n")
-        for note in receipt.notes:
-            _say(f"note: {note}\n")
-        if receipt.dry_run:
-            _say("receipt: not written (dry run); --json prints it, --commit persists it\n")
-        else:
-            _say(f"receipt: {state.receipt_path(receipt.day, dry_run=False)}\n")
+        lines.append(f"receipt: {state.receipt_path(receipt.day, dry_run=False)}")
+    _emit(receipt.to_dict(), as_json=args.json, lines=lines)
     return exit_code_for(receipt.status)
 
 
@@ -1126,7 +1146,7 @@ def build_parser() -> argparse.ArgumentParser:
         return sub.add_parser(name, help=help_text, parents=[common])
 
     add("doctor", "validate configuration and report what is wired").set_defaults(func=cmd_doctor)
-    add("skills", "skill inventory: canonical vs mirror, load warnings").set_defaults(
+    add("skills", "skill inventory: canonical vs mirror, discovery warnings").set_defaults(
         func=cmd_skills
     )
     add("rubrics", "show loaded rubrics").set_defaults(func=cmd_rubrics)

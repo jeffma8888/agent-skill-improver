@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import unittest
 from pathlib import Path
@@ -441,6 +442,71 @@ class ReviewRefusesWhatApplyWouldRefuseTests(unittest.TestCase):
         proc = run_cli([*self.cfg, "--json", "review", self.candidate_id])
         self.assertEqual(proc.returncode, RC_OK, proc.stderr)
         self.assertTrue(json.loads(proc.stdout)["approval_token"])
+
+
+class SkillsListingShowsWhatDiscoveryNoticedTests(unittest.TestCase):
+    """The text listing must say what the JSON says.
+
+    Measured before: a launcher beside a skill produced a payload warning in
+    ``skills --json`` and nothing at all in ``skills``, so an operator reading
+    the listing (which README describes as showing executable payloads) saw a
+    clean inventory.
+    """
+
+    def test_every_snapshot_warning_appears_once_under_its_skill_in_the_text_listing(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            cfg = ["--config", str(build_env(base, dry_run=True))]
+            launcher = base / "skills-canonical" / "tdd" / "run.sh"
+            launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+            os.chmod(launcher, 0o755)
+            listing = json.loads(run_cli([*cfg, "--json", "skills"]).stdout)
+            expected: list[str] = []
+            for group in listing["groups"]:
+                if group["canonical"]:
+                    expected += [f"    warning: {w}" for w in group["canonical"]["warnings"]]
+                for copy in group["mirrors"]:
+                    expected += [f"    warning ({copy['root_id']}): {w}" for w in copy["warnings"]]
+            self.assertTrue(any("executable payload" in w for w in expected), expected)
+
+            proc = run_cli([*cfg, "skills"])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            text_lines = proc.stdout.splitlines()
+            shown = [ln for ln in text_lines if ln.startswith("    warning")]
+            self.assertEqual(sorted(shown), sorted(expected), proc.stdout)
+            head = next(i for i, ln in enumerate(text_lines) if ln.startswith("tdd "))
+            self.assertIn("executable payload", text_lines[head + 1], "shown under its own skill")
+            self.assertTrue(text_lines[-1].endswith("with divergent mirrors"), "summary stays last")
+
+    def test_a_payload_name_with_a_line_break_cannot_forge_a_listing_line(self):
+        """Measured with the warning lines first added: an executable named
+        ``run\n    warning: FORGED ...sh`` printed as two warnings, the second
+        of them authored by whoever dropped the file."""
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            cfg = ["--config", str(build_env(base, dry_run=True))]
+            forged = base / "skills-canonical" / "tdd" / "run\n    warning: FORGED all clear.sh"
+            forged.write_text("#!/bin/sh\n", encoding="utf-8")
+            os.chmod(forged, 0o755)
+            # A skill DIRECTORY name is untrusted too, and it makes the head line.
+            shutil.copytree(
+                base / "skills-canonical" / "code-review",
+                base / "skills-canonical" / "zz\ntdd  canonical=canonical sha=FORGED00",
+            )
+            proc = run_cli([*cfg, "skills"])
+            self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+            lines = proc.stdout.splitlines()
+            self.assertEqual([ln for ln in lines if ln.startswith("    warning: FORGED")], [])
+            self.assertEqual(
+                [ln for ln in lines if ln.startswith("tdd  canonical=canonical sha=FORGED")], []
+            )
+            # Three lines carry the forged text: the payload warning, the head
+            # line of the renamed skill, and its frontmatter-name warning.
+            carrying = [ln for ln in lines if "FORGED" in ln]
+            self.assertEqual(len(carrying), 3, proc.stdout)
+            self.assertTrue(any("run\\n    warning: FORGED" in ln for ln in carrying), carrying)
+            self.assertTrue(any(ln.startswith("zz\\ntdd  canonical") for ln in carrying), carrying)
+            self.assertEqual(sum(1 for ln in lines if ln.startswith("    warning")), 3, proc.stdout)
 
 
 class ReadOnlyCommandsTests(unittest.TestCase):
