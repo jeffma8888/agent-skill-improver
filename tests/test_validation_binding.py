@@ -476,6 +476,29 @@ class AJudgeRationaleIsKeptMaskedAndClippedTests(unittest.TestCase):
         self.assertLessEqual(len(judgement.rationale), MAX_RATIONALE_CHARS + len(" ...[clipped]"))
         self.assertNotIn(key, json.dumps(judgement.to_dict()))
 
+    def test_a_record_edited_on_disk_is_read_back_masked_and_clipped_too(self):
+        """The persisted record is parsed with the same rule, so editing the
+        rationale in the state tree cannot make review print more than the
+        judge could have."""
+        from agent_skill_improver.domain.scoring import MAX_RATIONALE_CHARS
+        from agent_skill_improver.domain.validation import _parse_judgement
+
+        from agent_skill_improver import SCHEMA_JUDGEMENT
+
+        key = "AK" + "IA" + "K" * 16
+        raw = {
+            "schema": SCHEMA_JUDGEMENT,
+            "case": ReplayCase("t1", "c1", CASE_TARGET).to_dict(),
+            "preferred_label": "tie",
+            "preferred_arm": "tie",
+            "rationale": f"edited {key} " + "e" * 10_000,
+        }
+        parsed = _parse_judgement(raw, index=0, seed="s")
+        self.assertNotIn(key, parsed.rationale)
+        self.assertTrue(parsed.rationale.startswith("edited [REDACTED:aws-access-key-id] "))
+        self.assertTrue(parsed.rationale.endswith(" ...[clipped]"))
+        self.assertLessEqual(len(parsed.rationale), MAX_RATIONALE_CHARS + len(" ...[clipped]"))
+
     def test_the_control_short_prose_is_kept_whole_and_a_non_string_as_nothing(self):
         self.assertEqual(
             self._judge("A is clearer about when to stop").rationale,
@@ -483,6 +506,29 @@ class AJudgeRationaleIsKeptMaskedAndClippedTests(unittest.TestCase):
         )
         self.assertEqual(self._judge(None).rationale, "")
         self.assertEqual(self._judge(["not", "prose"]).rationale, "")
+
+
+class AnOutcomeNamesItsChangeInTheGatesVocabularyTests(unittest.TestCase):
+    """``ReplayOutcome.change`` is the one word ``review`` prints per case; it
+    must agree with the predicates the gate counts."""
+
+    def _replay(self, baseline: Verdict, candidate: Verdict) -> ReplayOutcome:
+        return ReplayOutcome(
+            case=ReplayCase("t1", "c1", CASE_HOLDOUT), baseline=baseline, candidate=candidate
+        )
+
+    def test_each_word_matches_its_predicate_and_the_rest_is_unchanged(self):
+        ok, bad, unsure = Verdict.PASS, Verdict.FAIL, Verdict.INSUFFICIENT
+        self.assertEqual(self._replay(bad, ok).change, "fixed")
+        self.assertEqual(self._replay(ok, bad).change, "regressed")
+        self.assertEqual(self._replay(ok, unsure).change, "degraded")
+        self.assertEqual(self._replay(bad, unsure).change, "unresolved")
+        for pair in ((ok, ok), (bad, bad), (unsure, unsure), (unsure, ok), (unsure, bad)):
+            outcome = self._replay(*pair)
+            self.assertEqual(outcome.change, "unchanged", pair)
+            self.assertFalse(
+                outcome.fixed or outcome.regressed or outcome.degraded or outcome.unresolved, pair
+            )
 
 
 class EvidenceCallCountTests(unittest.TestCase):

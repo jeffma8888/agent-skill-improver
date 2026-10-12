@@ -30,7 +30,7 @@ import sys
 import traceback
 import unicodedata
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from . import __version__
 from .clock import SystemClock, day_key, iso
@@ -919,6 +919,53 @@ def cmd_set_aside(args: argparse.Namespace) -> int:
     return 0
 
 
+def _replayed_case_lines(outcomes: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The cases behind the gate's metrics, one line each, the tool's words only.
+
+    Every target case and every holdout whose verdict changed is named with
+    its verdict pair and change word; the holdouts that did not change carry
+    no decision information beyond their number, which is given, and stay in
+    the JSON. Ids are file- or model-derived and are kept to one line.
+    """
+    lines: list[str] = []
+    unchanged_holdouts = 0
+    for outcome in outcomes:
+        if outcome["kind"] == "holdout" and outcome["change"] == "unchanged":
+            unchanged_holdouts += 1
+            continue
+        lines.append(
+            one_line(
+                f"  - [{outcome['kind']}] {outcome['criterion_id']} (rubric {outcome['rubric_id']}) "
+                f"in conversation {outcome['conversation_id']}: {outcome['baseline']} -> "
+                f"{outcome['candidate']}  {outcome['change']}"
+            )
+        )
+    if unchanged_holdouts:
+        lines.append(f"  - {unchanged_holdouts} holdout case(s) unchanged (listed in --json)")
+    if not outcomes:
+        lines.append("  (none replayed)")
+    return lines
+
+
+def _judgement_lines(judgements: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Each blind judgement: the case and arm on one line, the judge's own
+    prose quoted beneath it, deeper than the improver's, so neither can stand
+    at column 0."""
+    lines: list[str] = []
+    for judgement in judgements:
+        lines.append(
+            one_line(
+                f"  - {judgement['criterion_id']} in conversation "
+                f"{judgement['conversation_id']}: prefers {judgement['preferred_arm']}"
+            )
+        )
+        if judgement["rationale"]:
+            lines += quoted(judgement["rationale"], prefix="      | ")
+    if not judgements:
+        lines.append("  (no judgement recorded)")
+    return lines
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from .app.promote import read_live_base_text, review_report
 
@@ -974,6 +1021,12 @@ def cmd_review(args: argparse.Namespace) -> int:
                 judge_candidate_preference_ratio=metrics.get("judge_candidate_preference_ratio"),
             )
         )
+    # Which cases the gate counted, and what the judge said about each: the
+    # evidence behind the metrics line, so the operator can read the evidence
+    # rather than the summary. Ids are kept to one line; the judge's prose is
+    # quoted like the improver's.
+    out += ["", "REPLAYED CASES (baseline -> candidate)", *_replayed_case_lines(report["outcomes"])]
+    out += ["", "JUDGE (blind, candidate vs baseline)", *_judgement_lines(report["judgements"])]
     out += ["", "HYPOTHESIS", *quoted(report["hypothesis"])]
     out += ["", "INTENDED CHANGE", *quoted(report["intended_change"])]
     out += ["", "RISKS"]

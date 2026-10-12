@@ -530,6 +530,8 @@ FORGED_SECTION = (
 # else at the margin would be something the model or a file name put there.
 REVIEW_HEADERS = {
     "",
+    "REPLAYED CASES (baseline -> candidate)",
+    "JUDGE (blind, candidate vs baseline)",
     "HYPOTHESIS",
     "INTENDED CHANGE",
     "RISKS",
@@ -564,6 +566,170 @@ def margin_lines_outside_their_section(lines: list[str]) -> list[str]:
             continue
         stray.append(line)
     return stray
+
+
+class ReviewShowsTheCasesBehindTheMetricsTests(unittest.TestCase):
+    """Measured before: ``review`` printed ``metrics: fixes=2 regressions=0
+    holdouts=14 judge_pref=1.0`` and nothing about which cases those were or
+    what the judge said, though both sat in the candidate's validation record.
+    The operator is told to read the evidence, not the summary; the evidence
+    behind the gate is now in the report, text and JSON: every replayed case
+    with its verdict pair and change word (unchanged holdouts collapsed to a
+    count in text, listed in JSON), and every blind judgement with its
+    rationale quoted like the improver's prose.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = TemporaryDirectory()
+        cls.base = Path(cls._tmp.name).resolve()
+        cls.cfg = ["--config", str(build_env(cls.base, dry_run=False, seed="cases-seed"))]
+        proc = run_cli([*cls.cfg, "daily", "--commit", "--day", "2026-04-03"])
+        assert proc.returncode == RC_OK, proc.stderr
+        cls.candidate_id = "CAND-2026-04-03-01-tdd"
+        cls.text = run_cli([*cls.cfg, "review", cls.candidate_id])
+        assert cls.text.returncode == RC_OK, cls.text.stderr
+        cls.lines = cls.text.stdout.split("\n")
+        as_json = run_cli([*cls.cfg, "--json", "review", cls.candidate_id])
+        assert as_json.returncode == RC_OK, as_json.stderr
+        cls.report = json.loads(as_json.stdout)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_the_json_lists_every_case_and_agrees_with_the_metrics(self):
+        metrics = self.report["gate"]["metrics"]
+        outcomes = self.report["outcomes"]
+        self.assertTrue(outcomes)
+        for outcome in outcomes:
+            self.assertEqual(
+                set(outcome),
+                {
+                    "kind",
+                    "rubric_id",
+                    "conversation_id",
+                    "criterion_id",
+                    "baseline",
+                    "candidate",
+                    "change",
+                },
+            )
+            self.assertIn(outcome["kind"], ("target", "holdout"))
+        self.assertEqual(
+            sum(1 for o in outcomes if o["kind"] == "holdout"), metrics["holdout_cases"]
+        )
+        self.assertEqual(sum(1 for o in outcomes if o["change"] == "fixed"), metrics["fixes"])
+        self.assertEqual(
+            sum(1 for o in outcomes if o["change"] == "regressed"), metrics["regressions"]
+        )
+        targets = [o for o in outcomes if o["kind"] == "target"]
+        self.assertEqual(
+            sorted((o["conversation_id"], o["criterion_id"]) for o in targets),
+            sorted(
+                (f["conversation_id"], f["criterion_id"]) for f in self.report["rubric_failures"]
+            ),
+            "the target cases are the failures the candidate claims to fix",
+        )
+        judgements = self.report["judgements"]
+        self.assertEqual(len(judgements), len(targets), "the blind judge rules on every target")
+        for judgement in judgements:
+            self.assertEqual(
+                set(judgement), {"conversation_id", "criterion_id", "preferred_arm", "rationale"}
+            )
+            self.assertIn(judgement["preferred_arm"], ("candidate", "baseline", "tie"))
+            self.assertTrue(judgement["rationale"])
+
+    def test_the_text_names_each_changed_case_and_counts_the_unchanged_holdouts(self):
+        start = self.lines.index("REPLAYED CASES (baseline -> candidate)")
+        end = self.lines.index("JUDGE (blind, candidate vs baseline)")
+        section = [ln for ln in self.lines[start + 1 : end] if ln]
+        targets = [o for o in self.report["outcomes"] if o["kind"] == "target"]
+        unchanged = [
+            o
+            for o in self.report["outcomes"]
+            if o["kind"] == "holdout" and o["change"] == "unchanged"
+        ]
+        self.assertTrue(targets and unchanged, self.report["outcomes"])
+        for outcome in targets:
+            self.assertIn(
+                f"  - [target] {outcome['criterion_id']} (rubric {outcome['rubric_id']}) "
+                f"in conversation {outcome['conversation_id']}: {outcome['baseline']} -> "
+                f"{outcome['candidate']}  {outcome['change']}",
+                section,
+            )
+        self.assertEqual(
+            section[-1], f"  - {len(unchanged)} holdout case(s) unchanged (listed in --json)"
+        )
+        self.assertEqual(len(section), len(targets) + 1, section)
+        judge_lines = [
+            ln for ln in self.lines[end + 1 :] if ln.startswith("  - ") and "prefers" in ln
+        ]
+        self.assertEqual(len(judge_lines), len(self.report["judgements"]))
+        for judgement in self.report["judgements"]:
+            self.assertIn(
+                f"  - {judgement['criterion_id']} in conversation "
+                f"{judgement['conversation_id']}: prefers {judgement['preferred_arm']}",
+                judge_lines,
+            )
+            self.assertIn(f"      | {judgement['rationale']}", self.lines)
+        self.assertEqual(margin_lines_outside_their_section(self.lines), [], self.text.stdout)
+
+
+class TheReplayedCaseLinesShowWhatChangedTests(unittest.TestCase):
+    """The text section's rule, checked on cases the fixture corpus cannot
+    produce without failing its own gate: a holdout that regressed or degraded
+    is printed in full; only the unchanged holdouts are collapsed."""
+
+    @staticmethod
+    def _case(kind, change, baseline, candidate, n):
+        return {
+            "kind": kind,
+            "rubric_id": "r",
+            "conversation_id": f"conv-{n}",
+            "criterion_id": "crit",
+            "baseline": baseline,
+            "candidate": candidate,
+            "change": change,
+        }
+
+    def test_changed_holdouts_are_named_and_unchanged_ones_counted(self):
+        from agent_skill_improver.cli import _replayed_case_lines
+
+        outcomes = [
+            self._case("target", "fixed", "FAIL", "PASS", 1),
+            self._case("target", "unresolved", "FAIL", "INSUFFICIENT", 2),
+            self._case("holdout", "unchanged", "PASS", "PASS", 3),
+            self._case("holdout", "regressed", "PASS", "FAIL", 4),
+            self._case("holdout", "degraded", "PASS", "INSUFFICIENT", 5),
+            self._case("holdout", "unchanged", "FAIL", "FAIL", 6),
+        ]
+        self.assertEqual(
+            _replayed_case_lines(outcomes),
+            [
+                "  - [target] crit (rubric r) in conversation conv-1: FAIL -> PASS  fixed",
+                "  - [target] crit (rubric r) in conversation conv-2: FAIL -> INSUFFICIENT  unresolved",
+                "  - [holdout] crit (rubric r) in conversation conv-4: PASS -> FAIL  regressed",
+                "  - [holdout] crit (rubric r) in conversation conv-5: PASS -> INSUFFICIENT  degraded",
+                "  - 2 holdout case(s) unchanged (listed in --json)",
+            ],
+        )
+        self.assertEqual(_replayed_case_lines([]), ["  (none replayed)"])
+
+    def test_an_id_with_a_line_break_stays_on_its_line(self):
+        from agent_skill_improver.cli import _judgement_lines, _replayed_case_lines
+
+        outcome = self._case("target", "fixed", "FAIL", "PASS", 1)
+        outcome["conversation_id"] = "conv\nDIFF"
+        self.assertEqual(len(_replayed_case_lines([outcome])), 1)
+        judgement = {
+            "conversation_id": "conv\nDIFF",
+            "criterion_id": "crit",
+            "preferred_arm": "tie",
+            "rationale": "",
+        }
+        self.assertEqual(len(_judgement_lines([judgement])), 1)
+        self.assertEqual(_judgement_lines([]), ["  (no judgement recorded)"])
 
 
 class ReviewProseCannotForgeTheReportTests(unittest.TestCase):
@@ -602,6 +768,9 @@ class ReviewProseCannotForgeTheReportTests(unittest.TestCase):
         record["intended_change"] = "Append a rule.\n" + FORGED_SECTION
         record["rollback"] = FORGED_SECTION
         record["risks"] = [FORGED_SECTION, "A second, one-line risk."]
+        # The judge's rationale is model prose too, now printed by review.
+        assert record["validation"]["judgements"], "the fake judge rules on every target case"
+        record["validation"]["judgements"][0]["rationale"] = FORGED_SECTION
         cls.record.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         cls.proc = run_cli([*cls.cfg, "review", cls.candidate_id])
         cls.lines = cls.proc.stdout.split("\n")
@@ -619,6 +788,9 @@ class ReviewProseCannotForgeTheReportTests(unittest.TestCase):
         self.assertIn("  - looks fine.", self.lines, "a risk opens with its bullet")
         self.assertIn("  - A second, one-line risk.", self.lines)
         self.assertEqual(self.lines.count("  | DIFF"), 4, "four forged fields, each quoted")
+        self.assertEqual(
+            self.lines.count("      | DIFF"), 1, "the judge's rationale, quoted deeper"
+        )
 
     def test_the_report_has_one_diff_one_apply_instruction_and_the_real_token(self):
         self.assertEqual(self.lines.count("DIFF"), 1, self.proc.stdout)
@@ -632,7 +804,7 @@ class ReviewProseCannotForgeTheReportTests(unittest.TestCase):
 
     def test_nothing_the_model_wrote_stands_at_column_zero(self):
         forged = [ln for ln in self.lines if "FORGEDTOKEN" in ln]
-        self.assertEqual(len(forged), 4, self.proc.stdout)
+        self.assertEqual(len(forged), 5, self.proc.stdout)
         for line in forged:
             self.assertTrue(line.startswith(" "), repr(line))
         self.assertEqual(margin_lines_outside_their_section(self.lines), [], self.proc.stdout)

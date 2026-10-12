@@ -41,6 +41,7 @@ from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
 from ..domain.integrity import verify_full_integrity
+from ..domain.validation import ValidationRecord
 from ..errors import (
     ApprovalRequired,
     AutomationRefused,
@@ -107,6 +108,10 @@ def review_report(
         )
     verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="review")
     gate = (candidate.validation or {}).get("gate") or {}
+    # The validation's per-case evidence, read through the same strict parser
+    # the integrity check just applied. The gate line says how many cases were
+    # fixed or regressed; these say which, and what the blind judge said.
+    validation = ValidationRecord.parse(candidate.validation)
     token = candidate.required_approval_token
     return {
         "candidate_id": candidate.id,
@@ -126,6 +131,27 @@ def review_report(
         "added_lines": candidate.patch.added_lines,
         "removed_lines": candidate.patch.removed_lines,
         "gate": gate,
+        "outcomes": [
+            {
+                "kind": o.case.kind,
+                "rubric_id": o.rubric_id,
+                "conversation_id": o.case.conversation_id,
+                "criterion_id": o.case.criterion_id,
+                "baseline": o.baseline.value,
+                "candidate": o.candidate.value,
+                "change": o.change,
+            }
+            for o in validation.outcomes
+        ],
+        "judgements": [
+            {
+                "conversation_id": j.case.conversation_id,
+                "criterion_id": j.case.criterion_id,
+                "preferred_arm": j.preferred_arm,
+                "rationale": j.rationale,
+            }
+            for j in validation.judgements
+        ],
         "notes": list(candidate.notes),
         "approval_token": token,
         "apply_command": shlex.join(

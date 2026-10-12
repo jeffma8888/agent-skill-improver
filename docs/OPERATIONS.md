@@ -330,7 +330,10 @@ reads them all back. A file under those directories that does not read as a
 record is listed as unreadable, by name and with the reason, never dropped.
 
 `review` prints the failing cases with their evidence, the diff, the validation
-result (fixes, regressions, holdouts, judge preference), and the approval token.
+result (fixes, regressions, holdouts, judge preference) with the cases behind
+it (every replayed case as baseline -> candidate with one word for the change,
+unchanged holdouts collapsed to a count in text and listed in `--json`, and the
+blind judge's preference and rationale per target case), and the approval token.
 Read the *evidence*, not the summary. The question to ask is not "does this edit
 look reasonable" but "does the cited turn actually show the problem this edit
 claims to fix".

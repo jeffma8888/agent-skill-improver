@@ -146,6 +146,14 @@ class ReplayOutcome:
     def unresolved(self) -> bool:
         return self.baseline is Verdict.FAIL and self.candidate is Verdict.INSUFFICIENT
 
+    @property
+    def change(self) -> str:
+        """One word for what the replay showed: the gate's own vocabulary."""
+        for label in ("fixed", "regressed", "degraded", "unresolved"):
+            if getattr(self, label):
+                return label
+        return "unchanged"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "case": self.case.to_dict(),
@@ -549,7 +557,9 @@ def _parse_judgement(raw: Any, *, index: int, seed: str) -> Judgement:
             f"{label}.preferred_label must be 'A', 'B' or 'tie', got {preferred_label!r}"
         )
     preferred_arm = _expect_str(raw, "preferred_arm", label=label)
-    rationale = _expect_str(raw, "rationale", label=label)
+    # Kept masked and clipped on the way in (parse_judgement); the same on the
+    # way out, so a record edited on disk cannot make review print more.
+    rationale = kept_prose(_expect_str(raw, "rationale", label=label), limit=MAX_RATIONALE_CHARS)
     if preferred_label == "tie":
         expected_arm = "tie"
     else:
