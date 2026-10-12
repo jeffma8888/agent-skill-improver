@@ -43,6 +43,7 @@ from .domain.candidate import (
     one_line_label,
     validate_run_day,
 )
+from .domain.skills import BOM
 from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
@@ -177,7 +178,10 @@ def escape_for_terminal(text: str) -> str:
         if ch in _SHOWN_AS_IS:
             out.append(ch)
         elif (
-            ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) in ("Cc", "Cs")
+            ch in BIDI_CONTROLS
+            or ch in HIDDEN_CONTROLS
+            or ch == BOM
+            or unicodedata.category(ch) in ("Cc", "Cs")
         ):
             code = ord(ch)
             if ch == "\r":
@@ -207,7 +211,10 @@ def escape_json_for_terminal(text: str) -> str:
     out: list[str] = []
     for ch in text:
         if ch != "\n" and (
-            ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) in ("Cc", "Cs")
+            ch in BIDI_CONTROLS
+            or ch in HIDDEN_CONTROLS
+            or ch == BOM
+            or unicodedata.category(ch) in ("Cc", "Cs")
         ):
             code = ord(ch)
             if code >= 0x10000:

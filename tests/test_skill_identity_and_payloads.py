@@ -132,6 +132,42 @@ class FrontmatterTests(unittest.TestCase):
         self.assertEqual(fields.get("name"), "example")
         self.assertEqual(warnings, [])
 
+    def test_a_leading_byte_order_mark_is_read_past_and_named_not_called_unloadable(self):
+        # Measured before: the mark made the first line differ from '---', the
+        # document was reported as one that "will never load", and (through the
+        # same parser) every replacement that kept the mark was quarantined.
+        fields, has_open, warnings = parse_frontmatter("\ufeff" + GOOD)
+        self.assertTrue(has_open)
+        self.assertEqual(fields.get("name"), "example")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("byte-order mark (U+FEFF)", warnings[0])
+        self.assertIn("shown as \\ufeff", warnings[0])
+        self.assertNotIn("never load", warnings[0])
+
+    def test_a_byte_order_mark_document_is_inventoried_as_one_that_loads(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            write(
+                root / "marked" / SKILL_FILENAME,
+                "\ufeff" + GOOD.replace("name: example", "name: marked"),
+            )
+            store = FilesystemSkillStore(
+                [
+                    SkillRoot(
+                        id="r",
+                        path=root,
+                        precedence=1,
+                        canonical=True,
+                        editable=True,
+                        kind="custom",
+                    )
+                ]
+            )
+            snap = next(s for s in store.snapshots() if s.skill_id == "marked")
+            self.assertTrue(snap.loads, snap.warnings)
+            self.assertEqual(snap.frontmatter_name, "marked")
+            self.assertTrue(any("U+FEFF" in w for w in snap.warnings), snap.warnings)
+
     def test_a_missing_opening_delimiter_is_reported_not_ignored(self):
         fields, has_open, warnings = parse_frontmatter(NO_OPENING_DELIMITER)
         self.assertFalse(has_open)

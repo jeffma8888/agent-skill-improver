@@ -1772,6 +1772,64 @@ class AValueThatCannotBeUsedIsAUsageErrorBeforeTheRunTests(unittest.TestCase):
         self.assertEqual(len(payload["threads"]), 1)
 
 
+class ADocumentWithAByteOrderMarkIsImprovableTests(unittest.TestCase):
+    """Measured before: with the canonical and mirror ``tdd`` both beginning
+    with a UTF-8 byte-order mark, ``skills`` reported ``tdd`` as a document that
+    "will never load", ``daily --commit`` scored every conversation and then
+    quarantined the proposal as having no opening delimiter, and no candidate
+    was ever produced for the skill."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.base = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = [
+            "--config",
+            str(build_env(self.base, use_subprocess_model=True, dry_run=False, seed="bom")),
+        ]
+        self.skill = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        marked = b"\xef\xbb\xbf" + self.skill.read_bytes()
+        self.skill.write_bytes(marked)
+        (self.base / "skills-mirror" / "tdd" / "SKILL.md").write_bytes(marked)
+
+    def test_the_skill_loads_is_proposed_against_and_keeps_its_mark_through_apply(self):
+        skills = run_cli([*self.cfg, "--json", "skills"])
+        self.assertEqual(skills.returncode, RC_OK, skills.stderr)
+        group = next(g for g in json.loads(skills.stdout)["groups"] if g["skill_id"] == "tdd")
+        self.assertTrue(group["canonical"]["loads"])
+        self.assertTrue(any("U+FEFF" in w for w in group["canonical"]["warnings"]))
+        text = run_cli([*self.cfg, "skills"])
+        tdd_lines = [ln for ln in text.stdout.split("\n") if ln.startswith("tdd ")]
+        self.assertEqual(len(tdd_lines), 1, text.stdout)
+        self.assertNotIn("DOES NOT LOAD", tdd_lines[0])
+        self.assertIn("byte-order mark (U+FEFF)", text.stdout)
+
+        daily = run_cli([*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-02"])
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        payload = json.loads(daily.stdout)
+        validated = [c for c in payload["candidates"] if c["status"] == "validated"]
+        self.assertEqual(len(validated), 1, payload.get("skills"))
+        self.assertEqual(payload["skills"], {}, "nothing quarantined")
+
+        review = json.loads(
+            run_cli([*self.cfg, "--json", "review", validated[0]["candidate_id"]]).stdout
+        )
+        applied = run_cli(
+            [
+                *self.cfg,
+                "apply",
+                validated[0]["candidate_id"],
+                "--approve",
+                review["approval_token"],
+                "--i-reviewed-this",
+            ]
+        )
+        self.assertEqual(applied.returncode, RC_OK, applied.stderr)
+        after = self.skill.read_bytes()
+        self.assertTrue(after.startswith(b"\xef\xbb\xbf---\n"), after[:16])
+        self.assertIn(FIX_MARKER.encode(), after)
+
+
 class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
     """The templates drop four paths into two foreign syntaxes: a crontab line,
     which the shell splits on spaces and cron turns ``%`` into a newline on, and

@@ -810,6 +810,14 @@ class TerminalOutputIsEscaped(unittest.TestCase):
         self.assertEqual(cli.escape_for_terminal(self.HOSTILE), self.SHOWN)
         self.assertEqual(cli.escape_for_terminal("\U000e0041"), "\\U000e0041")
 
+    def test_a_byte_order_mark_is_shown_so_a_first_line_diff_is_readable(self):
+        # A diff that adds or drops the mark has a '-' and a '+' line that look
+        # identical; spelled as its escape, the reviewer sees what moved.
+        self.assertEqual(cli.escape_for_terminal("-\ufeff---\n+---"), "-\\ufeff---\n+---")
+        self.assertEqual(
+            cli.escape_json_for_terminal('{"diff": "-\ufeff---"}'), '{"diff": "-\\ufeff---"}'
+        )
+
     def test_a_lone_surrogate_is_shown_rather_than_crashing_the_write(self):
         """A file name that is not valid UTF-8 reaches Python as a lone
         surrogate (``surrogateescape``). A strict UTF-8 stdout refuses to

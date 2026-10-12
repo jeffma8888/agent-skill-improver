@@ -28,7 +28,7 @@ from ..domain.conversation import NormalizedConversation
 from ..domain.failure import FailureCase, isolate_failures, passing_cases
 from ..domain.rubric import Rubric
 from ..domain.scoring import ScoreCard, parse_scorecard
-from ..domain.skills import SkillGroup, parse_frontmatter
+from ..domain.skills import BOM, SkillGroup, parse_frontmatter
 from ..errors import CredentialInSkill, MalformedModelOutput, RecordDefect, SelfMutationRefused
 from ..hashing import sha256_text
 from ..ports import ModelRunner
@@ -139,6 +139,14 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
         )
     if not new_fields.get("name"):
         problems.append("replacement frontmatter has no 'name' field")
+    if new_text.startswith(BOM) and not base_text.startswith(BOM):
+        # Dropping a mark the base has is a visible first-line change, shown as
+        # \ufeff in the diff; adding one the base lacks is an invisible byte
+        # the model wrote, and nothing it fixes.
+        problems.append(
+            "replacement begins with a UTF-8 byte-order mark (U+FEFF) the base does not have; "
+            "an invisible byte the model added is not an improvement"
+        )
     if base_open and base_fields.get("name") and new_fields.get("name") != base_fields.get("name"):
         problems.append(
             f"replacement changes the frontmatter name from {base_fields.get('name')!r} to "

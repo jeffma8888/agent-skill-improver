@@ -57,6 +57,30 @@ class ExistingStructuralRulesTests(unittest.TestCase):
         self.assertTrue(any("cannot be reviewed" in p for p in problems), problems)
 
 
+class ByteOrderMarkTests(unittest.TestCase):
+    """A UTF-8 byte-order mark before the frontmatter is read past by this
+    tool's parser. Measured before: a base carrying one was
+    inventoried as unloadable and every replacement that kept it was
+    quarantined as having no opening delimiter, so the skill could never be
+    improved and the model calls were spent for nothing."""
+
+    def test_a_mark_kept_from_the_base_is_not_a_defect(self):
+        base = "\ufeff" + BASE
+        new = base + "- Ask before anything destructive.\n"
+        self.assertEqual(skill_text_defects(new, base_text=base, skill_id="example"), [])
+
+    def test_a_mark_the_model_added_is_a_defect_by_name(self):
+        new = "\ufeff" + BASE + "- Ask before anything destructive.\n"
+        problems = skill_text_defects(new, base_text=BASE, skill_id="example")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("byte-order mark (U+FEFF) the base does not have", problems[0])
+
+    def test_dropping_the_base_mark_is_allowed_as_a_visible_first_line_change(self):
+        base = "\ufeff" + BASE
+        new = BASE + "- Ask before anything destructive.\n"
+        self.assertEqual(skill_text_defects(new, base_text=base, skill_id="example"), [])
+
+
 class CredentialInReplacementTests(unittest.TestCase):
     def test_a_token_written_into_the_replacement_is_a_defect(self):
         token = "g" + "hp_" + "B" * 36

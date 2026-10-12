@@ -11,7 +11,13 @@ asi --config config/example.config.toml doctor
 reachability, model roles, skill roots present versus configured (a root whose path
 holds something other than a directory, say a regular file or a dangling link, is
 named as that in a `WARN` rather than reported as absent), how many skills
-were found, how many **do not load**, how many carry executable payloads (a
+were found, how many **do not load** (a document that begins with a UTF-8
+byte-order mark is not one of them: this tool's parser reads past the mark, and
+`skills` names it in a warning that says removing it is the safe fix, since
+whether your skill loader reads past it too is not checked; measured before,
+such a document was reported as one that would never load and every proposal
+against it was quarantined for the same reason), how many carry executable
+payloads (a
 `WARN` names any skill with a directory the payload inventory could not list,
 since its count is then a floor), how
 many paths discovery **passed over** (each one a `WARN` line naming

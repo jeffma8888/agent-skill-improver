@@ -468,6 +468,10 @@ def classify_target(groups: Sequence[SkillGroup], path: Path) -> tuple[str, Skil
     return "unknown", None
 
 
+#: The UTF-8 byte-order mark as a character, where an editor may leave it.
+BOM = "\ufeff"
+
+
 def parse_frontmatter(text: str) -> tuple[dict[str, str], bool, list[str]]:
     """Parse the leading ``---`` block of a SKILL.md.
 
@@ -476,6 +480,20 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], bool, list[str]]:
     pulling in a YAML dependency to read four keys is not worth it.
     """
     warnings: list[str] = []
+    if text.startswith(BOM):
+        # Editors on some platforms write the mark. This parser reads past it;
+        # whether a given skill loader does the same is that loader's business,
+        # which the warning says, with removing the mark as the safe fix.
+        # Measured before: the mark made ``lines[0]`` differ from ``---``, the
+        # document was reported as one that "will never load", and every
+        # replacement that kept the mark was quarantined for the same reason.
+        text = text[len(BOM) :]
+        warnings.append(
+            "begins with a UTF-8 byte-order mark (U+FEFF) before the frontmatter: read past "
+            "here, but whether your skill loader does the same is not checked, so removing the "
+            "mark is the safe fix; it is content to this tool, shown as \\ufeff in listings "
+            "and diffs"
+        )
     lines = text.replace("\r\n", "\n").split("\n")
     if not lines or lines[0].strip() != "---":
         warnings.append(
