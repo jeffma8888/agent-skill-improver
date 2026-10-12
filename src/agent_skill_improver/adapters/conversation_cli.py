@@ -178,14 +178,40 @@ def parse_discovery(text: str) -> tuple[list[DiscoveredThread], list[tuple[str, 
     date = ""
     workspace = ""
     number = ""  # the listing's own printed number, the one an operator greps for
+    header_open = False  # a header has been read and no Thread: line has spent it
     seen_thread_lines = 0
+
+    def spend_header() -> None:
+        nonlocal title, date, number, workspace, header_open
+        title = ""
+        date = ""
+        number = ""
+        workspace = ""
+        header_open = False
+
+    def header_without_thread() -> None:
+        # A listed conversation whose entry carries no Thread: line this parser
+        # can read. Measured before: it vanished from the page with nothing
+        # recorded, which is the same silence the unsafe-id case had.
+        passed_over.append(
+            (
+                f"listing entry {number} ({_short(title, 40)})",
+                "has no Thread: line this parser could read, so it was not treated as a "
+                "thread and nothing was run for it",
+            )
+        )
+        spend_header()
+
     for line in text.splitlines():
         header = _HEADER_LINE.match(line)
         if header:
+            if header_open:
+                header_without_thread()
             title = header.group("title")
             date = header.group("date")
             number = header.group("number")
             workspace = ""
+            header_open = True
             continue
         ws = _WORKSPACE_LINE.match(line)
         if ws and not line.strip().startswith("Thread:"):
@@ -202,10 +228,7 @@ def parse_discovery(text: str) -> tuple[list[DiscoveredThread], list[tuple[str, 
                 # under the listing's printed number when a header gave one.
                 ordinal = number or f"#{seen_thread_lines}"
                 passed_over.append(_unsafe_id_entry(ordinal, thread.group("id"), title))
-                title = ""
-                date = ""
-                number = ""
-                workspace = ""
+                spend_header()
                 continue
             found.append(
                 DiscoveredThread(
@@ -215,10 +238,24 @@ def parse_discovery(text: str) -> tuple[list[DiscoveredThread], list[tuple[str, 
                     updated_date=date,
                 )
             )
-            title = ""
-            date = ""
-            number = ""
-            workspace = ""
+            spend_header()
+            continue
+        if line.strip().startswith("Thread:"):
+            # A Thread: line the pattern could not read: blank after the colon,
+            # or an id beginning with a parenthesis. Not a thread, and named.
+            seen_thread_lines += 1
+            rest = line.strip()[len("Thread:") :].strip()
+            ordinal = number or f"#{seen_thread_lines}"
+            passed_over.append(
+                (
+                    f"listing entry {ordinal} ({_short(title, 40)}) with id {_short(rest, 60)}",
+                    "has a Thread: line this parser could not read as an id, so it was not "
+                    "treated as a thread and nothing was run for it",
+                )
+            )
+            spend_header()
+    if header_open:
+        header_without_thread()
     # De-duplicate while preserving discovery order.
     seen: set[str] = set()
     unique: list[DiscoveredThread] = []

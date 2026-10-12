@@ -559,6 +559,95 @@ class ThreadIdIsAnArgumentNotAnOptionTests(unittest.TestCase):
         self.assertFalse(is_safe_thread_id("a\tb"))
 
 
+class AListedEntryWithoutAReadableThreadLineIsNamedTests(unittest.TestCase):
+    """Measured before: a header followed by no Thread: line, a Thread: line
+    blank after the colon and one whose id began with a parenthesis each made
+    the listed conversation vanish from the page with ``passed_over`` empty,
+    the same silence cycle 77 removed for unsafe ids.
+    """
+
+    LISTING = (
+        '1. "headless" (2026-01-02)\n'
+        '2. "blank id" (2026-01-02)\n'
+        "   Thread:\n"
+        '3. "paren id" (2026-01-02)\n'
+        "   Thread: (odd)\n"
+        '4. "fine" (2026-01-02)\n'
+        "   Workspace: /w\n"
+        "   Thread: 1700000000102-1\n"
+        '5. "last and headless" (2026-01-02)\n'
+    )
+
+    def test_each_entry_the_parser_could_not_take_is_named_under_its_number(self):
+        threads, passed_over = parse_discovery(self.LISTING)
+        self.assertEqual(
+            [(t.thread_id, t.title, t.workspace) for t in threads],
+            [("1700000000102-1", "fine", "/w")],
+            "the readable entry is unchanged, title and workspace intact",
+        )
+        self.assertEqual(
+            [entry for entry, _ in passed_over],
+            [
+                "listing entry 1 ('headless')",
+                "listing entry 2 ('blank id') with id ''",
+                "listing entry 3 ('paren id') with id '(odd)'",
+                "listing entry 5 ('last and headless')",
+            ],
+        )
+        reasons = [reason for _, reason in passed_over]
+        self.assertTrue(reasons[0].startswith("has no Thread: line this parser could read"))
+        self.assertTrue(reasons[1].startswith("has a Thread: line this parser could not read"))
+        self.assertTrue(reasons[2].startswith("has a Thread: line this parser could not read"))
+        self.assertTrue(reasons[3].startswith("has no Thread: line this parser could read"))
+        for reason in reasons:
+            self.assertIn("nothing was run for it", reason)
+
+    def test_a_clean_listing_passes_nothing_over(self):
+        clean = (
+            '1. "a" (2026-01-02)\n'
+            "   Thread: 1700000000101-1\n"
+            '2. "b" (2026-01-02)\n'
+            "   Workspace: /w\n"
+            "   Thread: 1700000000102-1 (conversation://thread/1700000000102-1)\n"
+        )
+        threads, passed_over = parse_discovery(clean)
+        self.assertEqual(len(threads), 2)
+        self.assertEqual(passed_over, [])
+        self.assertEqual(parse_discovery("")[1], [])
+        self.assertEqual(parse_discovery("no listing at all\n")[1], [])
+
+    def test_a_thread_line_with_no_header_is_still_a_thread(self):
+        # Pre-existing behaviour, kept: the id is what matters; a missing header
+        # costs the title, not the thread.
+        threads, passed_over = parse_discovery("   Thread: 1700000000103-1\n")
+        self.assertEqual([(t.thread_id, t.title) for t in threads], [("1700000000103-1", "")])
+        self.assertEqual(passed_over, [])
+
+    def test_a_workspace_line_does_not_stand_in_for_a_thread_line(self):
+        # A header followed only by Workspace: is still headless; the next
+        # header must find it unspent and name it.
+        listing = (
+            '1. "x" (2026-01-02)\n'
+            "   Workspace: /w\n"
+            '2. "y" (2026-01-02)\n'
+            "   Thread: 1700000000102-1\n"
+        )
+        threads, passed_over = parse_discovery(listing)
+        self.assertEqual([(t.thread_id, t.title) for t in threads], [("1700000000102-1", "y")])
+        self.assertEqual([entry for entry, _ in passed_over], ["listing entry 1 ('x')"])
+        self.assertTrue(passed_over[0][1].startswith("has no Thread: line this parser could read"))
+
+    def test_an_unreadable_thread_line_still_counts_toward_the_hash_position(self):
+        # With no header to number them, consecutive unreadable Thread lines are
+        # numbered by position among Thread lines, so the second is #2 not #1.
+        threads, passed_over = parse_discovery("   Thread: (odd)\n   Thread: -rf\n")
+        self.assertEqual(threads, [])
+        self.assertEqual(
+            [entry for entry, _ in passed_over],
+            ["listing entry #1 ('') with id '(odd)'", "listing entry #2 ('') with id '-rf'"],
+        )
+
+
 class ExplicitLimitTests(unittest.TestCase):
     """The limit is always sent. Relying on an interface default is the bug."""
 

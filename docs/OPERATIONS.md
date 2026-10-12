@@ -205,9 +205,11 @@ an object, an object with no thread or a thread without an id; `doctor` lists th
 same entries as `WARN` lines under the source. For the command-line source: a
 listed "Thread:" line whose id is option-shaped, empty, over-long or carries
 whitespace or control characters (shown as a cut-short repr, since a listing is
-derived from conversation content and can carry a forged line); such an id is
-never placed on a command line, and `doctor` cannot list these without running
-discovery, so the receipt is their only surface. Each is in no count on the
+derived from conversation content and can carry a forged line), a listed entry
+with no "Thread:" line the parser could read, or one whose "Thread:" line is
+blank or not an id; an unsafe id is never placed on a command line, and `doctor`
+cannot list these without running discovery, so the receipt is their only
+surface. Each is in no count on the
 receipt and a note names them. `is_total` is unaffected: the window was read
 whole; part of it did not parse.
 
