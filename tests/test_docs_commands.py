@@ -533,6 +533,21 @@ class DocumentedRefusalsExist(unittest.TestCase):
         self.assertEqual(names, {"GateFailed", "StateUnreadable", "LockHeld"})
 
 
+class DocumentedQuoteBoundsAreTheCode(unittest.TestCase):
+    """The privacy doc tells a reader how much of a child's stderr a refusal
+    record can carry. That number is the constant both adapters quote with."""
+
+    PRIVACY = REPO / "docs" / "PRIVACY_AND_THREAT_MODEL.md"
+
+    def test_the_stderr_quote_bound_in_the_privacy_doc_is_the_shared_constant(self) -> None:
+        from agent_skill_improver.adapters.bounded_process import QUOTED_TAIL_CHARS
+
+        text = self.PRIVACY.read_text(encoding="utf-8")
+        self.assertIn(f"the last {QUOTED_TAIL_CHARS} characters of a model role's stderr", text)
+        for other in re.findall(r"last (\d+) characters", text):
+            self.assertEqual(int(other), QUOTED_TAIL_CHARS, "a second, different bound is stated")
+
+
 class ReadmeCommandTableIsTwoSided(unittest.TestCase):
     """The README's command table is the first place a reader learns which
     commands write anything. Its rows are checked both ways against the parser,

@@ -58,7 +58,7 @@ from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
 from ..errors import MalformedModelOutput, TransientFailure
 from ..jsonio import loads_untrusted
-from .bounded_process import OutputOverflow, RunTimedOut, run_bounded
+from .bounded_process import QUOTED_TAIL_CHARS, OutputOverflow, RunTimedOut, run_bounded
 
 #: Mode 0700 on every per-call working directory, set explicitly rather than left
 #: to the umask: a permissive umask is exactly the condition under which private
@@ -231,7 +231,7 @@ class CommandModelRunner:
             # later walks the state tree.
             shutil.rmtree(workdir, ignore_errors=True)
         if result.returncode != 0:
-            tail = result.stderr_tail.decode("utf-8", errors="replace").strip()[-500:]
+            tail = result.stderr_tail.decode("utf-8", errors="replace").strip()[-QUOTED_TAIL_CHARS:]
             raise TransientFailure(
                 f"role {role!r} exited {result.returncode}: {tail or '<no stderr>'}"
             )

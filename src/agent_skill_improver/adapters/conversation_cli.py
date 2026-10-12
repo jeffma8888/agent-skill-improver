@@ -52,7 +52,7 @@ from ..domain.discovery import (
 )
 from ..errors import RecordDefect, SourceUnavailable
 from ..jsonio import loads_untrusted
-from .bounded_process import OutputOverflow, RunTimedOut, run_bounded
+from .bounded_process import QUOTED_TAIL_CHARS, OutputOverflow, RunTimedOut, run_bounded
 
 __all__ = [
     "ConversationCliSource",
@@ -323,7 +323,7 @@ class ConversationCliSource:
             # only when stderr said nothing, blank lines included.
             stderr = result.stderr_tail.decode("utf-8", errors="replace").strip()
             stdout = result.stdout.decode("utf-8", errors="replace").strip()
-            tail = (stderr or stdout)[-500:]
+            tail = (stderr or stdout)[-QUOTED_TAIL_CHARS:]
             raise SourceUnavailable(f"{shown} exited {result.returncode}: {tail or '<no output>'}")
         try:
             return result.stdout.decode("utf-8")

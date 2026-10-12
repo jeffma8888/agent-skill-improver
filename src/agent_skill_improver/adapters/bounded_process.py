@@ -35,6 +35,12 @@ from typing import Mapping, Sequence
 #: How much of the child's stderr is kept for the failure message.
 STDERR_TAIL_BYTES = 4096
 
+#: How many characters of that tail a failure message quotes. The two adapters
+#: that quote a child's stderr share this number so a refusal record never
+#: carries more of a child's output than the operator docs say it does. It must
+#: not exceed ``STDERR_TAIL_BYTES``; the test suite holds the two in order.
+QUOTED_TAIL_CHARS = 500
+
 #: Pipe read size. Small enough that the overshoot past ``max_output_bytes``
 #: before the kill is at most one chunk.
 READ_CHUNK = 64 * 1024

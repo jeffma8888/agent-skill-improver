@@ -554,6 +554,53 @@ class OutputCapIsEnforcedWhileReadingTests(unittest.TestCase):
             runner.run(role="scorer", system="s", user="u", response_schema="x"), {"ok": True}
         )
 
+    def test_a_role_that_exits_non_zero_is_a_transient_failure_quoting_a_bounded_stderr_tail(
+        self,
+    ):
+        """The role, not the record, failed, so the pass may retry it later. The
+        operator gets the exit code and the END of stderr, at most
+        ``QUOTED_TAIL_CHARS`` of it, and never the partial stdout."""
+        from agent_skill_improver.adapters.bounded_process import (
+            QUOTED_TAIL_CHARS,
+            STDERR_TAIL_BYTES,
+        )
+
+        self.assertLessEqual(QUOTED_TAIL_CHARS, STDERR_TAIL_BYTES)
+        program = (
+            "import sys\n"
+            "sys.stdout.write('partial stdout')\n"
+            "sys.stderr.write('E' * 5000 + ' THE-REASON')\n"
+            "sys.exit(9)\n"
+        )
+        cmd = RoleCommand(
+            role="scorer", argv=(sys.executable, "-c", program), env={}, model_label="failing"
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        with self.assertRaises(TransientFailure) as ctx:
+            runner.run(role="scorer", system="s", user="u", response_schema="x")
+        message = str(ctx.exception)
+        self.assertIn("exited 9: ", message)
+        quoted = message.split("exited 9: ", 1)[1]
+        self.assertTrue(quoted.endswith("THE-REASON"), quoted[-40:])
+        self.assertEqual(len(quoted), QUOTED_TAIL_CHARS)
+        self.assertNotIn("partial stdout", quoted)
+
+    def test_a_role_that_exits_non_zero_in_silence_says_so(self):
+        cmd = RoleCommand(
+            role="scorer",
+            argv=(sys.executable, "-c", "import sys; sys.exit(4)"),
+            env={},
+            model_label="silent",
+        )
+        runner = CommandModelRunner(
+            {"scorer": cmd}, isolation=NoSandbox(), parent_env=dict(os.environ)
+        )
+        with self.assertRaises(TransientFailure) as ctx:
+            runner.run(role="scorer", system="s", user="u", response_schema="x")
+        self.assertIn("exited 4: <no stderr>", str(ctx.exception))
+
     def test_output_that_is_not_utf8_is_a_malformed_output_not_a_crash(self):
         cmd = RoleCommand(
             role="scorer",
