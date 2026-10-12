@@ -149,10 +149,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     broken = [s for s in snapshots if not s.loads]
     state = build_state(config)
 
+    # The layout is judged before anything touches the state tree, the runner's
+    # sandbox scratch directory included: a state root that is a symlink is a
+    # finding for this report, not a refusal that pre-empts it. With a bad
+    # layout the runner gets no scratch root, so nothing is created through
+    # the link on the way to the verdict.
+    layout_problems: list[str] = []
+    state_present = config.state_dir.exists() or config.state_dir.is_symlink()
+    if state_present:
+        layout_problems = state.layout_problems()
+
     # The isolation decision comes BEFORE anything touches the source, so
     # `doctor` on a host with no sandbox mechanism reports the refusal rather
     # than a preflight result that implies the run could proceed.
-    runner = build_runner(config, state)
+    runner = build_runner(config, None if layout_problems else state)
     isolation = decide_isolation(
         source_kind=config.source.kind,
         runner_isolation=runner.isolation(),
@@ -176,10 +186,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # someone else's tree as private.
     permissions_repaired: list[str] = []
     permission_problems: list[str] = []
-    layout_problems: list[str] = []
     left_alone: list[str] = []
-    if config.state_dir.exists() or config.state_dir.is_symlink():
-        layout_problems = state.layout_problems()
+    if state_present:
         if layout_problems:
             problems.append(
                 f"the state layout under {config.state_dir} is not confined to it: "

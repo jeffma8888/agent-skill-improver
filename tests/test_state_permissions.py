@@ -660,6 +660,39 @@ class DoctorReportsAnUnsafeStateLayoutTests(unittest.TestCase):
             self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
             self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
 
+    def test_a_configured_state_root_that_is_a_symlink_is_refused_through_the_cli(self):
+        """The store's root check is worthless if config resolves the link away
+        before the store sees the path. Measured through the real commands: the
+        configured ``state`` is a link to a 0755 directory with a file in it;
+        ``doctor`` must report the layout and ``daily`` must refuse, and the
+        target must keep its mode, its contents and nothing else."""
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            config = build_env(base, dry_run=True)
+            outside = base / "outside"
+            outside.mkdir()
+            os.chmod(outside, 0o755)
+            (outside / "keep.txt").write_text("keep me", encoding="utf-8")
+            os.chmod(outside / "keep.txt", 0o644)
+            (base / "state").symlink_to(outside)
+
+            doctor = run_cli(["--config", str(config), "--json", "doctor"])
+            daily = run_cli(["--config", str(config), "daily"])
+            listing = run_cli(["--config", str(config), "candidates"])
+
+            self.assertEqual(doctor.returncode, 1, doctor.stdout + doctor.stderr)
+            payload = json.loads(doctor.stdout)
+            self.assertEqual(payload["state_dir"], str(base / "state"), "the link, as configured")
+            unsafe = payload["state_permissions"]["unsafe_layout"]
+            self.assertEqual(len(unsafe), 1, unsafe)
+            self.assertIn("is a symlink to", unsafe[0])
+            self.assertEqual(daily.returncode, 3, daily.stdout + daily.stderr)
+            self.assertIn("SafetyRefusal", daily.stderr)
+            self.assertEqual(listing.returncode, 3, listing.stdout + listing.stderr)
+            self.assertEqual(oct(mode_of(outside)), oct(0o755))
+            self.assertEqual(oct(mode_of(outside / "keep.txt")), oct(0o644))
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
+
     def test_doctor_names_a_link_inside_a_confined_tree_as_a_warning_not_a_problem(self):
         """A link below the mandatory layout redirects nothing this tool writes
         (a write replaces it, a read refuses it), so the tree is still usable.

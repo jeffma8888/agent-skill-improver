@@ -67,6 +67,23 @@ def _expand(raw: str, *, base: Path) -> Path:
     return path if path.is_absolute() else (base / path)
 
 
+def _state_dir_as_written(path: Path) -> Path:
+    """The configured state directory with its ancestors resolved and its last
+    component left exactly as written.
+
+    ``Path.resolve()`` on the whole path followed a link *at* the state directory
+    and handed ``StateStore`` the link's target, so the store's own refusal of a
+    symlinked root never fired: ``daily`` built the private tree inside whatever
+    the link pointed at and chmodded that directory to owner-only. The ancestors
+    are the operator's filesystem layout (``/tmp`` is a link on macOS) and are
+    resolved as before; the leaf is the thing a precreated link would replace,
+    and the store judges it with ``lstat``.
+    """
+    if path.name in ("", ".", ".."):
+        return path.resolve()
+    return path.parent.resolve() / path.name
+
+
 def _require_table(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = raw.get(key, {})
     if not isinstance(value, Mapping):
@@ -361,9 +378,9 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
     over = dict(overrides or {})
     run_table = _require_table(raw, "run")
     base_dir = _base_dir_for(config_path, run_table)
-    state_dir = _expand(
-        _str_field(run_table, "state_dir", "state", where="run"), base=base_dir
-    ).resolve()
+    state_dir = _state_dir_as_written(
+        _expand(_str_field(run_table, "state_dir", "state", where="run"), base=base_dir)
+    )
     dry_run = _bool_field(run_table, "dry_run", True, where="run")
     if "dry_run" in over and over["dry_run"] is not None:
         dry_run = bool(over["dry_run"])

@@ -151,7 +151,11 @@ directory, measured with `lstat`, and a directory whose name is computed at
 runtime must be a real direct child of a mandatory directory that has already been
 verified. `asi doctor` reports such a layout as a problem and repairs nothing, so
 the mode and the contents of whatever the link pointed at are left exactly as they
-were.
+were. Configuration loading keeps this check honest: `[run].state_dir` has its
+ancestors resolved (they are the operator's own filesystem layout) but its last
+component is kept exactly as written (a path ending in `.` or `..` names no leaf of its own and is resolved whole), because resolving the whole path would
+follow a link planted at the state directory and hand the store the target as if
+it had been configured.
 
 ## Prompt injection
 
