@@ -41,6 +41,11 @@ STDERR_TAIL_BYTES = 4096
 #: not exceed ``STDERR_TAIL_BYTES``; the test suite holds the two in order.
 QUOTED_TAIL_CHARS = 500
 
+#: How many characters of a role's unparseable stdout a failure message quotes.
+#: The head rather than the tail: it shows what the reply started as (prose, a
+#: fence, an error page) and no more. Stated in the privacy doc as well.
+QUOTED_OUTPUT_CHARS = 120
+
 #: Pipe read size. Small enough that the overshoot past ``max_output_bytes``
 #: before the kill is at most one chunk.
 READ_CHUNK = 64 * 1024

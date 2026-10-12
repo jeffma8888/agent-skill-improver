@@ -498,6 +498,20 @@ class MalformedModelOutputTests(unittest.TestCase):
             extract_json_object("I refuse to answer in JSON, sorry.")
         self.assertIn("no parseable JSON object", str(ctx.exception))
 
+    def test_the_diagnostic_quotes_only_the_documented_head_of_the_output(self) -> None:
+        """The quote lands in a quarantine record, so its length is a privacy
+        bound the docs state, not a formatting choice."""
+        from agent_skill_improver.adapters.bounded_process import QUOTED_OUTPUT_CHARS
+
+        head = "H" * QUOTED_OUTPUT_CHARS
+        with self.assertRaises(MalformedModelOutput) as ctx:
+            extract_json_object(head + " PRIVATE-TAIL " + "T" * 2000)
+        message = str(ctx.exception)
+        self.assertIn(f"first {QUOTED_OUTPUT_CHARS} chars: ", message)
+        self.assertIn(repr(head), message)
+        self.assertNotIn("PRIVATE-TAIL", message)
+        self.assertNotIn("T" * 10, message)
+
     def test_an_unbalanced_object_is_refused_rather_than_repaired(self) -> None:
         with self.assertRaises(MalformedModelOutput):
             extract_json_object('{"a": 1, "b": ')

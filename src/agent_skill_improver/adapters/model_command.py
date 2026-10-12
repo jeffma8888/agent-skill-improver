@@ -58,7 +58,13 @@ from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
 from ..errors import MalformedModelOutput, TransientFailure
 from ..jsonio import loads_untrusted
-from .bounded_process import QUOTED_TAIL_CHARS, OutputOverflow, RunTimedOut, run_bounded
+from .bounded_process import (
+    QUOTED_OUTPUT_CHARS,
+    QUOTED_TAIL_CHARS,
+    OutputOverflow,
+    RunTimedOut,
+    run_bounded,
+)
 
 #: Mode 0700 on every per-call working directory, set explicitly rather than left
 #: to the umask: a permissive umask is exactly the condition under which private
@@ -307,7 +313,8 @@ def _last_balanced_object(text: str, *, role: str) -> Any:
         except ValueError:
             continue
     raise MalformedModelOutput(
-        f"role {role!r} produced no parseable JSON object " f"(first 120 chars: {text[:120]!r})"
+        f"role {role!r} produced no parseable JSON object "
+        f"(first {QUOTED_OUTPUT_CHARS} chars: {text[:QUOTED_OUTPUT_CHARS]!r})"
     )
 
 
