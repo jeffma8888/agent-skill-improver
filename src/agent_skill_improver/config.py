@@ -15,6 +15,7 @@ loop that can rewrite its own scoring criteria has no gate at all.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import tomllib
@@ -115,6 +116,84 @@ def _state_dir_as_written(path: Path) -> Path:
     if path.name in ("", ".", ".."):
         return path.resolve()
     return path.parent.resolve() / path.name
+
+
+#: Every key each table accepts. ``[source]`` has its own closed set below with
+#: its own reason; these close the rest. A key this tool does not read is
+#: refused rather than ignored, because an ignored key looks effective: measured
+#: before this existed, ``[caps].max_open_candidate = 1`` (a dropped letter)
+#: loaded without a word and the run kept the default cap of 12, while the
+#: operator believed the queue was held to one.
+TABLE_KEYS: dict[str, frozenset[str]] = {
+    "run": frozenset({"state_dir", "dry_run", "seed", "base_dir"}),
+    "selection": frozenset(
+        {"max_conversations_per_run", "fairness_dimension", "agent_title_markers"}
+    ),
+    "caps": frozenset(
+        {
+            "max_candidates_per_run",
+            "max_open_candidates",
+            "max_failures_per_candidate",
+            "max_skills_per_run",
+            "max_extra_holdout_conversations",
+            "max_defer_attempts",
+            "max_open_candidates_per_skill",
+        }
+    ),
+    "prompt": frozenset(
+        {"max_transcript_chars", "max_message_chars", "max_skill_text_chars", "redact_secrets"}
+    ),
+    "gate": frozenset(
+        {
+            "min_fixes",
+            "max_regressions",
+            "max_holdout_degradations",
+            "min_holdout_cases",
+            "min_judge_preference_ratio",
+            "require_judge",
+            "require_independent_judge",
+        }
+    ),
+    "guard": frozenset({"protected_skill_ids"}),
+    "rubrics": frozenset({"dir", "enabled"}),
+    "skill_root": frozenset({"id", "path", "kind", "precedence", "canonical", "editable", "note"}),
+    "model.*": frozenset(
+        {"argv", "command", "env", "timeout_seconds", "max_output_bytes", "model_label"}
+    ),
+}
+
+#: The tables a config file may hold at the top level.
+TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {
+        "run",
+        "source",
+        "selection",
+        "caps",
+        "prompt",
+        "gate",
+        "guard",
+        "rubrics",
+        "skill_root",
+        "model",
+    }
+)
+
+
+def _refuse_unknown_keys(table: Mapping[str, Any], accepted: frozenset[str], *, where: str) -> None:
+    """Refuse a key this tool would not read, naming the nearest key it would."""
+    unknown = sorted(set(table) - accepted)
+    if not unknown:
+        return
+    hints = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, sorted(accepted), n=1, cutoff=0.6)
+        hints.append(f"{key} (did you mean {close[0]}?)" if close else key)
+    raise ConfigError(
+        f"{where} has unknown key(s): {', '.join(hints)}. Accepted keys are "
+        f"{', '.join(sorted(accepted))}. An unknown key is refused rather than ignored, "
+        "because a misspelt setting that loads silently leaves the default in force while "
+        "the file says otherwise."
+    )
 
 
 def _require_table(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -428,6 +507,9 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
         raise ConfigError(f"{config_path}: invalid TOML: {exc}") from exc
 
     over = dict(overrides or {})
+    _refuse_unknown_keys(raw, TOP_LEVEL_KEYS, where="the config file")
+    for name in ("run", "selection", "caps", "prompt", "gate", "guard", "rubrics"):
+        _refuse_unknown_keys(_require_table(raw, name), TABLE_KEYS[name], where=f"[{name}]")
     run_table = _require_table(raw, "run")
     base_dir = _base_dir_for(config_path, run_table)
     state_dir = _state_dir_as_written(
@@ -648,6 +730,7 @@ def _load_skill_roots(raw: Any, *, base_dir: Path) -> tuple[SkillRoot, ...]:
     for idx, entry in enumerate(raw):
         if not isinstance(entry, Mapping):
             raise ConfigError(f"[[skill_root]] #{idx} is not a table")
+        _refuse_unknown_keys(entry, TABLE_KEYS["skill_root"], where=f"[[skill_root]] #{idx}")
         rid = entry.get("id")
         path = entry.get("path")
         if not isinstance(rid, str) or not rid.strip():
@@ -818,6 +901,7 @@ def _load_model_roles(table: Mapping[str, Any]) -> dict[str, RoleCommand]:
     defaults = table.get("defaults", {})
     if not isinstance(defaults, Mapping):
         raise ConfigError("[model.defaults] must be a table")
+    _refuse_unknown_keys(defaults, TABLE_KEYS["model.*"], where="[model.defaults]")
     roles: dict[str, RoleCommand] = {}
     for role in ROLES:
         entry = table.get(role)
@@ -825,6 +909,7 @@ def _load_model_roles(table: Mapping[str, Any]) -> dict[str, RoleCommand]:
             continue
         if not isinstance(entry, Mapping):
             raise ConfigError(f"[model.{role}] must be a table")
+        _refuse_unknown_keys(entry, TABLE_KEYS["model.*"], where=f"[model.{role}]")
         merged = {**{k: v for k, v in defaults.items() if k != "argv"}, **entry}
         if "argv" not in merged and "command" not in merged and "argv" in defaults:
             merged["argv"] = defaults["argv"]
@@ -832,9 +917,7 @@ def _load_model_roles(table: Mapping[str, Any]) -> dict[str, RoleCommand]:
             roles[role] = role_command_from_mapping(role, merged)
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
-    unknown = [k for k in table if k not in ROLES and k != "defaults"]
-    if unknown:
-        raise ConfigError(
-            f"unknown [model.*] role(s): {', '.join(sorted(unknown))}; expected {', '.join(ROLES)}"
-        )
+    # The parent table is closed too, with the same hint: the role tables are
+    # the only keys it may hold.
+    _refuse_unknown_keys(table, frozenset(ROLES) | {"defaults"}, where="[model]")
     return roles

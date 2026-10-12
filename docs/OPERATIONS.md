@@ -27,7 +27,11 @@ independent of the improver. `skills` lists the same passed-over documents under
 its table. It exits
 non-zero if the configuration is not runnable. Run it after every config change;
 most problems in this system are configuration problems that otherwise surface as
-a strange result three stages later.
+a strange result three stages later. Every table in the config file is a closed
+schema: a key this tool does not read is a config error naming the nearest key it
+does (`[caps] has unknown key(s): max_open_candidate (did you mean
+max_open_candidates?)`), never a setting that loads silently and leaves the
+default in force.
 
 ### The isolation line
 

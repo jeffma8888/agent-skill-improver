@@ -10,6 +10,10 @@
 # To point it at a real environment, copy this file to `config/local.toml`
 # (gitignored) and change [source] and [[skill_root]]. Read
 # docs/PRIVACY_AND_THREAT_MODEL.md first: real conversations are private content.
+#
+# Every table here is a closed schema: a key this tool does not read is a config
+# error that names the nearest key it does, so a misspelt setting cannot load
+# silently and leave the default in force.
 # ---------------------------------------------------------------------------
 
 [run]

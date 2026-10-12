@@ -299,5 +299,123 @@ class ADefinitionFileThatCannotBeReadIsAConfigErrorTests(unittest.TestCase):
         self.assertIn("at byte 0", message)
 
 
+class AnUnknownConfigKeyIsRefusedNotIgnoredTests(unittest.TestCase):
+    """Measured before: ``[caps].max_open_candidate = 1`` (a dropped letter)
+    loaded without a word and the run kept the default cap of 12, while the
+    operator believed the queue was held to one. ``[source]`` was already a
+    closed schema; every other table now is too.
+    """
+
+    def setUp(self) -> None:
+        from tests.support import build_env
+
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name).resolve()
+        self.config_path = Path(build_env(self.base, rubric_ids=("instruction-compliance",)))
+        self.text = self.config_path.read_text(encoding="utf-8")
+
+    def _load_with(self, old: str, new: str):
+        assert self.text.count(old) == 1, old
+        self.config_path.write_text(self.text.replace(old, new), encoding="utf-8")
+        return load_config(self.config_path)
+
+    def _refusal_for(self, old: str, new: str) -> str:
+        with self.assertRaises(ConfigError) as ctx:
+            self._load_with(old, new)
+        return str(ctx.exception)
+
+    def test_the_control_the_spelt_key_takes_effect(self):
+        config = self._load_with("max_open_candidates = 12", "max_open_candidates = 1")
+        self.assertEqual(config.caps.max_open_candidates, 1)
+
+    def test_a_misspelt_cap_is_refused_with_the_nearest_key(self):
+        message = self._refusal_for("max_open_candidates = 12", "max_open_candidate = 1")
+        self.assertTrue(
+            message.startswith(
+                "[caps] has unknown key(s): max_open_candidate (did you mean "
+                "max_open_candidates?). Accepted keys are "
+            ),
+            message,
+        )
+        self.assertIn("refused rather than ignored", message)
+
+    def test_an_unknown_top_level_table_is_refused(self):
+        message = self._refusal_for("[guard]\n", "[cap]\nmax_open_candidates = 1\n\n[guard]\n")
+        self.assertTrue(
+            message.startswith("the config file has unknown key(s): cap (did you mean caps?)."),
+            message,
+        )
+
+    def test_a_key_with_no_near_match_is_named_bare(self):
+        message = self._refusal_for('state_dir = "state"', 'state_dir = "state"\nverbosity = 3')
+        self.assertTrue(message.startswith("[run] has unknown key(s): verbosity. "), message)
+
+    def test_every_table_is_closed(self):
+        cases = {
+            "[selection]": ("fairness_dimension", "fairness_dimensions"),
+            "[prompt]": ("redact_secrets", "redact_secret"),
+            "[gate]": ("require_judge", "require_judges"),
+            "[rubrics]": ("enabled", "enable"),
+        }
+        for where, (good, bad) in cases.items():
+            with self.subTest(where=where):
+                line = next(ln for ln in self.text.splitlines() if ln.startswith(f"{good} = "))
+                message = self._refusal_for(line, line.replace(good, bad, 1))
+                self.assertTrue(message.startswith(f"{where} has unknown key(s): {bad} "), message)
+        message = self._refusal_for("[guard]\n", "[guard]\nprotected_skill_id = []\n")
+        self.assertTrue(
+            message.startswith("[guard] has unknown key(s): protected_skill_id "), message
+        )
+
+    def test_a_skill_root_entry_and_a_model_role_are_closed_too(self):
+        message = self._refusal_for('kind = "mirror"', 'kind = "mirror"\nprecedance = 5')
+        self.assertTrue(
+            message.startswith(
+                "[[skill_root]] #1 has unknown key(s): precedance (did you mean precedence?)."
+            ),
+            message,
+        )
+        message = self._refusal_for(
+            "[model.defaults]\ntimeout_seconds = 30", "[model.defaults]\ntimeout_second = 30"
+        )
+        self.assertTrue(
+            message.startswith(
+                "[model.defaults] has unknown key(s): timeout_second (did you mean "
+                "timeout_seconds?)."
+            ),
+            message,
+        )
+        message = self._refusal_for("[model.scorer]\n", '[model.scorer]\nmodel = "x"\n')
+        self.assertTrue(
+            message.startswith(
+                "[model.scorer] has unknown key(s): model (did you mean model_label?)."
+            ),
+            message,
+        )
+        message = self._refusal_for(
+            "[model.scorer]\n", '[model.scorrer]\nargv = ["x"]\n\n[model.scorer]\n'
+        )
+        self.assertTrue(
+            message.startswith("[model] has unknown key(s): scorrer (did you mean scorer?)."),
+            message,
+        )
+
+    def test_doctor_reports_it_as_a_config_error(self):
+        from tests.support import run_cli
+
+        self.config_path.write_text(
+            self.text.replace("max_open_candidates = 12", "max_open_candidate = 1"),
+            encoding="utf-8",
+        )
+        proc = run_cli(["--config", str(self.config_path), "doctor"])
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("config error: [caps] has unknown key(s): max_open_candidate", proc.stderr)
+
+    def test_the_shipped_example_config_uses_only_accepted_keys(self):
+        config = load_config(REPO_ROOT / "config" / "example.config.toml")
+        self.assertTrue(config.caps.max_open_candidates >= 0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
