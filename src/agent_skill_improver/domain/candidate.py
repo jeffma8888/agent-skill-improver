@@ -20,6 +20,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -296,10 +297,77 @@ MIN_HYPOTHESIS_CHARS = 40
 MIN_INTENDED_CHANGE_CHARS = 40
 MIN_ROLLBACK_CHARS = 20
 
+#: The control characters that are ordinary text: line and paragraph structure.
+#: Every other ``Cc`` code point (ESC, NUL, DEL, BEL, the C1 block) is a
+#: terminal instruction, not prose.
+REVIEWABLE_CONTROLS = frozenset("\n\r\t")
+#: Bidirectional embedding, override and isolate controls. They change the
+#: order text is DISPLAYED in without changing the order it is stored and
+#: applied in, so a diff can read one way to the reviewer and another to the
+#: agent that loads the skill. Marks (U+200E/F) and joiners are left alone:
+#: they do not reorder anything.
+BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+#: Invisible carriers that are not ``Cc``: the Unicode tag block (U+E0000 to
+#: U+E007F), which spells out ASCII in characters no terminal renders, and the
+#: line and paragraph separators (U+2028, U+2029), which break a line without
+#: being a newline. Zero-width spaces, joiners, soft hyphens and the BOM are
+#: left alone: they occur in ordinary prose and hide nothing on their own.
+HIDDEN_CONTROLS = frozenset({chr(cp) for cp in range(0xE0000, 0xE0080)} | {"\u2028", "\u2029"})
+
+
+def unreviewable_characters(text: str, *, tolerated: str = "") -> list[str]:
+    """Code points in ``text`` a reviewer cannot see for what they are.
+
+    A terminal escape erases or recolours the lines above it; a bidi override
+    reorders them. ``asi review`` prints a candidate's prose and diff raw, so
+    text carrying either is not reviewable and never becomes a candidate.
+    Returned as ``U+XXXX`` names, each once in order of first appearance, so the
+    refusal that quotes them is itself safe to print. Characters that already
+    occur in ``tolerated`` (the live skill text) are not reported: the rule is
+    about what a proposal introduces, not about a file the operator owns. The
+    tolerance is per code point, not per occurrence or position: one legacy
+    override in the live file admits that same override anywhere in the
+    replacement, which is the price of never making a skill unimprovable.
+    """
+    allowed = REVIEWABLE_CONTROLS | set(tolerated)
+    found: list[str] = []
+    seen: set[str] = set()
+    for ch in text:
+        if ch in allowed or ch in seen:
+            continue
+        if ch in BIDI_CONTROLS or ch in HIDDEN_CONTROLS or unicodedata.category(ch) == "Cc":
+            seen.add(ch)
+            found.append(f"U+{ord(ch):04X}")
+    return found
+
 
 def candidate_defects(candidate: Candidate, *, base_text: str) -> list[str]:
     """Every reason this candidate is not reviewable. Empty list means usable."""
     problems: list[str] = []
+    prose = {
+        "hypothesis": candidate.hypothesis,
+        "intended_change": candidate.intended_change,
+        "risks": "\n".join(candidate.risks),
+        "rollback": candidate.rollback,
+    }
+    for name, text in prose.items():
+        bad = unreviewable_characters(text)
+        if bad:
+            problems.append(
+                f"{name} contains control or bidi characters a reviewer cannot see "
+                f"({', '.join(bad)}); a terminal escape is never reviewable"
+            )
+    for name, text in (
+        ("patch new_text", candidate.patch.new_text),
+        ("patch unified_diff", candidate.patch.unified_diff),
+    ):
+        bad = unreviewable_characters(text, tolerated=base_text)
+        if bad:
+            problems.append(
+                f"{name} introduces control or bidi characters absent from the base text "
+                f"({', '.join(bad)}); text that renders in one order and applies in another "
+                "is never reviewable"
+            )
     if len(candidate.hypothesis.strip()) < MIN_HYPOTHESIS_CHARS:
         problems.append(f"hypothesis shorter than {MIN_HYPOTHESIS_CHARS} chars")
     if len(candidate.intended_change.strip()) < MIN_INTENDED_CHANGE_CHARS:

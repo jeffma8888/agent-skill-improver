@@ -1113,5 +1113,66 @@ class StateReadTests(unittest.TestCase):
         self.assertEqual(ids, [self.candidate.id])
 
 
+class UnreviewableCharacterTests(unittest.TestCase):
+    """The pure rule behind the propose-stage quarantine of terminal escapes."""
+
+    def test_control_characters_are_named_by_code_point(self):
+        from agent_skill_improver.domain.candidate import unreviewable_characters
+
+        self.assertEqual(unreviewable_characters("a\x1b[2Kb"), ["U+001B"])
+        self.assertEqual(unreviewable_characters("nul\x00 del\x7f"), ["U+0000", "U+007F"])
+
+    def test_bidi_overrides_and_isolates_are_unreviewable(self):
+        from agent_skill_improver.domain.candidate import unreviewable_characters
+
+        found = unreviewable_characters("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+        self.assertEqual(
+            found,
+            [
+                "U+202A",
+                "U+202B",
+                "U+202C",
+                "U+202D",
+                "U+202E",
+                "U+2066",
+                "U+2067",
+                "U+2068",
+                "U+2069",
+            ],
+        )
+
+    def test_tag_characters_and_line_separators_are_unreviewable(self):
+        """The tag block spells ASCII in code points no terminal renders, the
+        classic carrier for an instruction a reviewer cannot see; U+2028/2029
+        break a line without being a newline."""
+        from agent_skill_improver.domain.candidate import unreviewable_characters
+
+        hidden = "\U000e0001\U000e0041\U000e007f"
+        self.assertEqual(
+            unreviewable_characters("plain" + hidden), ["U+E0001", "U+E0041", "U+E007F"]
+        )
+        self.assertEqual(unreviewable_characters("a\u2028b\u2029c"), ["U+2028", "U+2029"])
+
+    def test_ordinary_whitespace_and_joiners_are_not(self):
+        from agent_skill_improver.domain.candidate import unreviewable_characters
+
+        self.assertEqual(unreviewable_characters("tab\tnl\ncr\r\n"), [])
+        self.assertEqual(
+            unreviewable_characters("\U0001f469\u200d\U0001f4bb caf\u00e9 \u65e5\u672c"), []
+        )
+        self.assertEqual(unreviewable_characters("\u200e\u200f\u200b\u00ad\ufeff\u2060"), [])
+
+    def test_each_code_point_is_reported_once_in_text_order(self):
+        from agent_skill_improver.domain.candidate import unreviewable_characters
+
+        self.assertEqual(unreviewable_characters("\x1b\x07\x1b\x07"), ["U+001B", "U+0007"])
+
+    def test_characters_already_present_in_a_baseline_are_tolerated(self):
+        from agent_skill_improver.domain.candidate import unreviewable_characters
+
+        self.assertEqual(unreviewable_characters("x\u202ey", tolerated="old\u202e"), [])
+        self.assertEqual(unreviewable_characters("x\u202e\x1by", tolerated="old\u202e"), ["U+001B"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -855,6 +855,99 @@ class PerRecordFailureTests(DailyHarness):
         del json
 
 
+class ReviewableTextTests(DailyHarness):
+    """Everything a proposal says is printed raw to the reviewer's terminal by
+    ``asi review``, and the proposed text becomes the skill an agent loads. A
+    model reply (or a conversation that steered one) carrying a terminal
+    escape can erase or recolour the lines above it; a bidi override can make a
+    diff read in one order and apply in another. Neither can be reviewed, so
+    neither becomes a candidate: the record is quarantined at the propose stage
+    with the offending code point named, never with the raw byte echoed.
+    """
+
+    ESCAPE = "\x1b[2K\x1b[1A"
+    RTL_OVERRIDE = "\u202e"
+
+    def _runner(self, **overrides):
+        class Doctored(InProcessRunner):
+            def run(self, *, role, system, user, response_schema):
+                payload = super().run(
+                    role=role, system=system, user=user, response_schema=response_schema
+                )
+                if role == "improver":
+                    for key, mutate in overrides.items():
+                        payload[key] = mutate(payload[key])
+                return payload
+
+        return Doctored()
+
+    def _candidate_files(self, state):
+        return sorted(p.name for p in state.dir("candidates").glob("*.json"))
+
+    def test_a_terminal_escape_in_the_hypothesis_is_quarantined_not_proposed(self):
+        config = self.env()
+        runner = self._runner(hypothesis=lambda text: self.ESCAPE + text)
+        receipt, state, _ = self.run_pass(config, runner=runner)
+        payload = receipt.to_dict()
+        self.assertEqual(payload["counts"]["candidates_proposed"], 0)
+        self.assertEqual(payload["counts"]["skills_quarantined"], 1)
+        self.assertEqual(self._candidate_files(state), [])
+        entry = payload["skills"]["tdd"]
+        self.assertEqual(entry["status"], "quarantined")
+        self.assertEqual(entry["stage"], "propose")
+        self.assertIn("hypothesis", entry["reason"])
+        self.assertIn("U+001B", entry["reason"])
+        self.assertNotIn("\x1b", entry["reason"], "the reason must be printable itself")
+        quarantine = list(state.dir("quarantine").glob("*.json"))
+        self.assertEqual(len(quarantine), 1)
+        self.assertNotIn("\x1b", quarantine[0].read_text(encoding="utf-8"))
+
+    def test_a_bidi_override_introduced_by_the_new_text_is_quarantined(self):
+        config = self.env()
+        runner = self._runner(
+            new_skill_text=lambda text: text.replace(
+                "Ask first", "Ask" + self.RTL_OVERRIDE + " first"
+            )
+        )
+        receipt, state, _ = self.run_pass(config, runner=runner)
+        payload = receipt.to_dict()
+        self.assertEqual(payload["counts"]["candidates_proposed"], 0)
+        self.assertEqual(self._candidate_files(state), [])
+        entry = payload["skills"]["tdd"]
+        self.assertEqual(entry["status"], "quarantined")
+        self.assertIn("new_text", entry["reason"])
+        self.assertIn("U+202E", entry["reason"])
+        self.assertNotIn(self.RTL_OVERRIDE, entry["reason"])
+
+    def test_a_control_character_already_in_the_live_skill_does_not_block_improving_it(self):
+        """The check is about what the proposal INTRODUCES. A skill that already
+        carries an odd code point is the operator's file; refusing every
+        proposal for it would make it the one skill the tool can never improve.
+        """
+        config = self.env()
+        target = self.base / "skills-canonical" / "tdd" / "SKILL.md"
+        target.write_text(
+            target.read_text(encoding="utf-8") + "\n- legacy line" + self.RTL_OVERRIDE + "\n",
+            encoding="utf-8",
+        )
+        receipt, state, _ = self.run_pass(config)
+        payload = receipt.to_dict()
+        self.assertEqual(payload["counts"]["candidates_proposed"], 1)
+        self.assertEqual(payload["counts"]["skills_quarantined"], 0)
+        self.assertEqual(len(self._candidate_files(state)), 1)
+
+    def test_tabs_and_newlines_are_ordinary_text(self):
+        config = self.env()
+        runner = self._runner(
+            hypothesis=lambda text: text + "\n\tindented, and\r\nwindows-ended",
+            new_skill_text=lambda text: text + "\t- a tab-indented bullet\n",
+        )
+        receipt, state, _ = self.run_pass(config, runner=runner)
+        payload = receipt.to_dict()
+        self.assertEqual(payload["counts"]["candidates_proposed"], 1)
+        self.assertEqual(payload["counts"]["skills_quarantined"], 0)
+
+
 class CredentialBearingSkillTests(DailyHarness):
     """A skill file that contains a credential is never handed to the improver.
 
