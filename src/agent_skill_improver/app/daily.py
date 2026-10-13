@@ -324,6 +324,24 @@ def run_daily(
         )
 
     with RunLock(state.lock_path()), AutomationMarker():
+        # The receipt path is per day. When a committed run of a day whose
+        # receipt recorded a mutation comes along (the operator reviewed in the
+        # morning and re-ran with --mutation-reviewed, or re-ran that day once a
+        # newer run had cleared the block), its receipt would land on the blocked
+        # one, so that one is kept under another name first, inside the lock and
+        # before anything else is written. Decided from the file at the path
+        # this run writes, not from the newest receipt: it is that file, whatever
+        # is newest, that the write would replace. Measured before: the reviewed
+        # run overwrote it, and the skill_tree.changes it carried, the only
+        # record of what wrote to the tree, was gone.
+        sitting = None if dry_run else state.committed_receipt_at(run_day)
+        if sitting is not None and sitting.mutation_detected:
+            kept = state.keep_blocked_receipt(sitting)
+            receipt.note(
+                f"the blocked receipt of the {one_line_label(sitting.day)} run sat where this "
+                f"run's receipt is written and was kept at {one_line_label(str(kept))} first; "
+                "read skill_tree.changes there"
+            )
         entries_before = skill_store.tree_entries()
         digest_before = tree_digest_of(entries_before)
         rubrics: dict[str, Rubric] = {r.id: r for r in config.rubrics}
@@ -1032,7 +1050,9 @@ def _finish(
     # Receipt first. If the checkpoint update fails the run still fails, but the
     # account of what it did is already on disk; the reverse order can leave a
     # checkpoint claiming the day completed with no receipt behind it. The receipt
-    # path is per day, so the next commit run of the same day overwrites it.
+    # path is per day, so the next commit run of the same day overwrites it,
+    # except that a blocked receipt sitting there was kept under another name
+    # above, before the lock's first read.
     # Both writes go through the store, which withholds them in a dry run; the
     # single gate is the store, not a flag check at each call site.
     state.write_receipt(run_day, receipt.to_dict(), dry_run=dry_run)

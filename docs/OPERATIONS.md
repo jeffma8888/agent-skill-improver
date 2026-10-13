@@ -491,12 +491,19 @@ does not block; `doctor` is what warns about such a receipt. A receipt under
 `state/receipts/` that cannot be read at all refuses the run too (`StateUnreadable`,
 exit 3), and that includes a torn `apply` or `rollback` receipt, which shares the
 directory: which run was newest cannot be known while any one is unreadable, and the
-blocked receipt is the one most worth truncating; read it, then move it aside.
+blocked receipt is the one most worth truncating; read it, then move it out of
+`state/receipts/`.
 `doctor` names such a file as a problem, so it never says ready when `daily` would
 refuse; a receipt whose mode merely drifted is repaired and read in the same visit. When you know what wrote to the tree, start one
 run by hand naming the blocked run's day, `asi daily --commit --mutation-reviewed 2026-01-01`;
 its receipt records that statement and becomes the newest, and the schedule resumes
-on its own. The flag names a day, so one left behind in a cron line can waive only
+on its own. When a committed run writes where a receipt that recorded a mutation sits
+(reviewed in the morning and re-run the same day, or that day re-run later), the blocked
+receipt is kept first, byte for byte, under `state/receipts/_blocked--<day>--<day hash>--<finish stamp>.json`,
+and the new receipt's note names that path; nothing already at that name is replaced. A
+kept receipt is an archive, not a run: it never decides whether the next run is blocked,
+and `doctor` counts them until you move them out of the state directory. The flag names
+a day, so one left behind in a cron line can waive only
 that run, never a later block; a day that names no blocked run is a `ConfigError`.
 A dry run with the flag proceeds but writes no receipt, so the block stands.
 
@@ -544,7 +551,9 @@ A detected mutation is a problem (exit 1, with the receipt path to read and the
 `--commit --mutation-reviewed 2026-01-01` run that lets `daily` continue); a receipt
 that does not say whether the tree was mutated prints `mutation=unknown` with a
 warning; a receipt that does not read as one is a problem (exit 1) with its reason,
-never a silent skip, because `daily` refuses to run while it is there. Recency is judged, not only printed: a finish time more than two whole
+never a silent skip, because `daily` refuses to run while it is there; kept blocked
+receipts (`_blocked--*.json`) are a warning with their count and paths (`kept_blocked_receipts`
+under `--json`), to be read and moved out. Recency is judged, not only printed: a finish time more than two whole
 days old warns that the scheduler, not the job, is what to check; one in the future or
 one that does not parse warns that the clock or the receipt was edited, rather than
 reading as today. Dry runs write no receipt, so they do not count as a run here. With

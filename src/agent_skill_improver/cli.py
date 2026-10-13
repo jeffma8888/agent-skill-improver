@@ -596,10 +596,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     last_run = None
     last_run_age: int | None = None
     unreadable_receipts: list[dict[str, str]] = []
+    kept_receipts: list[str] = []
     if state_present and not layout_problems:
         receipts = state.scan_receipts()
         last_run = receipts.last_run
         unreadable_receipts = [u.to_dict() for u in receipts.unreadable]
+        kept_receipts = [str(path) for path in receipts.kept]
+        if kept_receipts:
+            # Each is the record of a run blocked by a skill tree mutation, kept
+            # when a later committed run of its day took its path. Never a run
+            # again, so without this line they would accumulate unseen.
+            more = "" if len(kept_receipts) <= 3 else f", +{len(kept_receipts) - 3} more"
+            # Counted by name, not read: the name is the one a kept receipt
+            # gets, and whether each file still reads as one is the operator's
+            # question when they open it.
+            warnings.append(
+                f"{len(kept_receipts)} kept blocked receipt(s) under {state.root / 'receipts'}, "
+                f"by name ({', '.join(one_line(k) for k in kept_receipts[:3])}{more}): the name "
+                "a receipt that recorded a skill tree mutation gets when a later committed run of "
+                "its day takes its path; read skill_tree.changes in each, then move it out of "
+                "the state directory"
+            )
         for record in unreadable_receipts:
             # A problem, not a warning: `daily` refuses to run while it is there.
             problems.append(
@@ -704,6 +721,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             {**last_run.to_dict(), "age_days": last_run_age} if last_run is not None else None
         ),
         "receipt_records_unreadable": unreadable_receipts,
+        "kept_blocked_receipts": kept_receipts,
         "skills_with_executable_payloads": [
             {"skill_id": s.skill_id, "payload_files": list(s.payload_files)}
             for s in snapshots

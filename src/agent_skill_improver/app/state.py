@@ -59,6 +59,7 @@ from ..domain.candidate import (
     STATUS_ROLLED_BACK,
     STATUS_VALIDATED,
     Candidate,
+    one_line_label,
     validate_candidate_id,
 )
 from ..errors import ConfigError, SafetyRefusal, StateUnreadable
@@ -114,6 +115,19 @@ def safe_name(value: str) -> str:
     """A readable filesystem-safe stem. Use ``keyed_name`` for exact IDs."""
     cleaned = _UNSAFE.sub("_", value).strip("._-")
     return cleaned or "unnamed"
+
+
+# A leading underscore because no receipt the tool writes can start with one:
+# ``safe_name`` strips leading ``.``, ``_`` and ``-`` from the stem of every
+# keyed day, and action receipts start with the action word. ``blocked--`` alone
+# would not do: ``--day blocked`` is a valid run day, and its receipt would read
+# as a kept one and never block.
+KEPT_RECEIPT_PREFIX = "_blocked--"
+
+
+def is_kept_receipt_name(name: str) -> bool:
+    """Whether a file name under ``receipts/`` is a kept blocked receipt's."""
+    return name.startswith(KEPT_RECEIPT_PREFIX) and name.endswith(".json")
 
 
 def keyed_name(value: str) -> str:
@@ -217,10 +231,12 @@ class LastRun:
 
 @dataclass(frozen=True)
 class ReceiptScan:
-    """The newest daily receipt that reads, and every receipt file that did not."""
+    """The newest daily receipt that reads, every receipt file that did not, and
+    every kept blocked receipt (an archive, never a run)."""
 
     last_run: LastRun | None
     unreadable: tuple[UnreadableRecord, ...]
+    kept: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -934,86 +950,173 @@ class StateStore:
         stem = f"{keyed_name(day)}{'-dry-run' if dry_run else ''}.json"
         return self.dir("receipts") / stem
 
+    def _run_at(self, path: Path) -> LastRun | UnreadableRecord | None:
+        """What one file under ``receipts/`` is: a daily run, a record that does
+        not read as one, or nothing (a link or other non-file, or another schema).
+
+        Only daily receipts (``SCHEMA_RECEIPT``) count as a run; apply and
+        rollback receipts share the directory under their own schemas. A regular
+        file that does not read as a receipt is returned as unreadable, never
+        dropped, and never chosen.
+        """
+        from .. import SCHEMA_RECEIPT
+
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            raw = _read_state_json(path)
+        except (ValueError, StateUnreadable) as exc:
+            return UnreadableRecord(path=path, reason=str(exc))
+        except OSError as exc:
+            # A receipt this process cannot open (a mode someone changed, a
+            # vanished file) is listed like a torn one: the scan sits on the
+            # scheduled ``daily`` path, where a traceback is a 70, not an answer.
+            return UnreadableRecord(path=path, reason=_cannot_open(exc))
+        if not isinstance(raw, dict):
+            return UnreadableRecord(
+                path=path, reason=f"the record is {type(raw).__name__}, not an object"
+            )
+        if raw.get("schema") != SCHEMA_RECEIPT:
+            return None
+        problem = _receipt_shape_problem(raw)
+        if problem:
+            return UnreadableRecord(
+                path=path, reason=f"refusing to read the receipt {path}: {problem}"
+            )
+        at = str(raw.get("finished_at") or raw.get("started_at") or "")
+        skill_tree: dict[str, Any] = (
+            raw["skill_tree"] if isinstance(raw.get("skill_tree"), dict) else {}
+        )
+        isolation: dict[str, Any] = (
+            raw["isolation"] if isinstance(raw.get("isolation"), dict) else {}
+        )
+        detected = skill_tree.get("mutation_detected")
+        return LastRun(
+            day=raw["day"],
+            status=raw["status"],
+            finished_at=at,
+            dry_run=bool(raw.get("dry_run")),
+            mutation_detected=detected if isinstance(detected, bool) else None,
+            isolation_mode=str(isolation.get("mode", "")),
+            path=path,
+        )
+
     def scan_receipts(self) -> ReceiptScan:
         """The newest daily receipt, by its own ``finished_at`` (then ``started_at``), then day.
 
         Only daily receipts (``SCHEMA_RECEIPT``) count as a run; apply and
         rollback receipts share the directory under their own schemas and are
-        passed over. A link or other non-file is not a record and is skipped;
-        a regular file that does not read as a receipt is listed as unreadable,
-        never dropped, and never chosen. Read without creating the directory
-        (so not through ``dir``, whose guards are for writers): this scan adds
-        nothing to the state tree, and a symlinked directory reads as absent,
-        which ``doctor`` names separately as a layout problem.
+        passed over, and so is a kept blocked receipt (``_blocked--*.json``, the
+        name ``keep_blocked_receipt`` gives one): it is the archive of a run
+        whose block a later committed run of its day has already cleared, so it
+        is listed under ``kept`` for ``doctor`` and never chosen as the run. A
+        link or other non-file is not a record and is skipped; a regular file
+        that does not read as a receipt is listed as unreadable, never dropped,
+        and never chosen. Read without creating the directory (so not through
+        ``dir``, whose guards are for writers): this scan adds nothing to the
+        state tree, and a symlinked directory reads as absent, which ``doctor``
+        names separately as a layout problem.
         """
-        from .. import SCHEMA_RECEIPT
-
         directory = self.root / "receipts"
         newest: LastRun | None = None
         newest_key = ("", "")
         unreadable: list[UnreadableRecord] = []
+        kept: list[Path] = []
         if not directory.is_dir() or directory.is_symlink():
             return ReceiptScan(last_run=None, unreadable=())
         for path in sorted(directory.glob("*.json")):
-            if path.is_symlink() or not path.is_file():
+            if is_kept_receipt_name(path.name):
+                if path.is_file() and not path.is_symlink():
+                    kept.append(path)
                 continue
-            try:
-                raw = _read_state_json(path)
-            except (ValueError, StateUnreadable) as exc:
-                unreadable.append(UnreadableRecord(path=path, reason=str(exc)))
+            found = self._run_at(path)
+            if found is None:
                 continue
-            except OSError as exc:
-                # A receipt this process cannot open (a mode someone changed, a
-                # vanished file) is listed like a torn one: the scan sits on the
-                # scheduled ``daily`` path, where a traceback is a 70, not an answer.
-                unreadable.append(UnreadableRecord(path=path, reason=_cannot_open(exc)))
+            if isinstance(found, UnreadableRecord):
+                unreadable.append(found)
                 continue
-            if not isinstance(raw, dict):
-                unreadable.append(
-                    UnreadableRecord(
-                        path=path, reason=f"the record is {type(raw).__name__}, not an object"
-                    )
-                )
-                continue
-            if raw.get("schema") != SCHEMA_RECEIPT:
-                continue
-            problem = _receipt_shape_problem(raw)
-            if problem:
-                unreadable.append(
-                    UnreadableRecord(
-                        path=path, reason=f"refusing to read the receipt {path}: {problem}"
-                    )
-                )
-                continue
-            at = str(raw.get("finished_at") or raw.get("started_at") or "")
-            skill_tree: dict[str, Any] = (
-                raw["skill_tree"] if isinstance(raw.get("skill_tree"), dict) else {}
-            )
-            isolation: dict[str, Any] = (
-                raw["isolation"] if isinstance(raw.get("isolation"), dict) else {}
-            )
-            detected = skill_tree.get("mutation_detected")
-            run = LastRun(
-                day=raw["day"],
-                status=raw["status"],
-                finished_at=at,
-                dry_run=bool(raw.get("dry_run")),
-                mutation_detected=detected if isinstance(detected, bool) else None,
-                isolation_mode=str(isolation.get("mode", "")),
-                path=path,
-            )
             # Two runs that finished within the same second are told apart by
             # their day (two days' runs a second apart happen in tests and in a
             # catch-up); a full tie keeps the first in path order, so the answer
             # is stable across scans.
-            key = (at, str(raw["day"]))
+            key = (found.finished_at, found.day)
             if newest is None or key > newest_key:
-                newest, newest_key = run, key
-        return ReceiptScan(last_run=newest, unreadable=tuple(unreadable))
+                newest, newest_key = found, key
+        return ReceiptScan(last_run=newest, unreadable=tuple(unreadable), kept=tuple(kept))
+
+    def committed_receipt_at(self, day: str) -> LastRun | None:
+        """The daily receipt sitting where this day's committed receipt is written,
+        or None when nothing that reads as a run is there.
+
+        Read from the path itself, not from the newest receipt: what a committed
+        run of this day overwrites is whatever this path holds, whichever run is
+        newest, and on a case-insensitive filesystem a name spelled differently
+        is the same entry. A file there that does not read as a receipt is
+        refused by name, as ``scan_receipts`` would list it.
+        """
+        found = self._run_at(self.receipt_path(day, dry_run=False))
+        if isinstance(found, UnreadableRecord):
+            raise StateUnreadable(
+                f"refusing to run: the receipt {one_line_label(str(found.path))} cannot be read "
+                f"({one_line_label(found.reason)}); this run would write there. Read it, then "
+                "move it out of the receipts directory to continue."
+            )
+        return found
 
     def write_receipt(self, day: str, payload: dict[str, Any], *, dry_run: bool) -> Path:
         path = self.receipt_path(day, dry_run=dry_run)
         return self._persist(path, lambda: write_json(path, payload))
+
+    def kept_blocked_receipt_path(self, run: LastRun) -> Path:
+        """Where the blocked receipt ``run`` was read from is kept when a committed
+        run of its day comes to write its receipt at that path.
+
+        Named ``_blocked--<keyed day>--<finish stamp>.json``: never the day's
+        receipt path again, and a name ``scan_receipts`` passes over, so a kept
+        receipt is an archive the operator reads and ``doctor`` counts, never
+        the run that decides whether the next one is blocked. Suffixed ``-2``,
+        ``-3`` when that name is taken by anything at the moment it is chosen,
+        so no earlier kept receipt is replaced (daily runs are serialised by the
+        run lock, so only a file created by hand in that instant could be).
+        """
+        stamp = safe_name(run.finished_at) if run.finished_at else "unfinished"
+        base = f"{KEPT_RECEIPT_PREFIX}{keyed_name(run.day)}--{stamp}"
+        target = self.dir("receipts") / f"{base}.json"
+        n = 1
+        while target.exists() or target.is_symlink():
+            n += 1
+            target = target.with_name(f"{base}-{n}.json")
+        return target
+
+    def keep_blocked_receipt(self, run: LastRun) -> Path:
+        """Move the blocked receipt ``run`` was read from to its kept name; return it.
+
+        The receipt path is per day, so a committed run of a day whose receipt
+        recorded a mutation (the one started with ``--mutation-reviewed`` naming
+        that day, or a later re-run of that day once a newer run has cleared the
+        block) writes its receipt where the blocked one sits. Measured before: it
+        overwrote it, and ``skill_tree.changes``, the only record of what wrote
+        to the tree, was gone, destroyed by the run that said it was reviewed.
+        A store that withholds writes refuses: a dry run changes no content
+        under the state tree, and moving a record is a change.
+        """
+        if self.dry_run:
+            raise SafetyRefusal(
+                f"refusing to move the receipt {run.path} through a store that withholds "
+                "writes (dry run)"
+            )
+        target = self.kept_blocked_receipt_path(run)
+        try:
+            os.replace(run.path, target)
+        except OSError as exc:
+            # Named, not a traceback: the move sits on the scheduled path, where
+            # a 70 is a bug report and this is a condition of the tree.
+            raise SafetyRefusal(
+                f"refusing to run: the blocked receipt {run.path} could not be kept at "
+                f"{target} ({_cannot_open(exc)}); nothing was written. Read it, then move "
+                "it aside yourself to continue."
+            ) from exc
+        return target
 
     def _refuse_promotion_when_withholding(self, what: str) -> None:
         # Promotion is never a preview. A store that withholds writes would keep
