@@ -51,6 +51,7 @@ from ..domain.isolation import (
     MODE_NONE,
     MODE_SANDBOX_EXEC,
 )
+from ..jsonio import loads_untrusted
 from .bounded_process import quotable
 
 #: Probe source, executed with ``-c`` so no file has to be readable inside the
@@ -81,6 +82,11 @@ PROBE_SOURCE = (
 )
 
 PROBE_TIMEOUT_SECONDS = 60
+
+#: The keys ``PROBE_SOURCE`` writes, and the only reply shape ``_run_probe``
+#: accepts: a reply missing one is the probe not having run, not a sandbox that
+#: failed that check.
+PROBE_KEYS = frozenset({"socket", "outside_path", "inside_path"})
 
 #: How many characters of the probe's stdout and stderr a failed verification
 #: quotes into the receipt.
@@ -246,6 +252,10 @@ def _run_probe(argv: Sequence[str], *, cwd: Path, env: dict[str, str]) -> ProbeO
             list(argv),
             capture_output=True,
             text=True,
+            # A wrapper's banner in a locale encoding must not abort the
+            # verifier: an undecodable byte becomes U+FFFD and the reply then
+            # fails to parse as the probe's object, which is the honest outcome.
+            errors="replace",
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
             cwd=str(cwd),
@@ -254,9 +264,8 @@ def _run_probe(argv: Sequence[str], *, cwd: Path, env: dict[str, str]) -> ProbeO
     except (OSError, subprocess.SubprocessError) as exc:
         return ProbeOutcome(False, "", "", "", detail=f"{type(exc).__name__}: {exc}")
     text = (proc.stdout or "").strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
+    parsed = _probe_reply(text)
+    if parsed is None:
         return ProbeOutcome(
             False,
             "",
@@ -270,11 +279,39 @@ def _run_probe(argv: Sequence[str], *, cwd: Path, env: dict[str, str]) -> ProbeO
         )
     return ProbeOutcome(
         ran=True,
-        socket=str(parsed.get("socket", "")),
-        outside_write=str(parsed.get("outside_path", "")),
-        inside_write=str(parsed.get("inside_path", "")),
+        socket=parsed["socket"],
+        outside_write=parsed["outside_path"],
+        inside_write=parsed["inside_path"],
         detail=f"exit {proc.returncode}",
     )
+
+
+def _probe_reply(text: str) -> dict[str, str] | None:
+    """The probe's stdout as the object of strings ``PROBE_SOURCE`` writes, or None.
+
+    The confined half of the probe runs under a wrapper found on ``PATH``
+    (``bwrap``) or at a fixed path (``sandbox-exec``), and whatever that wrapper
+    puts on stdout arrives here. ``verify`` promises never to raise for a failed
+    verification, yet three replies used to escape that promise as an internal
+    error: valid JSON that is not an object (``[]``, ``"ok"``) failed on
+    ``.get``; JSON nested past the interpreter's recursion limit raised
+    ``RecursionError``, which is not a ``JSONDecodeError``; and an object whose
+    fields were not strings was accepted and stringified into a reason that
+    quoted a Python repr. A fourth did not raise but accused: an object without
+    the probe's keys (``{}``) fell back to empty strings and ``verify`` reported
+    the sandbox as having failed all three checks. Each is now one more shape of
+    "the probe did not run", which the caller turns into an unverified mechanism
+    and the decision refuses.
+    """
+    try:
+        parsed = loads_untrusted(text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != PROBE_KEYS:
+        return None
+    if not all(isinstance(value, str) for value in parsed.values()):
+        return None
+    return parsed
 
 
 def verify(

@@ -1237,6 +1237,116 @@ class ProbeHonestyTests(unittest.TestCase):
         source = Path(sandbox_mod.__file__).read_text(encoding="utf-8")
         self.assertIn('listener.bind(("127.0.0.1", 0))', source)
 
+    # The confined half of the probe runs under a wrapper found on PATH, and
+    # whatever that wrapper prints is what gets parsed. ``verify`` promises never
+    # to raise for a failed verification; these are the replies that used to
+    # break the promise.
+
+    def _probe_printing(self, program: str) -> sandbox_mod.ProbeOutcome:
+        with TemporaryDirectory() as tmp:
+            return sandbox_mod._run_probe(
+                [sys.executable, "-c", program], cwd=Path(tmp), env={"PATH": os.environ["PATH"]}
+            )
+
+    def test_a_probe_reply_that_is_valid_json_but_not_an_object_did_not_run(self):
+        for literal in ("[]", '"ok"', "null", "7"):
+            with self.subTest(literal=literal):
+                outcome = self._probe_printing(f"import sys;sys.stdout.write('{literal}')")
+                self.assertFalse(outcome.ran)
+                self.assertIn("unparseable probe output", outcome.detail)
+                self.assertIn(literal, outcome.detail)
+                self.assertEqual(
+                    (outcome.socket, outcome.outside_write, outcome.inside_write), ("", "", "")
+                )
+
+    def test_a_probe_reply_nested_past_the_recursion_limit_did_not_run(self):
+        depth = sys.getrecursionlimit() * 20
+        outcome = self._probe_printing(
+            f"import sys;sys.stdout.write('[' * {depth} + ']' * {depth})"
+        )
+        self.assertFalse(outcome.ran)
+        self.assertIn("unparseable probe output", outcome.detail)
+        self.assertLessEqual(len(outcome.detail), 2 * sandbox_mod.PROBE_QUOTE_CHARS + 120)
+
+    def test_a_probe_reply_that_is_not_utf8_did_not_run(self):
+        """``subprocess.run(text=True)`` decodes strictly by default, so a
+        wrapper that printed a locale-encoded banner raised UnicodeDecodeError
+        out of the verifier."""
+        outcome = self._probe_printing("import sys;sys.stdout.buffer.write(b'\\xff\\xfe' + b'{}')")
+        self.assertFalse(outcome.ran)
+        self.assertIn("unparseable probe output", outcome.detail)
+
+    def test_a_probe_reply_whose_fields_are_not_strings_did_not_run(self):
+        """A dict with the right keys and wrong types used to be accepted, and its
+        values stringified into a reason that quoted a Python repr."""
+        reply = '{"socket": {"a": 1}, "outside_path": ["x"], "inside_path": null}'
+        outcome = self._probe_printing(f"import sys;sys.stdout.write({reply!r})")
+        self.assertFalse(outcome.ran)
+        self.assertIn("unparseable probe output", outcome.detail)
+
+    def test_a_probe_reply_without_the_probe_keys_did_not_run(self):
+        """An object missing the keys used to fall back to empty strings, and
+        ``verify`` then accused the sandbox of failing all three checks."""
+        for reply in ("{}", '{"socket": "allowed"}', '{"zz": "x"}'):
+            with self.subTest(reply=reply):
+                outcome = self._probe_printing(f"import sys;sys.stdout.write({reply!r})")
+                self.assertFalse(outcome.ran)
+                self.assertIn("unparseable probe output", outcome.detail)
+        extra = '{"socket": "a", "outside_path": "a", "inside_path": "a", "zz": "x"}'
+        outcome = self._probe_printing(f"import sys;sys.stdout.write({extra!r})")
+        self.assertFalse(outcome.ran)
+
+    def test_the_control_shows_the_reply_the_real_probe_writes_is_accepted(self):
+        """The genuine ``PROBE_SOURCE``, unconfined, against a closed port, so the
+        accepted shape is derived from the probe rather than copied by hand."""
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        with TemporaryDirectory() as tmp:
+            spec = json.dumps(
+                {
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "outside_path": str(Path(tmp) / "out.txt"),
+                    "inside_path": str(Path(tmp) / "in.txt"),
+                }
+            )
+            outcome = sandbox_mod._run_probe(
+                [sys.executable, "-c", sandbox_mod.PROBE_SOURCE, spec],
+                cwd=Path(tmp),
+                env={"PATH": os.environ["PATH"]},
+            )
+        self.assertTrue(outcome.ran, outcome.detail)
+        self.assertTrue(outcome.socket.startswith("blocked:"), outcome.socket)
+        self.assertEqual(outcome.outside_write, "allowed")
+        self.assertEqual(outcome.inside_write, "allowed")
+        self.assertEqual(outcome.detail, "exit 0")
+
+    def test_a_wrapper_that_prints_a_non_object_fails_verification_instead_of_raising(self):
+        """End to end: the whole verdict, not just the probe reader."""
+
+        class PrintsAList(OsSandbox):
+            def wrap(self, argv, *, workdir):  # type: ignore[override]
+                return [sys.executable, "-c", "import sys;sys.stdout.write('[]')"]
+
+        # No real mechanism is needed: wrap is overridden, so the mechanism only
+        # names the mode in the report. A host without one (CI) must not fail here.
+        mechanism = sandbox_mod.Mechanism(
+            mode=iso.MODE_SANDBOX_EXEC, executable="/usr/bin/sandbox-exec"
+        )
+        report = verify(PrintsAList(mechanism))
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any(
+                "the sandboxed probe did not run" in r and "unparseable probe output" in r
+                for r in report["reasons"]
+            ),
+            report["reasons"],
+        )
+        self.assertTrue(report["control"]["ran"], "the control half must still have run")
+        self.assertFalse(report["sandboxed"]["ran"])
+
 
 class SandboxScratchLivesUnderTheStateTreeTests(Harness):
     def test_the_state_tree_declares_a_sandbox_subdirectory_and_it_is_owner_only(self):
