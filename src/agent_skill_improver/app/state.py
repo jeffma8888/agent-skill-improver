@@ -535,6 +535,18 @@ class StateStore:
         if rel not in self._pending_repairs:
             self._pending_repairs.append(rel)
 
+    def repairs_so_far(self) -> list[str]:
+        """Every mode reset this store has made, reported or not, relative to the root.
+
+        ``repaired_paths`` holds what ``ensure`` reported; a reset ``dir`` made
+        before ``ensure`` ran (or when it never runs, because the command refused
+        first) is still pending. A command that stops before any receipt reads
+        both, so a reset is named somewhere whatever stopped the command.
+        """
+        return list(self.repaired_paths) + [
+            rel for rel in self._pending_repairs if rel not in self.repaired_paths
+        ]
+
     def _now(self) -> str:
         if self._clock is None:
             from ..clock import SystemClock

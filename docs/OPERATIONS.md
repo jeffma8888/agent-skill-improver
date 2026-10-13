@@ -154,7 +154,11 @@ quarantine, refusal and deferral records, candidates, checkpoint and receipt), s
 the only things it leaves behind are the owner-only directory layout and the run
 lock. Every `daily` run, dry or committed, also resets any existing state path whose
 mode drifted from owner-only (`state_modes_repaired`, as `doctor` does); that repair
-writes no content, so it is not withheld. The receipt still reports how many files it withheld
+writes no content, so it is not withheld. A run that refuses after that repair
+(blocked, an unreadable record, a directory where its receipt goes) has no receipt
+to report it in, so the command names the reset paths on stderr, before the
+refusal: a drifted mode means something else touched the private tree, and the
+refusal must not swallow that. The receipt still reports how many files it withheld
 (`artifacts_withheld_dry_run`) and `--json` prints it. For a private source this is
 the difference between a preview and a copy of the transcripts on disk.
 

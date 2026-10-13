@@ -892,6 +892,20 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_repairs_of_refused_run(state: StateStore) -> None:
+    """Name on stderr the modes a run reset before it refused; nothing else has them."""
+    repaired = state.repairs_so_far()
+    if not repaired:
+        return
+    shown = ", ".join(one_line(p) for p in repaired[:5])
+    more = "" if len(repaired) <= 5 else f", +{len(repaired) - 5} more"
+    _err(
+        f"note: {len(repaired)} path(s) under {one_line(str(state.root))} had a mode other than "
+        f"owner-only and were reset to it before this run refused ({shown}{more}); the "
+        "refusal below wrote nothing else, so no receipt reports the repair\n"
+    )
+
+
 def cmd_daily(args: argparse.Namespace) -> int:
     from .app.daily import run_daily
 
@@ -899,35 +913,46 @@ def cmd_daily(args: argparse.Namespace) -> int:
     if not args.allow_missing_roles:
         config.require_roles("scorer", "improver", "judge")
     state = build_state(config)
-    runner = build_runner(config, state)
-    unstartable = runner.program_problems()
-    if unstartable:
-        raise ConfigError(
-            "model " + "; model ".join(unstartable) + "; set [model.<role>].argv in your config"
+    try:
+        # Wiring the runner opens the sandbox scratch root, and the run repairs
+        # the whole tree before anything it can refuse over; a refusal anywhere
+        # after this line writes no receipt to report a repair in. Measured
+        # before: a receipt left at 0644 was reset by the run that then refused
+        # as blocked, nothing said so, and the next `doctor` reported 0
+        # repaired. A drifted mode means something else touched the private
+        # tree; the refusal must not swallow that signal.
+        runner = build_runner(config, state)
+        unstartable = runner.program_problems()
+        if unstartable:
+            raise ConfigError(
+                "model " + "; model ".join(unstartable) + "; set [model.<role>].argv in your config"
+            )
+        # run_daily enforces this too -- that is the load-bearing check, since it
+        # is the one a library caller cannot skip. Enforcing here as well means
+        # the CLI refuses before `source.preflight()` runs a subprocess.
+        decide_isolation(
+            source_kind=config.source.kind,
+            runner_isolation=runner.isolation(),
+            roles=sorted(config.model_roles),
+        ).require()
+        source = build_source(config, state)
+        source.preflight()
+        store = build_skill_store(config)  # read-only, always
+        receipt = run_daily(
+            config,
+            source=source,
+            runner=runner,
+            skill_store=store,
+            state=state,
+            clock=SystemClock(),
+            day=args.day,
+            commit=bool(args.commit),
+            seed=args.seed,
+            mutation_reviewed=args.mutation_reviewed or None,
         )
-    # run_daily enforces this too -- that is the load-bearing check, since it is
-    # the one a library caller cannot skip. Enforcing here as well means the CLI
-    # refuses before `source.preflight()` runs a subprocess.
-    decide_isolation(
-        source_kind=config.source.kind,
-        runner_isolation=runner.isolation(),
-        roles=sorted(config.model_roles),
-    ).require()
-    source = build_source(config, state)
-    source.preflight()
-    store = build_skill_store(config)  # read-only, always
-    receipt = run_daily(
-        config,
-        source=source,
-        runner=runner,
-        skill_store=store,
-        state=state,
-        clock=SystemClock(),
-        day=args.day,
-        commit=bool(args.commit),
-        seed=args.seed,
-        mutation_reviewed=args.mutation_reviewed or None,
-    )
+    except AsiError:
+        _report_repairs_of_refused_run(state)
+        raise
     # Notes carry skill ids and source errors, so the text goes out through
     # _emit like every other listing: one line each, breaks spelled.
     lines = [
