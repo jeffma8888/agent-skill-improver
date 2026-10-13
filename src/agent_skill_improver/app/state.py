@@ -790,15 +790,29 @@ class StateStore:
         (a directory is not even a foreign entry) while the next run refused.
         """
         path = self.lock_path()
-        if path.is_symlink():
-            return f"the run lock path {path} is a symlink"
-        if not path.exists():
-            return None
-        if path.is_dir():
-            return f"the run lock path {path} is a directory"
-        if not path.is_file():
-            return f"the run lock path {path} is not a regular file"
-        return None
+        kind = _non_file_kind(path)
+        return f"the run lock path {path} {kind}" if kind else None
+
+    def day_artifact_problem(self, day: str) -> str | None:
+        """Why a committed ``daily`` would refuse what sits where the day's receipt or checkpoint goes.
+
+        None for absent paths or regular files: the day's artifacts are rewritten
+        by the next committed run of the same day. Measured before: a directory
+        at either path left ``doctor`` at ``ready`` (a directory is not a foreign
+        entry) and the run exited 70 from its final write, after every model
+        call, with no receipt and no checkpoint for the day; a fifo or a link at
+        either path was replaced without a word. Checked before the lock, so a
+        run never spends its budget on a day it cannot record. A dry run writes
+        neither file and is not asked.
+        """
+        return self.artifact_path_problem(
+            self.receipt_path(day, dry_run=False), "the day's receipt"
+        ) or self.artifact_path_problem(self.checkpoint_path(day), "the day's checkpoint")
+
+    def artifact_path_problem(self, path: Path, what: str) -> str | None:
+        """Why a committed ``daily`` would refuse to write ``what`` at ``path``, or None."""
+        kind = _non_file_kind(path)
+        return f"{what} path {path} {kind}" if kind else None
 
     # -- checkpoints -----------------------------------------------------
     def checkpoint_path(self, day: str) -> Path:
@@ -1321,6 +1335,22 @@ def _mode_ok(path: Path, want: int) -> bool:
         return stat.S_IMODE(path.stat().st_mode) == want
     except OSError:
         return False
+
+
+def _non_file_kind(path: Path) -> str | None:
+    """What sits at a path this tool writes a file to, or ``None`` for absent or a regular file.
+
+    ``is_symlink`` first, so a link is judged as a link, never as its target.
+    """
+    if path.is_symlink():
+        return "is a symlink"
+    if not path.exists():
+        return None
+    if path.is_dir():
+        return "is a directory"
+    if not path.is_file():
+        return "is not a regular file"
+    return None
 
 
 def _foreign_reason(path: Path) -> str | None:

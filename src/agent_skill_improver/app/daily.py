@@ -235,6 +235,18 @@ def run_daily(
     # so a receipt whose mode merely drifted is repaired and then read, as
     # ``doctor`` does, rather than refusing the run as unreadable.
     state.ensure()
+    # The two files a committed run ends by writing are checked before anything
+    # is read, scored or locked. Measured before: a directory at the day's
+    # receipt or checkpoint path exited 70 from the final write, after every
+    # model call, and left the day without a receipt or a checkpoint; a fifo or
+    # a link there was replaced without a word. A dry run writes neither file,
+    # so it is not refused over them.
+    blocked_path = None if dry_run else state.day_artifact_problem(run_day)
+    if blocked_path:
+        raise SafetyRefusal(
+            f"refusing to run: {one_line_label(blocked_path)}, where this run would write; "
+            "remove it if you did not put it there"
+        )
     # The newest daily receipt is read before any record is written. A run that
     # recorded a skill tree mutation blocks the next one too: the operations doc
     # says do not re-run until you know what wrote to the tree, and a scheduler

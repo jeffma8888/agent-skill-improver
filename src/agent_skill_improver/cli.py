@@ -436,8 +436,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # past day (only `daily --day` for that day would). Measured before: with
     # today's checkpoint truncated, this report said ready.
     unreadable_checkpoints: list[dict[str, str]] = []
+    today = day_key(SystemClock().now())
     if state_present and not layout_problems and (config.state_dir / "checkpoints").is_dir():
-        todays = state.checkpoint_path(day_key(SystemClock().now()))
+        todays = state.checkpoint_path(today)
         for checkpoint in state.unreadable_checkpoints():
             unreadable_checkpoints.append(checkpoint.to_dict())
             if checkpoint.path == todays:
@@ -450,16 +451,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     "another day's checkpoint cannot be read; `daily --day` for that day "
                     f"would refuse until it is moved aside or repaired: {checkpoint.reason}"
                 )
-        # A foreign entry elsewhere in the tree is a warning (left alone, stepped
-        # over); at today's checkpoint path it is the next run's first read, which
-        # refuses it by name, so here it is a problem. Measured before: a link
-        # at this path left the verdict at ready and the next run exited 3.
-        if todays.is_symlink() or (todays.exists() and not todays.is_file()):
-            problems.append(
-                f"today's checkpoint path {todays} holds "
-                f"{'a symlink' if todays.is_symlink() else 'something that is not a regular file'}"
-                ", which `daily` refuses to read; remove it if you did not put it there"
-            )
+    # A foreign entry elsewhere in the tree is a warning (left alone, stepped
+    # over); at today's checkpoint path or today's receipt path it sits where a
+    # committed run would write, which the run refuses by name before the lock
+    # rather than exit 70 from its final write, so here it is a problem. The
+    # same question the run asks, so the two cannot name the entry differently.
+    # Measured before: a link at the checkpoint path, and a directory at either
+    # (a directory is not a foreign entry), left the verdict at ready; the
+    # directory also let the run spend every model call before it failed.
+    if state_present and not layout_problems:
+        for what, subdir, path in (
+            ("today's checkpoint", "checkpoints", lambda: state.checkpoint_path(today)),
+            ("today's receipt", "receipts", lambda: state.receipt_path(today, dry_run=False)),
+        ):
+            if not (config.state_dir / subdir).is_dir():
+                continue
+            problem = state.artifact_path_problem(path(), what)
+            if problem:
+                problems.append(
+                    f"{problem}, where today's committed run would write and so refuses to "
+                    "start; remove it if you did not put it there"
+                )
     # The run lock is the first thing `daily` touches. A link, a directory or a
     # fifo there is refused by name (a directory is not even a foreign entry,
     # so the left-alone warning would not mention it). Measured before: both

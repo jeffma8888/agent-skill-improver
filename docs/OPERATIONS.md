@@ -81,13 +81,20 @@ in JSON): the next run stands down with the queue uncounted. A day checkpoint th
 does not parse, or parses to the wrong shape, is listed under
 `checkpoint_records_unreadable`; today's is a `PROBLEM`, because the next `daily`
 refuses by name before it scores anything, and another day's is a `WARN`, because
-only `daily --day` for that day would. A foreign entry at today's checkpoint path
-is a `PROBLEM` for the same reason: it is the next run's first read, and a read
-refuses it. The run lock, `state/locks/daily.lock`, is the very first thing `daily`
-touches, so a link, a directory or a fifo at that path is a `PROBLEM` too (`daily`
-refuses it by name; a regular file a finished run left behind is not a problem, the
-lock is `flock`, not the file). Every one of these reads leaves the entry as found;
-the remedy in each reason is to move it aside or repair it by hand.
+only `daily --day` for that day would. Anything but a regular file at today's
+checkpoint path or today's receipt path (a directory, a fifo, a link) is a
+`PROBLEM`: those two files are what a committed run ends by writing, and `daily`
+checks both right after the layout and mode repair every run performs, before the
+lock, before any record is read and before the source is touched, refusing by
+name (`SafetyRefusal`, exit 3) rather than spending every model call
+and then exiting 70 from the final write with no receipt and no checkpoint for
+the day. A regular file there is the previous run of the same day, and is
+rewritten; a dry run writes neither file and is not refused over them. The run
+lock, `state/locks/daily.lock`, is the very first thing `daily` touches, so a
+link, a directory or a fifo at that path is a `PROBLEM` too (`daily` refuses it by
+name; a regular file a finished run left behind is not a problem, the lock is
+`flock`, not the file). Every one of these checks leaves the entry as found; the
+remedy in each reason is to move it aside or repair it by hand.
 
 ## Exit codes
 
