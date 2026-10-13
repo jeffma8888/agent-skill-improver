@@ -158,7 +158,11 @@ writes no content, so it is not withheld. A run that refuses after that repair
 (blocked, an unreadable record, a directory where its receipt goes) has no receipt
 to report it in, so the command names the reset paths on stderr, before the
 refusal: a drifted mode means something else touched the private tree, and the
-refusal must not swallow that. The receipt still reports how many files it withheld
+refusal must not swallow that. The same holds for every other command that opens
+the tree (`candidates`, `set-aside`, `review`, `discover`, `apply`, `rollback`):
+each resets a drifted mode on the directories it opens, and a reset no output of
+the command has named is reported on stderr before the command ends, on success
+or on refusal (`doctor` counts its own in its report and names them under `--json`). The receipt still reports how many files it withheld
 (`artifacts_withheld_dry_run`) and `--json` prints it. For a private source this is
 the difference between a preview and a copy of the transcripts on disk.
 

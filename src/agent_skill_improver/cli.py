@@ -406,7 +406,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"{'y' if len(snapshot.unlistable_dirs) == 1 else 'ies'} the payload inventory "
                 f"could not list ({listed}); its payload count is a floor, not an inventory"
             )
-    state = build_state(config)
+    state = _open_state(config)
 
     # The layout is judged before anything touches the state tree, the runner's
     # sandbox scratch directory included: a state root that is a symlink is a
@@ -855,7 +855,7 @@ def cmd_rubrics(args: argparse.Namespace) -> int:
 
 def cmd_discover(args: argparse.Namespace) -> int:
     config = _load(args)
-    state = build_state(config)
+    state = _open_state(config)
     # `discover` reads the private source, so it carries the same gate as
     # `daily`. It is enforced before preflight for the same reason: a refusal
     # after the first subprocess call is a report, not a boundary.
@@ -892,18 +892,58 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
-def _report_repairs_of_refused_run(state: StateStore) -> None:
-    """Name on stderr the modes a run reset before it refused; nothing else has them."""
+#: Every state store a command opened in this process, so ``main`` can name
+#: a mode reset the command itself never reported. Cleared on entry to ``main``.
+_OPEN_STORES: list[StateStore] = []
+
+
+def _open_state(config: Config) -> StateStore:
+    state = build_state(config)
+    _OPEN_STORES.append(state)
+    return state
+
+
+def _repair_note(state: StateStore, when: str, tail: str) -> str | None:
     repaired = state.repairs_so_far()
     if not repaired:
-        return
+        return None
     shown = ", ".join(one_line(p) for p in repaired[:5])
     more = "" if len(repaired) <= 5 else f", +{len(repaired) - 5} more"
-    _err(
+    return (
         f"note: {len(repaired)} path(s) under {one_line(str(state.root))} had a mode other than "
-        f"owner-only and were reset to it before this run refused ({shown}{more}); the "
-        "refusal below wrote nothing else, so no receipt reports the repair\n"
+        f"owner-only and were reset to it {when} ({shown}{more}); {tail}\n"
     )
+
+
+def _report_repairs_of_refused_run(state: StateStore) -> None:
+    """Name on stderr the modes a run reset before it refused; nothing else has them."""
+    state.repairs_reported = True
+    note = _repair_note(
+        state,
+        "before this run refused",
+        "the refusal below wrote nothing else, so no receipt reports the repair",
+    )
+    if note:
+        _err(note)
+
+
+def _report_unreported_repairs() -> None:
+    """Name on stderr a mode reset no command output has named.
+
+    Every store opens its directories through ``dir``, which resets a drifted
+    mode on the way and leaves the reset pending for ``ensure`` to report.
+    Only ``daily`` calls ``ensure``, and only ``doctor`` reports its own walk;
+    the other commands reset and said nothing. Measured before: with ``state/``
+    at 0755, ``candidates``, ``review``, ``apply`` and ``rollback`` each put it
+    back to 0700 and none of them said so, on success or on refusal.
+    """
+    for state in _OPEN_STORES:
+        if state.repairs_reported:
+            continue
+        state.repairs_reported = True
+        note = _repair_note(state, "while this command ran", "the repair changed no content")
+        if note:
+            _err(note)
 
 
 def cmd_daily(args: argparse.Namespace) -> int:
@@ -912,7 +952,7 @@ def cmd_daily(args: argparse.Namespace) -> int:
     config = _load(args)
     if not args.allow_missing_roles:
         config.require_roles("scorer", "improver", "judge")
-    state = build_state(config)
+    state = _open_state(config)
     try:
         # Wiring the runner opens the sandbox scratch root, and the run repairs
         # the whole tree before anything it can refuse over; a refusal anywhere
@@ -953,6 +993,7 @@ def cmd_daily(args: argparse.Namespace) -> int:
     except AsiError:
         _report_repairs_of_refused_run(state)
         raise
+    state.repairs_reported = True  # the receipt counts and names them
     # Notes carry skill ids and source errors, so the text goes out through
     # _emit like every other listing: one line each, breaks spelled.
     lines = [
@@ -995,7 +1036,7 @@ def _set_aside_lines(receipt: Any) -> list[str]:
 
 def cmd_candidates(args: argparse.Namespace) -> int:
     config = _load(args)
-    state = StateStore(config.state_dir)
+    state = _open_state(config)
     scan = state.scan_candidates()
     items = (
         list(scan.readable) if args.all else [c for c in scan.readable if c.status in OPEN_STATUSES]
@@ -1050,7 +1091,7 @@ def cmd_set_aside(args: argparse.Namespace) -> int:
     under the quarantine directory, whose names flatten the stage.
     """
     config = _load(args)
-    state = StateStore(config.state_dir)
+    state = _open_state(config)
     scan = state.scan_set_aside()
     kinds = [k for k, _ in SET_ASIDE_KINDS]
     wanted = [args.kind] if args.kind else kinds
@@ -1135,7 +1176,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     from .app.promote import read_live_base_text, review_report
 
     config = _load(args)
-    state = StateStore(config.state_dir)
+    state = _open_state(config)
     candidate = state.read_candidate(args.candidate_id)
     # A review-only command still resolves the candidate against a real store:
     # read-only, never writable, but reading the LIVE configured canonical
@@ -1232,7 +1273,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     from .app.promote import apply_candidate
 
     config = _load(args)
-    state = build_state(config)
+    state = _open_state(config)
     candidate = state.read_candidate(args.candidate_id)
     approval = HumanApproval.from_cli(
         token=args.approve,
@@ -1275,7 +1316,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     from .app.promote import rollback_candidate
 
     config = _load(args)
-    state = build_state(config)
+    state = _open_state(config)
     candidate = state.read_candidate(args.candidate_id)
     store = build_skill_store(config, writable=True)
     result = rollback_candidate(candidate, skill_store=store, state=state, clock=SystemClock())
@@ -1840,28 +1881,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.json = False
     if not hasattr(args, "config"):
         args.config = None
+    _OPEN_STORES.clear()
+    # A mode reset the command made and did not report itself is named before
+    # whatever ends the command, so the refusal or the traceback never hides it.
     try:
-        return int(args.func(args))
+        rc = int(args.func(args))
+        _report_unreported_repairs()
+        return rc
     except BlockedRunUnreviewed as exc:
         # The condition exit 5 reports is still standing: a scheduler must keep
         # paging on it rather than file the morning after as an ordinary refusal.
+        _report_unreported_repairs()
         _err(f"{type(exc).__name__}: {exc}\n")
         return RC_BLOCKED
     except AsiError as exc:
+        _report_unreported_repairs()
         _err(f"{type(exc).__name__}: {exc}\n")
         return RC_REFUSED
     except FileNotFoundError as exc:
+        _report_unreported_repairs()
         _err(f"not found: {exc}\n")
         return RC_MISSING_FILE
     except BrokenPipeError:  # pragma: no cover - piping into head/less
+        # The reader went away; stderr may still be a terminal, so the reset is
+        # still named there, unless that pipe is gone too.
+        try:
+            _report_unreported_repairs()
+        except OSError:
+            pass
         return RC_OK
     except Exception:
         # Last resort. KeyboardInterrupt and SystemExit are not Exceptions and
         # keep their own exit statuses. Naming the failure and keeping the
         # traceback is what makes this a bug report rather than a silent 1.
+        _report_unreported_repairs()
         _err("internal error: this is a bug in asi, not a negative answer\n")
         _err(traceback.format_exc())
         return RC_INTERNAL_ERROR
+    finally:
+        # Nothing from this command is attributed to the next in-process call.
+        _OPEN_STORES.clear()
 
 
 if __name__ == "__main__":  # pragma: no cover

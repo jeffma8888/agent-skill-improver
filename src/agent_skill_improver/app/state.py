@@ -286,6 +286,10 @@ class StateStore:
         #: owner-only. Repair is never withheld: it is the one change to existing
         #: state a dry run makes, and it writes no content.
         self.repaired_paths: list[str] = []
+        #: Set by the command once a repair this store made has been reported
+        #: somewhere (a receipt, ``doctor``'s own report, a stderr note), so the
+        #: command's exit does not report it a second time.
+        self.repairs_reported = False
         #: Resets made by ``dir()`` that no repair walk has reported yet. ``dir()``
         #: runs before ``ensure()`` in every command (the sandbox scratch root is
         #: taken while wiring), so without this hand-off a root it reset would be
