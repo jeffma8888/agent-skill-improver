@@ -89,7 +89,7 @@ deliberately run less often, read it as such.
 An unattended producer with no brake is how a review queue becomes unbounded. The
 run stands down, with a reason in the receipt, when:
 
-- another run holds the lock on the state directory
+- another `asi` process (a run, an `apply` or a `rollback`) holds the lock on the state directory
 - `max_open_candidates` proposals already await review — nothing is discarded, the
   backlog is simply not grown
 - the source is unreachable; affected records are **deferred**, not failed

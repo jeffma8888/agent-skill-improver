@@ -388,7 +388,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `GateFailed` | on `review`/`apply`: the candidate is not exactly `validated`, because it failed the gate or is closed (`applied`, `rolled-back`, `gate-failed`, `blocked-run`); a closed candidate never exposes a token or an apply command again. On `rollback`: no backup manifest exists for the candidate, so there is nothing to roll back |
 | `CandidateTampered` | a derived field of the candidate record (patch hash, approval challenge, diff, target identity, status against the recorded gate, validation binding) does not recompute from its inputs. The file was edited after it was written; nothing was backed up or applied. Do not "fix" the record: re-propose |
 | `ApprovalRequired` | no token was passed, `--i-reviewed-this` is missing, or the token does not match the challenge recomputed from the candidate id, base hash and patch text. Re-run `review` and copy the token it prints now |
-| `AutomationRefused` | you are inside a scheduled run. Apply from an interactive shell |
+| `AutomationRefused` | you are inside a scheduled run. Apply or roll back from an interactive shell |
 | `BaseHashMismatch` | on `review` or `apply`: the skill file changed since the candidate was built, or what is at its path is not a regular file (a fifo or a device: refused on the open handle rather than read or waited on). The record is intact as far as it can be checked without the file (a record that fails its own recomputation is `CandidateTampered`, checked first); the evidence no longer describes this file, so re-run `asi daily --commit` to propose and validate against the new base |
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `CredentialInSkill` | the skill file holds a token, key or key block, so no model role was shown it and nothing was proposed. Remove the credential from the skill; the next pass proposes normally |
@@ -401,7 +401,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config or rubrics). Never a proposal target and never writable, by design |
 | `ReadOnlyViolation` | something tried to write through a skill store opened read-only. The daily driver always opens it that way; only `apply` and `rollback` open it writable, so seeing this outside them is a bug report |
 | `SafetyRefusal` | the residual class: the state directory (or one of its ancestors), a backup directory or the lock leaf is a symlink or not owner-only and could not be repaired; a directory sits where the day's receipt or checkpoint, or any state record, would be written; the daily driver was handed a writable skill store, or `apply` a read-only one; or promotion was attempted through a dry-run store. The message names which |
-| `LockHeld` (`daily`) | another `daily` run holds `state/locks/daily.lock`; the message shows who. Wait for it, or see Recovery if the holder is dead |
+| `LockHeld` (`daily`, `apply`, `rollback`) | another `asi` process holds `state/locks/daily.lock`; the message shows who (a run as `pid=N`, a promotion as `apply CAND-... pid=N`). `apply` and `rollback` hold the same lock from the live read to their receipt, so a promotion never lands in the tree a run is reading: before they did, the run finished `blocked` over the tool's own write and the schedule stopped until it was reviewed. Wait for the holder, or see Recovery if it is dead |
 | `IsolationRequired` | the source is private and the model roles are not confined by a verified OS sandbox. Install the mechanism or use the fixture corpus |
 | status already `applied` | re-applying is refused. Use `rollback` first if you want to redo it |
 
@@ -434,9 +434,11 @@ existing records are re-used rather than re-scored. Nothing needs cleaning up.
 
 **A stale lock.** `state/locks/daily.lock` is an `flock`, released by the kernel
 when the process exits, however it exits; the file that remains is inert and
-`doctor` does not flag it. If `daily` reports `LockHeld`, another `asi` process is
-alive and holds it: find it before anything else, because two concurrent runs
-interleaving writes is exactly what the lock exists to prevent.
+`doctor` does not flag it. If `daily`, `apply` or `rollback` reports `LockHeld`,
+another `asi` process is alive and holds it, and the message says which: find it
+before anything else, because two concurrent runs interleaving writes, or a
+promotion landing in the tree a run is reading, is exactly what the lock exists to
+prevent.
 
 **The queue is full and runs keep standing down.** That is the backlog guard
 working. Review or discard candidates, or raise `max_open_candidates` if you have

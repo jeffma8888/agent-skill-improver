@@ -32,8 +32,10 @@ alone kept the token valid and put unreviewed bytes into a skill file.
 
 from __future__ import annotations
 
+import os
 import shlex
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from pathlib import Path
 
@@ -43,6 +45,7 @@ from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDA
 from ..domain.integrity import verify_full_integrity
 from ..domain.validation import ValidationRecord
 from ..errors import (
+    LockHeld,
     ApprovalRequired,
     AutomationRefused,
     BaseHashMismatch,
@@ -50,6 +53,7 @@ from ..errors import (
     SafetyRefusal,
 )
 from ..hashing import sha256_text, short
+from .lock import RunLock
 from .state import StateStore
 
 APPLY_ENV_HINT = (
@@ -190,41 +194,58 @@ def apply_candidate(
     # its persisted validation, recomputed from the validation's own outcomes,
     # judgements and policy rather than trusted off the stored gate.
     verify_full_integrity(candidate, rubrics=rubrics, action="apply")
-    base_text = read_live_base_text(skill_store, candidate)
-    live_sha = sha256_text(base_text)
-    if live_sha != candidate.target.base_sha256:
-        raise BaseHashMismatch(
-            f"refusing to apply {candidate.id}: {candidate.target.canonical_path} now hashes "
-            f"{short(live_sha)} but the candidate was written against "
-            f"{short(candidate.target.base_sha256)}. The skill changed since the proposal was "
-            "made -- re-run `asi daily --commit` to validate against the new base."
-        )
-    verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="apply")
-    approval.verify(expected_token=candidate.required_approval_token)
-    if getattr(skill_store, "read_only", True):
-        # A wiring defect, not a token problem: name it as the residual refusal
-        # so the operator is not sent hunting for a new token.
-        raise SafetyRefusal(
-            "internal error: apply was handed a read-only skill store; refusing to continue"
-        )
+    # From the live read to the receipt, under the run lock ``daily`` holds: a
+    # promotion while a run reads the tree would change what the run is
+    # reading, and the run would record that as a skill tree mutation and
+    # block the schedule over a write the tool made itself.
+    with _holding_the_run_lock(state, "apply", candidate):
+        base_text = read_live_base_text(skill_store, candidate)
+        live_sha = sha256_text(base_text)
+        if live_sha != candidate.target.base_sha256:
+            raise BaseHashMismatch(
+                f"refusing to apply {candidate.id}: {candidate.target.canonical_path} now hashes "
+                f"{short(live_sha)} but the candidate was written against "
+                f"{short(candidate.target.base_sha256)}. The skill changed since the proposal "
+                "was made -- re-run `asi daily --commit` to validate against the new base."
+            )
+        verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="apply")
+        approval.verify(expected_token=candidate.required_approval_token)
+        if getattr(skill_store, "read_only", True):
+            # A wiring defect, not a token problem: name it as the residual
+            # refusal so the operator is not sent hunting for a new token.
+            raise SafetyRefusal(
+                "internal error: apply was handed a read-only skill store; refusing to continue"
+            )
 
-    # The receipt is written last, since it records the write; its path is
-    # judged first, before the backup directory and the skill write, since an
-    # apply whose receipt cannot be written would still have changed the skill.
-    # Measured before: a directory at the receipt path let the apply complete,
-    # mark the candidate applied and then exit 70 from the receipt write, with
-    # no account of the apply on disk.
-    _refuse_unwritable_receipt(state, "apply", candidate)
-    stamp = iso(clock.now()).replace(":", "").replace("-", "")
-    backup_dir = state.backup_dir_for(candidate.id, stamp)
-    receipt = skill_store.write_canonical(
-        candidate.target.canonical_path,
-        candidate.patch.new_text,
-        expected_sha256=candidate.target.base_sha256,
-        backup_dir=backup_dir,
-        skill_id=candidate.target.skill_id,
-        actor=f"human:{operator or 'unspecified'}",
-    )
+        # The receipt is written last, since it records the write; its path is
+        # judged first, before the backup directory and the skill write, since
+        # an apply whose receipt cannot be written would still have changed the
+        # skill. Measured before: a directory at the receipt path let the apply
+        # complete, mark the candidate applied and then exit 70 from the receipt
+        # write, with no account of the apply on disk.
+        _refuse_unwritable_receipt(state, "apply", candidate)
+        stamp = iso(clock.now()).replace(":", "").replace("-", "")
+        backup_dir = state.backup_dir_for(candidate.id, stamp)
+        receipt = skill_store.write_canonical(
+            candidate.target.canonical_path,
+            candidate.patch.new_text,
+            expected_sha256=candidate.target.base_sha256,
+            backup_dir=backup_dir,
+            skill_id=candidate.target.skill_id,
+            actor=f"human:{operator or 'unspecified'}",
+        )
+        return _record_apply(candidate, receipt, approval, gate, state, clock, operator)
+
+
+def _record_apply(
+    candidate: Candidate,
+    receipt: Any,
+    approval: HumanApproval,
+    gate: dict[str, Any],
+    state: StateStore,
+    clock: Clock,
+    operator: str,
+) -> dict[str, Any]:
     applied = Candidate(
         id=candidate.id,
         created_at=candidate.created_at,
@@ -259,6 +280,33 @@ def apply_candidate(
     }
     state.write_action_receipt("apply", candidate.id, out)
     return out
+
+
+@contextmanager
+def _holding_the_run_lock(state: StateStore, action: str, candidate: Candidate) -> Iterator[None]:
+    """Hold the run lock for the part of a promotion that reads or writes the tree.
+
+    The same lock ``daily`` takes, so a run and a promotion never overlap: the
+    owner line names the promotion, so a run refused meanwhile says who holds
+    it. Measured before: an apply during a scheduled run went through, the run
+    finished ``blocked`` with the applied document in ``skill_tree.changes``,
+    its candidates were closed as blocked-run, and the next morning's run was
+    refused until the operator reviewed a mutation the tool had made itself.
+    """
+    lock = RunLock(state.lock_path(), owner=f"{action} {candidate.id} pid={os.getpid()}")
+    try:
+        lock.__enter__()
+    except LockHeld as exc:
+        raise LockHeld(
+            f"refusing to {action} {candidate.id}: {exc} A promotion while a daily run reads "
+            "the tree would change what the run is reading, and the run would record that as a "
+            "skill tree mutation and block the schedule. Wait for the holder named above to "
+            "finish (a daily run, or another apply or rollback); nothing was written."
+        ) from exc
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
 
 
 def _refuse_unwritable_receipt(state: StateStore, action: str, candidate: Candidate) -> None:
@@ -301,15 +349,27 @@ def rollback_candidate(
     state: StateStore,
     clock: Clock,
 ) -> dict[str, Any]:
-    """Restore the file this candidate overwrote, from its verified backup."""
-    manifest = state.latest_backup_manifest(candidate.id)
-    if manifest is None:
-        raise GateFailed(
-            f"no backup manifest found for {candidate.id}; nothing to roll back. "
-            "A candidate that was never applied has nothing to restore."
-        )
-    _refuse_unwritable_receipt(state, "rollback", candidate)
-    result = skill_store.rollback(manifest)
+    """Restore the file this candidate overwrote, from its verified backup. Human-gated."""
+    if automation_active():
+        raise AutomationRefused("rollback refused: automation marker is set. " + APPLY_ENV_HINT)
+    # The manifest is chosen under the lock too: chosen before it, a rollback
+    # waiting on an apply would restore from the backup that apply then made
+    # obsolete.
+    with _holding_the_run_lock(state, "rollback", candidate):
+        manifest = state.latest_backup_manifest(candidate.id)
+        if manifest is None:
+            raise GateFailed(
+                f"no backup manifest found for {candidate.id}; nothing to roll back. "
+                "A candidate that was never applied has nothing to restore."
+            )
+        _refuse_unwritable_receipt(state, "rollback", candidate)
+        result = skill_store.rollback(manifest)
+        return _record_rollback(candidate, manifest, result, state, clock)
+
+
+def _record_rollback(
+    candidate: Candidate, manifest: Path, result: Any, state: StateStore, clock: Clock
+) -> dict[str, Any]:
     rolled = Candidate(
         id=candidate.id,
         created_at=candidate.created_at,

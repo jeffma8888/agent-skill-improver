@@ -16,6 +16,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from ..domain.candidate import one_line_label
 from ..errors import LockHeld, SafetyRefusal
 
 
@@ -98,10 +99,13 @@ class RunLock:
             except OSError:
                 held = ""
             os.close(fd)
+            # The holder is a run or a promotion; its owner line says which.
+            # Spelled onto one line: it is read back from a file.
             raise LockHeld(
-                f"another run holds {self.path}"
-                + (f" ({held})" if held else "")
-                + ". Overlapping runs would double-count records and race on the checkpoint."
+                f"another asi process holds {self.path}"
+                + (f" ({one_line_label(held)})" if held else "")
+                + ". Overlapping runs would double-count records and race on the checkpoint, "
+                "and a promotion during a run would land in the tree the run is reading."
             ) from exc
         try:
             os.ftruncate(fd, 0)
