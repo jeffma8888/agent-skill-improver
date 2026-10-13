@@ -30,6 +30,7 @@ one element was unfamiliar would quarantine healthy conversations.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Mapping
 
 from ..domain.conversation import (
@@ -212,7 +213,9 @@ def _as_int(value: Any, default: int) -> int:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(value)
+        # ``loads_untrusted`` never yields a non-finite float, but this is a
+        # public normalizer over any payload, and ``int(inf)`` raises.
+        return int(value) if math.isfinite(value) else default
     if isinstance(value, str):
         try:
             return int(value)
@@ -224,7 +227,9 @@ def _as_int(value: Any, default: int) -> int:
 def _opt_int(value: Any) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
         return int(value)
     return None
 

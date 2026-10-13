@@ -442,11 +442,12 @@ def _expect_number(raw: Mapping[str, Any], key: str, *, label: str) -> float:
     number = float(value)
     if not math.isfinite(number):
         # Python's own JSON decoder accepts the non-standard tokens NaN,
-        # Infinity and -Infinity by default. Neither the config loader nor this
-        # writer ever emits one, so one here is either a hand-edit or a decoder
-        # default nobody disabled -- either way, a non-finite policy value can
-        # make every downstream comparison (ratio thresholds, equality checks)
-        # behave unpredictably, so it is refused rather than propagated.
+        # Infinity and -Infinity by default; ``jsonio.loads_untrusted`` disables
+        # that, so a policy read through it can no longer carry one. This guard
+        # stays for the other routes in (a mapping built in code, a TOML value
+        # such as ``inf``), because a non-finite policy value can make every
+        # downstream comparison (ratio thresholds, equality checks) behave
+        # unpredictably, so it is refused rather than propagated.
         raise ValueError(f"{label}.{key} must be a finite number, got {value!r}")
     return number
 

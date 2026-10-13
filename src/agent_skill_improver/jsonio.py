@@ -16,6 +16,7 @@ artifacts become world-readable.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -27,8 +28,14 @@ FILE_MODE = 0o600
 
 
 def dumps(obj: Any) -> str:
-    """Canonical JSON: sorted keys, stable separators, trailing newline."""
-    return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    """Canonical JSON: sorted keys, stable separators, trailing newline.
+
+    ``allow_nan=False``: a non-finite float is a ``ValueError`` here, the mirror
+    of :func:`loads_untrusted`, which refuses to read one. Without it a writer
+    handed ``float("nan")`` would emit the token ``NaN`` into a state leaf and
+    the failure would surface later, on a read, as an unreadable record.
+    """
+    return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
 def write_json(path: Path, obj: Any, *, mode: int = FILE_MODE) -> str:
@@ -54,11 +61,39 @@ def loads_untrusted(text: str) -> Any:
     covers both, and classifies the record rather than crashing the run. State
     leaves and backup manifests take the same route: a file under ``state/`` is
     something a hand can edit, so it is read as untrusted too.
+
+    Numbers are held to the same standard. ``json.loads`` accepts the
+    non-standard tokens ``NaN``, ``Infinity`` and ``-Infinity`` by default, and
+    a legal literal that does not round to a finite double (``1e400``) parses to
+    ``inf`` without a word. Measured before this guard: one export whose element
+    ``position`` was ``1e400`` reached ``int()`` inside the normalizer and
+    aborted a committed daily run as an internal error, with no receipt and the
+    healthy export beside it unprocessed. Every float literal read here rounds
+    to a finite double and the three tokens are refused, or the text is a
+    ``ValueError``, so the record is classified like any other unreadable one.
+    Integer literals are untouched (Python's own digit limit already bounds
+    them), and the writer side matches: :func:`dumps` refuses a non-finite
+    float, so a writer bug fails loudly at write time instead of leaving a leaf
+    this reader can never read.
     """
     try:
-        return json.loads(text)
+        return json.loads(text, parse_float=_finite_float, parse_constant=_refuse_constant)
     except RecursionError as exc:
         raise ValueError("JSON is nested too deeply to be anything this tool reads") from exc
+
+
+def _finite_float(token: str) -> float:
+    number = float(token)
+    if not math.isfinite(number):
+        raise ValueError(
+            f"JSON number {token} does not round to a finite double; nothing this tool reads "
+            "can carry it"
+        )
+    return number
+
+
+def _refuse_constant(token: str) -> Any:
+    raise ValueError(f"{token} is not a JSON number; nothing this tool reads can carry it")
 
 
 def write_text_atomic(path: Path, text: str, *, mode: int = FILE_MODE) -> None:

@@ -156,7 +156,9 @@ pipes:
   cannot wedge the parent on a full pipe;
 - stderr is drained concurrently and only a bounded tail is kept for the
   failure message;
-- output that is not UTF-8, or JSON nested too deeply to parse, is a named
+- output that is not UTF-8, JSON nested too deeply to parse, or JSON carrying a
+  float that does not round to a finite double (1e400) or one of the
+  non-standard tokens NaN, Infinity and -Infinity, is a named
   per-record failure (`MalformedModelOutput`, `RecordDefect`) rather than an
   exception that escapes the per-record handlers and aborts the pass.
 
