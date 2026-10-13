@@ -89,6 +89,10 @@ SUBDIRS = (
     # 0700 guarantee as everything else derived from a transcript.
     "sandbox",
 )
+#: The state directories that hold records and nothing else. ``backups`` keeps
+#: one directory per candidate, ``sandbox`` per-call scratch, and ``locks`` the
+#: one lock leaf, which ``lock_entry_problem`` judges on its own.
+RECORD_SUBDIRS = tuple(name for name in SUBDIRS if name not in ("backups", "sandbox", "locks"))
 
 README_TEXT = (
     "This directory holds LOCAL-ONLY data: raw conversation exports,\n"
@@ -289,10 +293,24 @@ class StateStore:
         self._pending_repairs: list[str] = []
 
     def _persist(self, path: Path, write: Callable[[], object]) -> Path:
-        """Perform ``write`` unless writes are withheld; return the artifact path."""
+        """Perform ``write`` unless writes are withheld; return the artifact path.
+
+        A directory at the record's path is refused by name first. Every record
+        write ends in ``os.replace``, which swaps a link or a fifo out but cannot
+        swap a directory out, and a removal cannot unlink one. Measured before:
+        a directory at one conversation record's path escaped as
+        ``IsADirectoryError`` from the middle of the pass, exit 70, with the
+        day's receipt never written and ``doctor`` at ``ready`` (a directory is
+        not a foreign entry). The entry is left as found.
+        """
         if self.dry_run:
             self.withheld_writes.append(str(path.relative_to(self.root)))
             return path
+        if path.is_dir() and not path.is_symlink():
+            raise SafetyRefusal(
+                f"refusing to write the state record {path}: a directory sits at that path, "
+                "which a write cannot replace; remove it if you did not put it there"
+            )
         write()
         return path
 
@@ -407,6 +425,33 @@ class StateStore:
                 rel = path.relative_to(self.root)
                 problems.append(f"{rel} is {_mode_of(path)}, want {oct(want)}")
         return problems
+
+    def misplaced_directories(self) -> list[str]:
+        """Every directory sitting directly where only records are written, relative to the root.
+
+        The record directories (``RECORD_SUBDIRS``) hold regular files and
+        nothing else. A directory in one is not a foreign entry
+        (``_foreign_reason`` passes directories) and no read lists it (a record
+        read skips anything that is not a regular file), yet a write that comes
+        to that name refuses by name rather than replacing it (``_persist``). A
+        record directory this process cannot list is passed over, as the mode
+        walk passes it; the mode report names it. Nothing here removes one.
+        """
+        if not self.root.exists() or self.layout_problems():
+            return []
+        found: list[str] = []
+        for name in RECORD_SUBDIRS:
+            directory = self.root / name
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if path.is_dir() and not path.is_symlink():
+                    found.append(str(path.relative_to(self.root)))
+        return found
 
     def foreign_entries(self) -> list[str]:
         """Every entry under the root that the mode walk steps over, relative to it.
@@ -963,13 +1008,20 @@ class StateStore:
                 "promotion needs a committed state store"
             )
 
-    def write_action_receipt(self, action: str, candidate_id: str, payload: dict[str, Any]) -> Path:
-        self._refuse_promotion_when_withholding("promotion receipt")
+    def action_receipt_path(self, action: str, candidate_id: str) -> Path:
+        """Where the receipt of an ``apply`` or ``rollback`` of this candidate goes."""
         if action not in ("apply", "rollback"):
             raise SafetyRefusal(f"unknown candidate receipt action {action!r}")
-        path = self.dir("receipts") / f"{action}--{validate_candidate_id(candidate_id)}.json"
-        write_json(path, payload)
-        return path
+        return self.dir("receipts") / f"{action}--{validate_candidate_id(candidate_id)}.json"
+
+    def write_action_receipt(self, action: str, candidate_id: str, payload: dict[str, Any]) -> Path:
+        # Through ``_persist`` like every other record, so a directory at the path
+        # is refused by name; the promotion has asked ``artifact_path_problem``
+        # about this path before touching the skill, so the refusal here is
+        # the last line, not the first.
+        self._refuse_promotion_when_withholding("promotion receipt")
+        path = self.action_receipt_path(action, candidate_id)
+        return self._persist(path, lambda: write_json(path, payload))
 
     def backup_dir_for(self, candidate_id: str, stamp: str) -> Path:
         """A per-apply backup directory, created only as a direct child.

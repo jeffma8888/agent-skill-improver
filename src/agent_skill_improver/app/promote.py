@@ -208,6 +208,13 @@ def apply_candidate(
             "internal error: apply was handed a read-only skill store; refusing to continue"
         )
 
+    # The receipt is written last, since it records the write; its path is
+    # judged first, before the backup directory and the skill write, since an
+    # apply whose receipt cannot be written would still have changed the skill.
+    # Measured before: a directory at the receipt path let the apply complete,
+    # mark the candidate applied and then exit 70 from the receipt write, with
+    # no account of the apply on disk.
+    _refuse_unwritable_receipt(state, "apply", candidate)
     stamp = iso(clock.now()).replace(":", "").replace("-", "")
     backup_dir = state.backup_dir_for(candidate.id, stamp)
     receipt = skill_store.write_canonical(
@@ -254,6 +261,19 @@ def apply_candidate(
     return out
 
 
+def _refuse_unwritable_receipt(state: StateStore, action: str, candidate: Candidate) -> None:
+    """Refuse before the skill write when the action's receipt could not be written after it."""
+    problem = state.artifact_path_problem(
+        state.action_receipt_path(action, candidate.id), f"the {action} receipt"
+    )
+    if problem:
+        raise SafetyRefusal(
+            f"refusing to {action} {candidate.id}: {problem}, where the receipt of this "
+            f"{action} would be written; nothing was written. Remove it if you did not put "
+            "it there"
+        )
+
+
 def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str = "apply") -> str:
     """Read the canonical file the candidate claims to patch.
 
@@ -288,6 +308,7 @@ def rollback_candidate(
             f"no backup manifest found for {candidate.id}; nothing to roll back. "
             "A candidate that was never applied has nothing to restore."
         )
+    _refuse_unwritable_receipt(state, "rollback", candidate)
     result = skill_store.rollback(manifest)
     rolled = Candidate(
         id=candidate.id,

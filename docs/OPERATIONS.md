@@ -74,6 +74,15 @@ such a leaf by name without blocking on it (the backup *file* is judged by its
 hash instead, so a link to the right bytes is harmless), and a write replaces
 rather than follows it. `doctor` lists such entries as `left_alone` and
 prints a `WARN`, so a tree is never called clean while a foreign entry sits in it.
+A directory is the one entry a write cannot replace. One sitting where only
+records are written (every state directory but `backups/`, `sandbox/` and
+`locks/`) is not a foreign entry and no record read lists it, so `doctor` names
+it separately (`misplaced_directories`, a `WARN`, unless it is today's receipt or
+checkpoint, which is already a `PROBLEM`): a write that comes to that name
+refuses by name (`SafetyRefusal`, exit 3) and leaves it as found, rather than
+exiting 70 from the middle of its pass. `apply` and `rollback` ask about their
+own receipt path before touching the skill, so a promotion whose receipt could
+not be written does not happen.
 
 `doctor` also reads every record `daily` would refuse before `daily` has to. A
 candidate record that does not parse is a `PROBLEM` (`candidate_records_unreadable`
@@ -383,7 +392,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config or rubrics). Never a proposal target and never writable, by design |
 | `ReadOnlyViolation` | something tried to write through a skill store opened read-only. The daily driver always opens it that way; only `apply` and `rollback` open it writable, so seeing this outside them is a bug report |
-| `SafetyRefusal` | the residual class: the state directory (or one of its ancestors), a backup directory or the lock leaf is a symlink or not owner-only and could not be repaired; the daily driver was handed a writable skill store, or `apply` a read-only one; or promotion was attempted through a dry-run store. The message names which |
+| `SafetyRefusal` | the residual class: the state directory (or one of its ancestors), a backup directory or the lock leaf is a symlink or not owner-only and could not be repaired; a directory sits where the day's receipt or checkpoint, or any state record, would be written; the daily driver was handed a writable skill store, or `apply` a read-only one; or promotion was attempted through a dry-run store. The message names which |
 | `LockHeld` (`daily`) | another `daily` run holds `state/locks/daily.lock`; the message shows who. Wait for it, or see Recovery if the holder is dead |
 | `IsolationRequired` | the source is private and the model roles are not confined by a verified OS sandbox. Install the mechanism or use the fixture corpus |
 | status already `applied` | re-applying is refused. Use `rollback` first if you want to redo it |

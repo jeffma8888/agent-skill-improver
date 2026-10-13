@@ -459,6 +459,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # Measured before: a link at the checkpoint path, and a directory at either
     # (a directory is not a foreign entry), left the verdict at ready; the
     # directory also let the run spend every model call before it failed.
+    named_as_problems: set[Path] = set()
     if state_present and not layout_problems:
         for what, subdir, path in (
             ("today's checkpoint", "checkpoints", lambda: state.checkpoint_path(today)),
@@ -468,6 +469,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 continue
             problem = state.artifact_path_problem(path(), what)
             if problem:
+                named_as_problems.add(path())
                 problems.append(
                     f"{problem}, where today's committed run would write and so refuses to "
                     "start; remove it if you did not put it there"
@@ -527,6 +529,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     permissions_repaired: list[str] = []
     permission_problems: list[str] = []
     left_alone: list[str] = []
+    misplaced_directories: list[str] = []
     if state_present:
         if layout_problems:
             problems.append(
@@ -560,6 +563,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"{left_alone[0]}. This tool refuses to read such entries and replaces "
                     "rather than follows one it writes to; remove them if you did not put "
                     "them there."
+                )
+            # A directory where only records are written is not a foreign entry
+            # and no read lists it, but a write cannot replace it: a write that
+            # comes to that name refuses by name. Measured before: a directory
+            # at one conversation record's path left this report at ready and
+            # the next run exited 70 from the middle of its pass. One already
+            # raised to a problem above (today's receipt or checkpoint) is not
+            # repeated here as a warning.
+            misplaced_directories = state.misplaced_directories()
+            not_yet_named = [
+                rel
+                for rel in misplaced_directories
+                if config.state_dir / rel not in named_as_problems
+            ]
+            if not_yet_named:
+                count = len(not_yet_named)
+                warnings.append(
+                    f"{count} director{'y sits' if count == 1 else 'ies sit'} where only records "
+                    f"are written, under {config.state_dir}: {not_yet_named[0]}. A write that "
+                    "comes to that name refuses by name rather than replacing it; remove "
+                    f"{'it' if count == 1 else 'them'} if you did not put "
+                    f"{'it' if count == 1 else 'them'} there."
                 )
 
     # The health questions the operations doc asks, answered from the newest
@@ -660,6 +685,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "still_wrong": permission_problems,
             "unsafe_layout": layout_problems,
             "left_alone": left_alone,
+            "misplaced_directories": misplaced_directories,
         },
         "roles_configured": sorted(config.model_roles),
         "skill_roots": [
