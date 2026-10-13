@@ -309,7 +309,7 @@ class Candidate:
     def from_dict(raw: Mapping[str, Any]) -> "Candidate":
         if raw.get("schema") != SCHEMA_CANDIDATE:
             raise ValueError(f"unexpected candidate schema {raw.get('schema')!r}")
-        patch_raw = raw["patch"]
+        patch_raw = _object(raw["patch"], "patch")
         patch = Patch(
             new_text=str(patch_raw.get("new_text", "")),
             new_text_sha256=str(patch_raw["new_text_sha256"]),
@@ -317,7 +317,7 @@ class Candidate:
             added_lines=int(patch_raw.get("added_lines", 0)),
             removed_lines=int(patch_raw.get("removed_lines", 0)),
         )
-        target_raw = raw["target"]
+        target_raw = _object(raw["target"], "target")
         target = TargetRef(
             skill_id=str(target_raw["skill_id"]),
             root_id=str(target_raw["root_id"]),
@@ -334,7 +334,7 @@ class Candidate:
                 conversation_id=str(f["conversation_id"]),
                 evidence=tuple(EvidenceRef.from_dict(e) for e in f.get("evidence", [])),
             )
-            for f in raw.get("rubric_failures", [])
+            for f in _objects(raw.get("rubric_failures", []), "rubric_failures")
         )
         sources = tuple(
             SourceRef(
@@ -343,8 +343,13 @@ class Candidate:
                 position=int(s["position"]),
                 role=str(s.get("role", "")),
             )
-            for s in raw.get("sources", [])
+            for s in _objects(raw.get("sources", []), "sources")
         )
+        validation = raw.get("validation")
+        if validation is not None:
+            validation = dict(_object(validation, "validation"))
+            if validation.get("gate") is not None:
+                _object(validation["gate"], "validation.gate")
         return Candidate(
             id=str(raw["id"]),
             created_at=str(raw["created_at"]),
@@ -359,9 +364,34 @@ class Candidate:
             approval_challenge=str(raw.get("approval_challenge", "")),
             status=str(raw.get("status", STATUS_PROPOSED)),
             improver_command_id=str(raw.get("improver_command_id", "")),
-            validation=raw.get("validation"),
+            validation=validation,
             notes=tuple(str(x) for x in raw.get("notes", [])),
         )
+
+
+def _object(value: Any, what: str) -> Mapping[str, Any]:
+    """``value`` as the JSON object the record's shape says ``what`` is.
+
+    ``patch``, ``target`` and ``validation`` used to be read with ``.get``
+    straight off whatever the file held, so a record whose ``patch`` was a
+    string, a list or null escaped the reader as a bare ``AttributeError``,
+    which no caller classified: measured before, one such hand-edited record
+    took ``candidates``, ``review``, ``apply`` and ``doctor`` down together with
+    exit 70 and a traceback, where the contract is that an unreadable record is
+    listed as unreadable, by name. The array positions (``sources``,
+    ``rubric_failures``) were read by subscript and already failed as a
+    classified ``TypeError``; here they gain the field's name in the refusal.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{what} must be an object, got {type(value).__name__}")
+    return value
+
+
+def _objects(value: Any, what: str) -> list[Mapping[str, Any]]:
+    """``value`` as a list of objects, each refused by position if it is not one."""
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        raise ValueError(f"{what} must be an array, got {type(value).__name__}")
+    return [_object(item, f"{what}[{index}]") for index, item in enumerate(value)]
 
 
 MIN_HYPOTHESIS_CHARS = 40

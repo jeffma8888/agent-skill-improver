@@ -514,8 +514,12 @@ A dry run with the flag proceeds but writes no receipt, so the block stands.
 **`StateUnreadable: refusing to use the checkpoint record ...`** (exit 3). A state
 file under `state/` is truncated, hand-edited, or not a JSON object. Nothing is
 guessed at and the file is left as found; read it, then move it aside to continue
-without it. For a checkpoint that means the day's already-processed set is
-forgotten and those conversations are scored again. That re-spends model calls;
+without it. A candidate record whose nested fields are not the objects and arrays
+the schema says (a `patch` that is a string, a `sources` entry that is a number)
+is refused the same way, naming the field: `candidates` lists it as unreadable
+and exits 0, `review` and `apply` refuse it, `doctor` reports it as a `PROBLEM`.
+For a checkpoint that means the day's already-processed set is forgotten and
+those conversations are scored again. That re-spends model calls;
 a skill whose candidate from the first run is still open is skipped by the
 per-skill cap, and a skill whose candidate was closed gets a fresh `-02-`
 proposal. Nothing on disk is overwritten or mutated.

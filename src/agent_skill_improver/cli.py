@@ -1073,7 +1073,7 @@ def cmd_candidates(args: argparse.Namespace) -> int:
                 "status": c.status,
                 "skill_id": c.target.skill_id,
                 "canonical_path": c.target.canonical_path,
-                "gate_passed": bool((c.validation or {}).get("gate", {}).get("passed")),
+                "gate_passed": bool(((c.validation or {}).get("gate") or {}).get("passed")),
                 "added_lines": c.patch.added_lines,
                 "removed_lines": c.patch.removed_lines,
                 "created_at": c.created_at,
@@ -1083,7 +1083,7 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     }
     lines = [
         f"{c.id}  {c.status:<12} {c.target.skill_id:<28} "
-        f"gate={'pass' if (c.validation or {}).get('gate', {}).get('passed') else 'fail'}"
+        f"gate={'pass' if ((c.validation or {}).get('gate') or {}).get('passed') else 'fail'}"
         f"{' (closed)' if c.status != STATUS_VALIDATED else ''} "
         f"+{c.patch.added_lines}/-{c.patch.removed_lines}"
         for c in items

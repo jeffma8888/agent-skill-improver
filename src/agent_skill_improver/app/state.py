@@ -1354,7 +1354,10 @@ def _candidate_from_file(path: Path) -> Candidate:
         )
     try:
         return Candidate.from_dict(raw)
-    except (ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        # ``AttributeError`` is the shape error ``from_dict`` now names before it
+        # can happen; it stays here so a field this list does not yet cover is
+        # still one refusal rather than exit 70.
         raise StateUnreadable(
             f"refusing to use the candidate record {path}: it does not have the shape of a "
             f"candidate ({type(exc).__name__}: {exc})."
