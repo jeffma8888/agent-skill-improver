@@ -298,10 +298,13 @@ compute a rate over a page and call it a rate over the corpus.
 
 **`discovery.passed_over`** — every entry the source saw in its window and could
 not take as a thread, with the reason. For the fixtures source: an export this
-process cannot read, one that is not UTF-8 or not JSON (a number that does not
-round to a finite double, such as `1e400`, or one of the non-standard
-not-a-number and infinity tokens, counts as not JSON), a JSON value that is not
-an object, an object with no thread or a thread without an id; `doctor` lists the
+process cannot read, an entry that is not a regular file (a fifo, a device, a
+socket or a directory, judged on what a link there names) and so is never opened
+or read, one larger
+than 32 MiB, one that is not UTF-8 or not JSON (a number that does not round to
+a finite double, such as `1e400`, or one of the non-standard not-a-number and
+infinity tokens, counts as not JSON), a JSON value that is not an object, an
+object with no thread or a thread without an id; `doctor` lists the
 same entries as `WARN` lines under the source, and a fetch that cannot find a
 discovered thread while such entries exist quarantines the record as "no readable
 fixture" naming them, not as a thread that was never there. A directory the

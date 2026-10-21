@@ -41,7 +41,7 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
-from ..adapters.transcript_export import normalize_export
+from ..adapters.transcript_export import MAX_EXPORT_BYTES, normalize_export
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import (
     MAX_THREAD_ID_LENGTH,
@@ -320,7 +320,7 @@ class ConversationCliSource:
         workspace_argv: Sequence[str] = DEFAULT_WORKSPACE_ARGV,
         timeout_seconds: int = 120,
         raw_store: Any | None = None,
-        max_export_bytes: int = 32 * 1024 * 1024,
+        max_export_bytes: int = MAX_EXPORT_BYTES,
         output_excerpt_chars: int = 2000,
         max_messages: int | None = None,
     ) -> None:

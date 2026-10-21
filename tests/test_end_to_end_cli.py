@@ -2329,6 +2329,26 @@ class AnExportThatDoesNotReadAsAThreadIsNamedTests(unittest.TestCase):
         self.assertIn("0-list.json is JSON but not an object (list)", notes[0])
         self.assertIn("in no count here", notes[0])
 
+    def test_a_fifo_in_the_directory_is_named_and_no_command_waits_on_it(self):
+        """Measured before: ``doctor`` and ``daily`` both blocked for good."""
+        os.mkfifo(self.exports / "0-stuck.json")
+        started = time.monotonic()
+        doctor = run_cli([*self.cfg, "--json", "doctor"], timeout=60)
+        self.assertEqual(doctor.returncode, RC_OK, doctor.stderr)
+        warned = [w for w in json.loads(doctor.stdout)["warnings"] if "0-stuck.json" in w]
+        self.assertEqual(len(warned), 1)
+        self.assertIn("is not a regular file (a fifo), so it was not read", warned[0])
+        daily = run_cli(
+            [*self.cfg, "--json", "daily", "--commit", "--day", "2026-01-02"], timeout=60
+        )
+        self.assertEqual(daily.returncode, RC_OK, daily.stderr)
+        receipt = json.loads(daily.stdout)
+        self.assertEqual(receipt["counts"]["conversations_ingested"], 5, "the good five")
+        self.assertIn(
+            "0-stuck.json", [Path(e["entry"]).name for e in receipt["discovery"]["passed_over"]]
+        )
+        self.assertLess(time.monotonic() - started, 120.0)
+
 
 class ACheckpointDailyWouldRefuseIsNamedByDoctorTests(unittest.TestCase):
     """Measured before: with today's checkpoint truncated, ``doctor`` printed

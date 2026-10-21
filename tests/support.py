@@ -314,9 +314,13 @@ class InProcessRunner:
 
 
 def run_cli(
-    args: Sequence[str], *, env: dict[str, str] | None = None
+    args: Sequence[str], *, env: dict[str, str] | None = None, timeout: float = 300
 ) -> subprocess.CompletedProcess:
-    """Invoke the CLI the way an operator (or a scheduler) would."""
+    """Invoke the CLI the way an operator (or a scheduler) would.
+
+    ``timeout`` is for a test whose regression is a hang, so it fails in a
+    minute rather than after the default five.
+    """
     full_env = dict(os.environ)
     full_env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + str(REPO_ROOT)
     full_env.pop("ASI_CONFIG", None)
@@ -328,7 +332,7 @@ def run_cli(
         text=True,
         cwd=str(REPO_ROOT),
         env=full_env,
-        timeout=300,
+        timeout=timeout,
     )
 
 

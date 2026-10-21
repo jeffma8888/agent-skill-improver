@@ -1418,8 +1418,23 @@ class RollbackSafetyTests(Harness):
                 self.assertEqual(mode, oct(0o640))
 
     def test_a_recorded_mode_not_spelled_as_written_is_not_honoured(self):
-        """``-1`` restored the skill at 0o7777 and reported success."""
-        spellings = ("-1", "0o777777", "0o77777", "0o", "7", "644", 420, "0o644 ", ["0o644"])
+        """``-1`` restored the skill at 0o7777 and reported success. Each spelling
+        but the first few would narrow the live 0o640 if it were honoured, so the
+        shape check is what keeps the live mode, not the narrowing after it."""
+        spellings = (
+            "-1",
+            "0o777777",
+            "0o77777",
+            "0o",
+            "7",
+            "600",
+            420,
+            "0o600 ",
+            "0o600\n",
+            "0o00600",
+            "0O600",
+            ["0o600"],
+        )
         for i, recorded in enumerate(spellings):
             with self.subTest(recorded=recorded):
                 target, previous, mode = self.rollback_with(

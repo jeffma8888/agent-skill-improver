@@ -15,6 +15,7 @@ construction. Truncating a sorted list is a permanent filter, not a sample.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,62 @@ from ..jsonio import loads_untrusted
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
 from ..errors import RecordDefect, SourceUnavailable
-from .transcript_export import normalize_export
+from .transcript_export import MAX_EXPORT_BYTES, normalize_export
+
+#: What an entry that is not a regular file is called in its passed-over reason.
+_NOT_A_FILE = (
+    (stat.S_ISDIR, "a directory"),
+    (stat.S_ISFIFO, "a fifo"),
+    (stat.S_ISCHR, "a character device"),
+    (stat.S_ISBLK, "a block device"),
+    (stat.S_ISSOCK, "a socket"),
+)
+
+
+class _NotAnExport(Exception):
+    """An entry :func:`_read_export` refused without reading it; the message is why."""
+
+
+def _refuse_what_is_not_a_file(mode: int) -> None:
+    """Raise :class:`_NotAnExport` naming the kind, unless ``mode`` is a regular file's."""
+    if not stat.S_ISREG(mode):
+        kind = next((name for test, name in _NOT_A_FILE if test(mode)), "not a file")
+        raise _NotAnExport(f"is not a regular file ({kind}), so it was not read")
+
+
+def _read_export(path: Path, limit: int) -> bytes:
+    """The bytes of one export, read only if it is a regular file of at most ``limit`` bytes.
+
+    Judged by what the path names before it is opened, so a fifo, a device, a
+    socket or a directory is refused by kind without being opened at all
+    (opening a device can act on it: a tty opened by a scheduler-run session
+    leader becomes its controlling terminal), whether it sits in the directory
+    or a link there points at it. Judged again on the open handle, which
+    decides, because the entry can be swapped between the two: it is opened
+    ``O_NONBLOCK`` and ``O_NOCTTY``, so a fifo swapped in opens without waiting
+    for a writer and is refused, and a tty is never taken as the terminal.
+    Links are still followed, as the plain read before this followed them.
+    Measured before: one fifo named ``stuck.json`` beside a
+    good export parked ``doctor`` and ``daily`` for good, and the read had no
+    bound at all, where the command-line source stops at ``MAX_EXPORT_BYTES``.
+    An ``OSError`` (a missing or unreadable entry) is the caller's to name.
+    """
+    _refuse_what_is_not_a_file(os.stat(path).st_mode)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    fd = os.open(path, flags)
+    try:
+        _refuse_what_is_not_a_file(os.fstat(fd).st_mode)
+        chunks: list[bytes] = []
+        size = 0
+        while size <= limit:
+            chunk = os.read(fd, min(1024 * 1024, limit + 1 - size))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            size += len(chunk)
+        raise _NotAnExport(f"is larger than {limit} bytes, so it was not read past that")
+    finally:
+        os.close(fd)
 
 
 class FixtureConversationSource:
@@ -38,8 +94,10 @@ class FixtureConversationSource:
         *,
         output_excerpt_chars: int = 2000,
         max_messages: int | None = None,
+        max_export_bytes: int = MAX_EXPORT_BYTES,
     ) -> None:
         self.directory = Path(directory)
+        self.max_export_bytes = max_export_bytes
         self.output_excerpt_chars = output_excerpt_chars
         self.max_messages = max_messages
 
@@ -82,11 +140,16 @@ class FixtureConversationSource:
         passed_over: list[tuple[str, str]] = []
         for path in self._entries():
             try:
-                text = path.read_text(encoding="utf-8")
+                data = _read_export(path, self.max_export_bytes)
+            except _NotAnExport as exc:
+                passed_over.append((str(path), str(exc)))
+                continue
             except OSError as exc:
                 passed_over.append((str(path), f"cannot be read ({exc.strerror or exc})"))
                 continue
-            except ValueError as exc:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
                 passed_over.append((str(path), f"is not UTF-8 text ({exc})"))
                 continue
             try:

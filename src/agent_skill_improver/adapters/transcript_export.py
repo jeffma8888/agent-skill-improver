@@ -45,6 +45,10 @@ from ..domain.conversation import (
 from ..errors import RecordDefect
 from ..jsonio import loads_untrusted
 
+#: The largest export either conversation source reads: the bound on what the
+#: command prints, and on each file of a fixtures directory.
+MAX_EXPORT_BYTES = 32 * 1024 * 1024
+
 DEFAULT_OUTPUT_EXCERPT_CHARS = 2000
 DEFAULT_INPUT_EXCERPT_CHARS = 800
 

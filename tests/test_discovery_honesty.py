@@ -26,6 +26,7 @@ from agent_skill_improver.adapters.conversation_cli import (
     program_problem,
 )
 from agent_skill_improver.adapters.fixture_source import FixtureConversationSource
+from agent_skill_improver.adapters.transcript_export import MAX_EXPORT_BYTES
 from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.errors import RecordDefect, SourceUnavailable
 from agent_skill_improver.domain.discovery import (
@@ -220,6 +221,149 @@ class FixtureSourcePassedOverTests(unittest.TestCase):
         self.assertEqual(dict(page.passed_over), passed, "the page carries the same list")
         self.assertFalse(page.truncated_by_limit)
         self.assertTrue(page.is_total)
+
+    def test_a_fifo_named_like_an_export_is_passed_over_not_waited_on(self):
+        """Measured before: ``open`` blocked for a writer that never came."""
+        from tests.test_skill_identity_and_payloads import deadline
+
+        stuck = self.exports / "0-stuck.json"
+        os.mkfifo(stuck)
+        with deadline(5.0):
+            page = self.source().discover_page(since="", limit=50)
+        self.assertEqual(len(page.threads), 5, "the good exports are still read")
+        self.assertEqual(
+            page.passed_over, ((str(stuck), "is not a regular file (a fifo), so it was not read"),)
+        )
+
+    def test_a_link_to_a_fifo_is_judged_by_what_it_opens(self):
+        from tests.test_skill_identity_and_payloads import deadline
+
+        elsewhere = Path(self._tmp.name) / "pipe"
+        os.mkfifo(elsewhere)
+        link = self.exports / "0-link.json"
+        link.symlink_to(elsewhere)
+        with deadline(5.0):
+            passed = dict(self.source().passed_over())
+        self.assertEqual(passed, {str(link): "is not a regular file (a fifo), so it was not read"})
+
+    def test_a_directory_named_like_an_export_is_named_as_one(self):
+        folder = self.exports / "0-folder.json"
+        folder.mkdir()
+        passed = dict(self.source().passed_over())
+        self.assertEqual(
+            passed, {str(folder): "is not a regular file (a directory), so it was not read"}
+        )
+
+    def test_a_link_to_a_character_device_is_named_and_never_opened(self):
+        """A device was opened before its kind was judged; opening one can act
+        on it (a tty becomes the controlling terminal of a session leader)."""
+        from unittest import mock
+
+        if not os.path.exists(os.devnull):  # pragma: no cover - POSIX has one
+            self.skipTest("no null device")
+        link = self.exports / "0-null.json"
+        link.symlink_to(os.devnull)
+        real_open = os.open
+        opened: list[str] = []
+
+        def recording_open(path, *args, **kwargs):
+            opened.append(os.fspath(path) if isinstance(path, (str, os.PathLike)) else "")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("os.open", recording_open):
+            passed = dict(self.source().passed_over())
+        self.assertEqual(
+            passed, {str(link): "is not a regular file (a character device), so it was not read"}
+        )
+        self.assertNotIn(str(link), opened, "judged by its path before any open")
+        self.assertTrue(any(name.endswith(self.good[0]) for name in opened), "the control")
+
+    def test_a_socket_named_like_an_export_is_named_as_one(self):
+        import socket
+
+        path = self.exports / "0-sock.json"
+        if not hasattr(socket, "AF_UNIX") or len(str(path)) >= 100:  # pragma: no cover
+            self.skipTest("no room for a unix socket path here")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(server.close)
+        server.bind(str(path))
+        passed = dict(self.source().passed_over())
+        self.assertEqual(
+            passed, {str(path): "is not a regular file (a socket), so it was not read"}
+        )
+
+    def test_an_entry_swapped_for_a_fifo_after_it_was_judged_is_refused_on_the_handle(self):
+        """What decides is what was opened: a path judged a regular file that is
+        a fifo by the time it is opened is refused, and the open does not wait."""
+        from unittest import mock
+
+        from tests.test_skill_identity_and_payloads import deadline
+
+        fifo = self.exports / "0-swapped.json"
+        os.mkfifo(fifo)
+        regular = self.exports / self.good[0]
+        real_stat = os.stat
+
+        def stat_as_if_regular(path, *args, **kwargs):
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(fifo):
+                return real_stat(regular, *args, **kwargs)
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch("os.stat", stat_as_if_regular), deadline(5.0):
+            passed = dict(self.source().passed_over())
+        self.assertEqual(passed, {str(fifo): "is not a regular file (a fifo), so it was not read"})
+
+    def test_no_entry_it_reads_or_passes_over_leaves_a_descriptor_open(self):
+        if not os.path.isdir("/dev/fd"):  # pragma: no cover - macOS and Linux have it
+            self.skipTest("no /dev/fd to count descriptors in")
+        os.mkfifo(self.exports / "0-stuck.json")
+        (self.exports / "0-folder.json").mkdir()
+        bound = max((self.exports / name).stat().st_size for name in self.good)
+        (self.exports / "0-big.json").write_text("x" * (bound + 1), encoding="utf-8")
+        (self.exports / "0-list.json").write_text("[1]", encoding="utf-8")
+        source = FixtureConversationSource(self.exports, max_export_bytes=bound)
+        before = len(os.listdir("/dev/fd"))
+        for _ in range(10):
+            page = source.discover_page(since="", limit=50)
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+        self.assertEqual(len(page.threads), 5)
+        self.assertEqual(len(page.passed_over), 4)
+
+    def test_an_export_larger_than_the_bound_is_passed_over_by_name(self):
+        big = self.exports / "0-big.json"
+        big.write_text(
+            json.dumps({"thread": {"id": "big-1"}, "pad": "x" * 100_000}), encoding="utf-8"
+        )
+        size = big.stat().st_size
+
+        def page(bound: int):
+            source = FixtureConversationSource(self.exports, max_export_bytes=bound)
+            return source.discover_page(since="", limit=50)
+
+        at_the_bound = page(size)
+        self.assertIn("big-1", [t.thread_id for t in at_the_bound.threads], "exactly the bound")
+        self.assertEqual(at_the_bound.passed_over, ())
+        over = page(size - 1)
+        self.assertEqual(len(over.threads), 5, "every export under the bound is read")
+        self.assertEqual(
+            over.passed_over,
+            ((str(big), f"is larger than {size - 1} bytes, so it was not read past that"),),
+        )
+
+    def test_the_control_both_sources_share_one_bound_and_it_admits_the_big_export(self):
+        import inspect
+
+        from agent_skill_improver.adapters.conversation_cli import ConversationCliSource
+
+        default = inspect.signature(ConversationCliSource).parameters["max_export_bytes"].default
+        self.assertEqual(default, MAX_EXPORT_BYTES)
+        self.assertEqual(self.source().max_export_bytes, MAX_EXPORT_BYTES)
+        (self.exports / "0-big.json").write_text(
+            json.dumps({"thread": {"id": "big-1"}, "pad": "x" * 100_000}), encoding="utf-8"
+        )
+        page = self.source().discover_page(since="", limit=50)
+        self.assertIn("big-1", [t.thread_id for t in page.threads])
+        self.assertEqual(page.passed_over, ())
 
     @unittest.skipIf(os.geteuid() == 0, "root reads a mode-000 file")
     def test_an_export_this_process_cannot_read_is_passed_over_not_fatal(self):
