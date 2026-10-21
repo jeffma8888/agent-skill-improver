@@ -225,11 +225,13 @@ def _confidence(raw: Any) -> float | None:
     """The criterion's ``confidence`` as a float, or None when it is not one.
 
     Stored with the score and never decided on, and the model's to fill. A
-    boolean is not a confidence, though Python counts it as a number. JSON
-    integers are unbounded and ``loads_untrusted`` leaves them alone, so one
+    boolean is not a confidence, though Python counts it as a number. An integer
     too large for a float raised ``OverflowError`` out of the parser, which no
     caller classifies: measured, a scorer reply with ``10**400`` there aborted
     a committed daily run with no receipt, as the ``evidence`` field did.
+    ``loads_untrusted`` now refuses such a reply whole, as it refuses
+    ``1e400``, so the reply is malformed output; this guard keeps a card built
+    in code, which no parse has seen, from falling.
     """
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None

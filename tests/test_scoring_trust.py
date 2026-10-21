@@ -426,9 +426,10 @@ class EvidenceFieldShapeTests(unittest.TestCase):
 
 class ConfidenceFieldTests(unittest.TestCase):
     """``confidence`` is stored with the score, never decided on, and the
-    model's to fill. Measured before: an integer too large for a float (JSON
-    integers are unbounded, and ``loads_untrusted`` leaves them alone) raised
-    ``OverflowError`` out of the parser, and ``true`` was stored as 1.0."""
+    model's to fill. Measured before: an integer too large for a float raised
+    ``OverflowError`` out of the parser, and ``true`` was stored as 1.0. A reply
+    carrying one is now refused whole by ``loads_untrusted``; these cards are
+    built in code, which no parse has seen."""
 
     def _confidence_of(self, value):
         cid = rubric().criterion_ids[0]

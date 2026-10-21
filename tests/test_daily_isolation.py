@@ -1051,7 +1051,11 @@ class ScorerReplyShapeTests(DailyHarness):
 
     def test_a_scorer_reply_with_a_confidence_too_large_for_a_float_does_not_abort_the_run(self):
         """Measured before: ``float(10**400)`` raised ``OverflowError`` out of
-        the parser and the committed run ended with no receipt."""
+        the parser and the committed run ended with no receipt. The in-process
+        runner hands the card over without a JSON parse, as a card built in code
+        would be; a scorer process's reply carrying it is refused whole by
+        ``loads_untrusted`` (``test_a_model_reply_with_an_integer_no_double_holds_is_malformed``).
+        """
         _payload, scores = self._run_with_every_criterion("confidence", 10**400)
         self.assertTrue(scores)
         self.assertTrue(all(score.get("confidence") is None for score in scores), scores[:2])

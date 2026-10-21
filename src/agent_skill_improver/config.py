@@ -21,7 +21,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from .adapters.conversation_cli import (
     DEFAULT_DISCOVERY_ARGV,
@@ -29,14 +29,17 @@ from .adapters.conversation_cli import (
     DEFAULT_QUERY_ARGV,
     DEFAULT_WORKSPACE_ARGV,
 )
+from .adapters.bounded_process import MAX_TIMEOUT_SECONDS
 from .adapters.model_command import RoleCommand, role_command_from_mapping
 from .domain.authorship import DEFAULT_AGENT_TITLE_MARKERS
+from .domain.redaction import QUOTED_VALUE_CHARS, quoted_value
 from .domain.isolation import source_class
 from .domain.rubric import Rubric
 from .domain.skills import SkillRoot
 from .domain.validation import GatePolicy
 from .errors import ConfigError
 from .hashing import sha256_text
+from .jsonio import MAX_STORED_INT
 
 ROLE_SCORER = "scorer"
 ROLE_IMPROVER = "improver"
@@ -204,11 +207,23 @@ def _require_table(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 
 def _int_field(
-    table: Mapping[str, Any], key: str, default: int, *, where: str, minimum: int = 0
+    table: Mapping[str, Any],
+    key: str,
+    default: int,
+    *,
+    where: str,
+    minimum: int = 0,
+    maximum: int | None = None,
 ) -> int:
     value = table.get(key, default)
-    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
-        raise ConfigError(f"[{where}].{key} must be an integer >= {minimum}")
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < minimum
+        or (maximum is not None and value > maximum)
+    ):
+        bound = "" if maximum is None else f" and <= {maximum}"
+        raise ConfigError(f"[{where}].{key} must be an integer >= {minimum}{bound}")
     return value
 
 
@@ -496,6 +511,68 @@ def _read_utf8_or_refuse(path: Path, *, what: str) -> str:
         raise ConfigError(f"{what} {path} cannot be read ({exc.strerror or exc})") from exc
 
 
+def _document_nodes(raw: Mapping[str, Any]) -> Iterator[tuple[str, Any]]:
+    """Every value of a parsed TOML document, tables and arrays included, with
+    the dotted name that reaches it (``caps.max_open_candidates``,
+    ``criterion[0].weight``), in document order. Walked with a stack, since a
+    dotted key can nest tables as deep as the file is long."""
+    stack: list[tuple[str, Any]] = [("", raw)]
+    while stack:
+        where, value = stack.pop()
+        yield where, value
+        if isinstance(value, Mapping):
+            stack.extend(
+                (f"{where}.{key}" if where else key, item)
+                for key, item in reversed(list(value.items()))
+            )
+        elif isinstance(value, list):
+            stack.extend((f"{where}[{i}]", item) for i, item in reversed(list(enumerate(value))))
+
+
+#: A dotted name a refusal may print bare: the characters TOML's bare keys
+#: and ``_document_nodes``' separators use, nothing a terminal acts on.
+_PLAIN_NAME = re.compile(r"[A-Za-z0-9_.\[\]-]+")
+
+
+def _named(where: str) -> str:
+    """A dotted name from ``_document_nodes`` as a refusal prints it.
+
+    Bare when it is plain and short, else ``quoted_value``: a quoted TOML key
+    may hold a line break or a terminal escape, and a dotted key may nest as
+    deep as the file is long. Measured before: a raw line break and a raw
+    ``ESC[31m`` reached the message as written, a 5,000-character key came
+    back whole, and a key nested 50,000 deep made a 339 KB message.
+    """
+    if len(where) <= QUOTED_VALUE_CHARS and _PLAIN_NAME.fullmatch(where):
+        return where
+    return quoted_value(where)
+
+
+def _refuse_unstorable_integers(raw: Mapping[str, Any], source: Path) -> None:
+    """Refuse an integer, anywhere in a config or rubric, that no stored record holds.
+
+    A run writes the numbers it was configured with into its receipt (the caps,
+    the selection and source bounds), its candidates (the gate's counts, each
+    rubric's version), and ``loads_untrusted`` refuses an integer past
+    ``MAX_STORED_INT`` when it reads them back. Measured before this check, with
+    that refusal in place: a 401-digit ``[caps]`` or ``[source]`` bound let
+    ``doctor`` say ready and the first ``daily --commit`` exit 0, and every
+    later ``daily`` was refused over the receipt it had written, even after
+    the config was fixed; a 401-digit rubric ``version`` or ``[gate]`` count
+    made the candidates it wrote unreadable. The field is named (``_named``),
+    the number only by its length. The walk runs before any key is checked, so
+    a key no setting reads is refused here too: nothing could take the number.
+    """
+    for where, value in _document_nodes(raw):
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) > MAX_STORED_INT:
+            raise ConfigError(
+                f"{source}: {_named(where)} is an integer of {len(str(abs(value)))} digits, "
+                "larger than any number a stored record holds (about 1.8e308), so no setting "
+                "can take it: a run writes the numbers it is configured with into records, "
+                "and no later command could read such a record. Use a smaller number."
+            )
+
+
 def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None) -> Config:
     """Load and validate a config file. Raises :class:`ConfigError`."""
     config_path = Path(path).expanduser().resolve()
@@ -503,8 +580,11 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
         raise ConfigError(f"config file not found: {config_path}")
     try:
         raw = tomllib.loads(_read_utf8_or_refuse(config_path, what="config file"))
-    except tomllib.TOMLDecodeError as exc:
+    except ValueError as exc:
+        # TOMLDecodeError is one; so is the plain ValueError ``int`` raises on
+        # more digits than Python reads from text, which tomllib lets through.
         raise ConfigError(f"{config_path}: invalid TOML: {exc}") from exc
+    _refuse_unstorable_integers(raw, config_path)
 
     over = dict(overrides or {})
     _refuse_unknown_keys(raw, TOP_LEVEL_KEYS, where="the config file")
@@ -677,7 +757,14 @@ def _load_source(table: Mapping[str, Any], *, base_dir: Path) -> SourceConfig:
         output_excerpt_chars=_int_field(
             table, "output_excerpt_chars", 2000, where="source", minimum=1
         ),
-        timeout_seconds=_int_field(table, "timeout_seconds", 180, where="source", minimum=1),
+        timeout_seconds=_int_field(
+            table,
+            "timeout_seconds",
+            180,
+            where="source",
+            minimum=1,
+            maximum=MAX_TIMEOUT_SECONDS,
+        ),
     )
 
 
@@ -734,11 +821,9 @@ def _load_prompt(table: Mapping[str, Any]) -> PromptConfig:
 
 def _load_gate(table: Mapping[str, Any]) -> GatePolicy:
     ratio = table.get("min_judge_preference_ratio", 0.5)
-    if (
-        not isinstance(ratio, (int, float))
-        or isinstance(ratio, bool)
-        or not 0.0 <= float(ratio) <= 1.0
-    ):
+    # Compared as written: ``float`` of an integer past the double range
+    # raises OverflowError, which made every command fall at load (exit 70).
+    if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not 0 <= ratio <= 1:
         raise ConfigError("[gate].min_judge_preference_ratio must be a number in [0, 1]")
     return GatePolicy(
         min_fixes=_int_field(table, "min_fixes", 1, where="gate", minimum=0),
@@ -929,8 +1014,9 @@ def _load_rubrics(
         text = _read_utf8_or_refuse(path, what=f"rubric {rubric_id!r}")
         try:
             parsed = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
+        except ValueError as exc:  # TOMLDecodeError, or an integer past the digit limit
             raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+        _refuse_unstorable_integers(parsed, path)
         try:
             rubric = Rubric.from_mapping(parsed, source_sha256=sha256_text(text))
         except ValueError as exc:
@@ -960,7 +1046,26 @@ def _load_model_roles(table: Mapping[str, Any]) -> dict[str, RoleCommand]:
         try:
             roles[role] = role_command_from_mapping(role, merged)
         except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
+            # The message names the role it was checked as; a value the role
+            # took from [model.defaults] is written there, so say so, for the
+            # inherited key the message names (``command`` is checked as argv).
+            message = str(exc)
+            inherited = sorted(
+                key
+                for key in defaults
+                if key not in entry
+                and key in merged
+                and any(
+                    f"[model.{role}].{name}" in message or f"'{name}'" in message
+                    for name in ({key, "argv"} if key == "command" else {key})
+                )
+            )
+            note = (
+                f" ([model.{role}] takes {', '.join(inherited)} from [model.defaults])"
+                if inherited
+                else ""
+            )
+            raise ConfigError(f"{exc}{note}") from exc
     # The parent table is closed too, with the same hint: the role tables are
     # the only keys it may hold.
     _refuse_unknown_keys(table, frozenset(ROLES) | {"defaults"}, where="[model]")

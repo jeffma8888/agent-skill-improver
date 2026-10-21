@@ -89,6 +89,7 @@ workspaces = []
 # Keep the raw export under state/raw/ for auditing. Private content; gitignored.
 keep_raw = true
 output_excerpt_chars = 2000
+# Seconds; at most 604800 (seven days), as for each [model.*] role.
 timeout_seconds = 180
 # 0 means no cap. A cap is recorded on the conversation as `truncated`.
 max_messages = 0

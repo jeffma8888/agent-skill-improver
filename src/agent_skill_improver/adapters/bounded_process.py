@@ -79,6 +79,13 @@ def quotable(text: str, *, limit: int, from_end: bool) -> str:
 #: before the kill is at most one chunk.
 READ_CHUNK = 64 * 1024
 
+#: The longest wait a configured ``timeout_seconds`` may ask for: seven days.
+#: The platform's timer bounds the wait on the child's pipes, and a wait past
+#: it is refused by the platform mid-run (measured on macOS: from 9223372037
+#: seconds kqueue raised ``TypeError`` and a daily run fell, exit 70). Seven
+#: days is far inside such a bound and far past any call a daily run waits on.
+MAX_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
+
 
 class RunTimedOut(Exception):
     """The child did not finish within the deadline. It has been killed."""

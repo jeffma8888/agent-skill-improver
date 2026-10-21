@@ -60,6 +60,7 @@ from ..domain.redaction import redact
 from ..errors import MalformedModelOutput, TransientFailure
 from ..jsonio import loads_untrusted
 from .bounded_process import (
+    MAX_TIMEOUT_SECONDS,
     QUOTED_OUTPUT_CHARS,
     QUOTED_TAIL_CHARS,
     OutputOverflow,
@@ -381,8 +382,15 @@ def role_command_from_mapping(role: str, raw: Mapping[str, Any]) -> RoleCommand:
         )
     argv = [part.replace(PLACEHOLDER_ROLE, role) for part in argv]
     timeout = raw.get("timeout_seconds", 300)
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
-        raise ValueError(f"[model.{role}].timeout_seconds must be a positive integer")
+    if (
+        not isinstance(timeout, int)
+        or isinstance(timeout, bool)
+        or not 0 < timeout <= MAX_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            f"[model.{role}].timeout_seconds must be a positive integer of at most "
+            f"{MAX_TIMEOUT_SECONDS} (seven days)"
+        )
     max_bytes = raw.get("max_output_bytes", 4 * 1024 * 1024)
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
         raise ValueError(f"[model.{role}].max_output_bytes must be a positive integer")

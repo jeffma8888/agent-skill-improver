@@ -439,7 +439,14 @@ def _expect_number(raw: Mapping[str, Any], key: str, *, label: str) -> float:
     value = raw.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{label}.{key} must be a number, got {type(value).__name__}")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        # An int past the double range, from a mapping built in code: the
+        # untrusted parse refuses one before it gets here.
+        raise ValueError(
+            f"{label}.{key} must be a finite number, got an integer too large for one"
+        ) from None
     if not math.isfinite(number):
         # Python's own JSON decoder accepts the non-standard tokens NaN,
         # Infinity and -Infinity by default; ``jsonio.loads_untrusted`` disables

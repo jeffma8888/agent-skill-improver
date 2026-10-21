@@ -27,7 +27,9 @@ from agent_skill_improver.adapters.model_command import extract_json_object
 from agent_skill_improver.adapters.transcript_export import normalize_export
 from agent_skill_improver.app.state import StateStore
 from agent_skill_improver.errors import MalformedModelOutput, StateUnreadable
-from agent_skill_improver.jsonio import dumps, loads_untrusted
+from agent_skill_improver.config import load_config
+from agent_skill_improver.errors import ConfigError
+from agent_skill_improver.jsonio import MAX_STORED_INT, dumps, loads_untrusted
 from tests.support import FIXTURE_EXPORTS, build_env, run_cli
 
 HEALTHY_FILE = "failing"
@@ -193,6 +195,14 @@ class OneNonFiniteExportDoesNotAbortTheRunTests(unittest.TestCase):
                     extract_json_object(reply)
         self.assertEqual(extract_json_object('{"confidence": 0.5}'), {"confidence": 0.5})
 
+    def test_a_model_reply_with_an_integer_no_double_holds_is_malformed(self):
+        """As ``1e400`` already was: the reply is refused whole, so a scorer's
+        conversation is set aside rather than scored with that confidence."""
+        for number in (MAX_STORED_INT + 1, 10**400, -(10**400)):
+            with self.subTest(digits=len(str(number))):
+                with self.assertRaises(MalformedModelOutput):
+                    extract_json_object('Sure:\n{"confidence": %d, "verdict": "PASS"}' % number)
+
     def test_a_state_leaf_with_a_non_finite_number_is_a_named_refusal(self):
         state = StateStore(self.state_root)
         leaves = sorted((self.state_root / "candidates").glob("*.json"))
@@ -206,6 +216,348 @@ class OneNonFiniteExportDoesNotAbortTheRunTests(unittest.TestCase):
         with self.assertRaises(StateUnreadable) as ctx:
             state.read_candidate(candidate_id)
         self.assertIn("NaN", str(ctx.exception))
+
+
+def _set_field(config_path: Path, table: str, key: str, value: str) -> None:
+    """Write ``key = value`` into ``[table]`` of a test config, replacing any line there."""
+    out: list[str] = []
+    current, done = None, False
+    for line in config_path.read_text(encoding="utf-8").split("\n"):
+        header = re.match(r"^\[\[?([^\]]+)\]\]?\s*$", line)
+        if header:
+            if current == table and not done:
+                out.append(f"{key} = {value}")
+                done = True
+            current = header.group(1)
+        if current == table and re.match(rf"^{re.escape(key)}\s*=", line):
+            continue
+        out.append(line)
+    if not done:
+        out += ([] if current == table else ["", f"[{table}]"]) + [f"{key} = {value}"]
+    config_path.write_text("\n".join(out), encoding="utf-8")
+
+
+#: An integer with 401 digits: past the largest double (about 1.8e308).
+PAST_A_DOUBLE = "1" + "0" * 400
+#: More digits than Python reads from text (4300 by default).
+PAST_THE_DIGIT_LIMIT = "1" * 5000
+
+
+class AnIntegerNoDoubleHoldsTests(unittest.TestCase):
+    """An integer literal past the double range is refused like ``1e400``.
+
+    Measured before (3.11 and 3.13): it parsed as a Python int, and a stored
+    validation's ``min_judge_preference_ratio`` of 401 digits made ``review``
+    fall with ``OverflowError`` from ``float()``, exit 70.
+    """
+
+    def test_an_integer_literal_past_the_double_range_is_a_value_error(self):
+        for text in (
+            PAST_A_DOUBLE,
+            "-" + PAST_A_DOUBLE,
+            str(MAX_STORED_INT + 1),
+            str(-MAX_STORED_INT - 1),
+            '{"a": [%s]}' % PAST_THE_DIGIT_LIMIT,
+        ):
+            with self.subTest(text=text[:12], digits=len(text)):
+                with self.assertRaises(ValueError) as ctx:
+                    loads_untrusted(text)
+                self.assertIn("is larger than any double", str(ctx.exception))
+                self.assertNotIn("set_int_max_str_digits", str(ctx.exception))
+
+    def test_the_control_the_largest_integers_a_double_holds_still_read_exactly(self):
+        largest = int(sys.float_info.max)
+        self.assertEqual(MAX_STORED_INT, largest)
+        self.assertEqual(len(str(largest)), 309)
+        for number in (largest, -largest, 2**63, -(2**63), 0, 7):
+            with self.subTest(number=number):
+                self.assertEqual(loads_untrusted(str(number)), number)
+                self.assertIs(type(loads_untrusted(str(number))), int)
+        self.assertEqual(loads_untrusted("-0"), 0)
+
+    def test_a_policy_built_in_code_with_such_an_integer_is_a_value_error(self):
+        from agent_skill_improver.domain.validation import parse_gate_policy
+
+        policy = {
+            "min_fixes": 1,
+            "max_regressions": 0,
+            "max_holdout_degradations": 0,
+            "min_holdout_cases": 1,
+            "min_judge_preference_ratio": int(PAST_A_DOUBLE),
+            "require_judge": True,
+            "require_independent_judge": True,
+        }
+        with self.assertRaises(ValueError) as ctx:
+            parse_gate_policy(policy)
+        self.assertIn("min_judge_preference_ratio must be a finite number", str(ctx.exception))
+
+
+class AStoredNumberNoDoubleHoldsTests(unittest.TestCase):
+    def test_a_stored_gate_ratio_past_the_double_range_is_a_named_refusal(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            cfg = ["--config", str(build_env(base, dry_run=False, seed="past-a-double"))]
+            daily = run_cli([*cfg, "--json", "daily", "--commit", "--day", DAY])
+            self.assertEqual(daily.returncode, 0, daily.stderr)
+            listed = json.loads(run_cli([*cfg, "--json", "candidates"]).stdout)["candidates"]
+            validated = sorted(c["id"] for c in listed if c.get("status") == "validated")
+            self.assertTrue(validated, "the run needs a validated candidate")
+            leaf = base / "state" / "candidates" / f"{validated[0]}.json"
+            text, replaced = re.subn(
+                r'("min_judge_preference_ratio":\s*)[0-9.]+',
+                lambda m: m.group(1) + PAST_A_DOUBLE,
+                leaf.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(replaced, 1)
+            leaf.write_text(text, encoding="utf-8")
+            review = run_cli([*cfg, "review", validated[0]])
+        self.assertEqual(review.returncode, 3, review.stderr)
+        self.assertIn("is larger than any double", review.stderr)
+        self.assertNotIn("Traceback", review.stderr)
+
+
+class AConfigNumberThePlatformCannotHoldTests(unittest.TestCase):
+    """A config number past what the platform holds is a ``ConfigError`` at load.
+
+    Measured before (3.11 and 3.13): a 401-digit ``[gate]`` ratio made every
+    command that loads the config fall there with ``OverflowError``; a 5000-digit integer
+    anywhere in the config or a rubric fell with tomllib's digit-limit
+    ``ValueError``; and a model ``timeout_seconds`` of 10000000000 passed
+    ``doctor``, then made ``daily`` fall with ``TypeError`` from the wait on
+    the child's pipes (macOS kqueue refuses a timeout from 9223372037 s), each
+    exit 70 with a traceback.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name).resolve()
+        self.config_path = Path(build_env(self.base, seed="platform-numbers"))
+
+    def run_doctor_and_daily(self) -> list:
+        cfg = ["--config", str(self.config_path)]
+        return [run_cli([*cfg, "doctor"]), run_cli([*cfg, "daily", "--day", DAY])]
+
+    def assert_refused_at_load(self, needle: str) -> None:
+        for proc in self.run_doctor_and_daily():
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn(needle, proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+
+    def test_a_gate_ratio_past_the_double_range_is_a_config_error(self):
+        _set_field(self.config_path, "gate", "min_judge_preference_ratio", PAST_A_DOUBLE)
+        self.assert_refused_at_load("gate.min_judge_preference_ratio is an integer of 401 digits")
+        _set_field(self.config_path, "gate", "min_judge_preference_ratio", str(MAX_STORED_INT))
+        self.assert_refused_at_load("min_judge_preference_ratio must be a number in [0, 1]")
+
+    def test_the_control_a_gate_ratio_of_zero_or_one_written_as_an_integer_still_loads(self):
+        for value in ("0", "1", "0.5"):
+            with self.subTest(value=value):
+                _set_field(self.config_path, "gate", "min_judge_preference_ratio", value)
+                doctor = run_cli(["--config", str(self.config_path), "doctor"])
+                self.assertEqual(doctor.returncode, 0, doctor.stderr)
+                self.assertNotIn("min_judge_preference_ratio", doctor.stderr)
+                self.assertNotIn("Traceback", doctor.stderr)
+
+    def test_an_integer_with_more_digits_than_python_reads_is_a_config_error(self):
+        _set_field(self.config_path, "gate", "min_fixes", PAST_THE_DIGIT_LIMIT)
+        self.assert_refused_at_load("invalid TOML")
+
+    def test_the_same_integer_in_a_rubric_is_a_config_error(self):
+        rubrics = sorted((self.base / "rubrics").glob("*.toml"))
+        self.assertTrue(rubrics)
+        rubrics[0].write_text(
+            f"zz = {PAST_THE_DIGIT_LIMIT}\n" + rubrics[0].read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        self.assert_refused_at_load("invalid TOML")
+
+    def test_a_timeout_past_seven_days_is_a_config_error_not_a_fall_mid_run(self):
+        from agent_skill_improver.adapters.bounded_process import MAX_TIMEOUT_SECONDS
+
+        self.assertEqual(MAX_TIMEOUT_SECONDS, 7 * 24 * 60 * 60)
+        for table in ("model.defaults", "model.scorer", "source"):
+            for value in ("10000000000", str(MAX_TIMEOUT_SECONDS + 1), str(MAX_STORED_INT)):
+                with self.subTest(table=table, value=value[:12]):
+                    _set_field(self.config_path, table, "timeout_seconds", value)
+                    self.assert_refused_at_load("timeout_seconds must be")
+                    _set_field(self.config_path, table, "timeout_seconds", "30")
+
+    def test_the_control_a_timeout_of_exactly_seven_days_still_loads(self):
+        for table in ("model.defaults", "source"):
+            with self.subTest(table=table):
+                _set_field(self.config_path, table, "timeout_seconds", "604800")
+                doctor = run_cli(["--config", str(self.config_path), "doctor"])
+                self.assertEqual(doctor.returncode, 0, doctor.stderr)
+                self.assertNotIn("timeout_seconds", doctor.stderr)
+                self.assertNotIn("Traceback", doctor.stderr)
+
+    def test_a_timeout_of_zero_or_less_is_a_config_error_too(self):
+        for table in ("model.defaults", "model.scorer", "source"):
+            for value in ("0", "-1"):
+                with self.subTest(table=table, value=value):
+                    _set_field(self.config_path, table, "timeout_seconds", value)
+                    with self.assertRaises(ConfigError) as ctx:
+                        load_config(self.config_path)
+                    self.assertIn("timeout_seconds must be", str(ctx.exception))
+                    _set_field(self.config_path, table, "timeout_seconds", "30")
+
+    def test_a_bad_value_a_role_takes_from_model_defaults_names_that_table(self):
+        _set_field(self.config_path, "model.defaults", "timeout_seconds", "0")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        message = str(ctx.exception)
+        self.assertIn("timeout_seconds must be a positive integer", message)
+        self.assertRegex(
+            message, r"takes [a-z_, ]*\btimeout_seconds\b[a-z_, ]* from \[model\.defaults\]"
+        )
+        _set_field(self.config_path, "model.defaults", "timeout_seconds", "30")
+        _set_field(self.config_path, "model.scorer", "timeout_seconds", "0")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        self.assertNotRegex(str(ctx.exception), r"takes [a-z_, ]*\btimeout_seconds\b")
+
+    def test_the_note_names_only_the_inherited_key_that_failed(self):
+        # A role's own bad value is its own: no inherited key is blamed for it.
+        _set_field(self.config_path, "model.defaults", "timeout_seconds", "30")
+        _set_field(self.config_path, "model.scorer", "max_output_bytes", "0")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        self.assertIn("[model.scorer].max_output_bytes must be", str(ctx.exception))
+        self.assertNotIn("from [model.defaults]", str(ctx.exception))
+        # A role with its own argv takes none from the defaults, so its own bad
+        # argv blames no inherited one; a role without one does take it.
+        _set_field(self.config_path, "model.scorer", "max_output_bytes", "65536")
+        _set_field(self.config_path, "model.defaults", "argv", '["", "model"]')
+        _set_field(self.config_path, "model.scorer", "argv", '["", "model"]')
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        self.assertIn("[model.scorer].argv element #0", str(ctx.exception))
+        self.assertNotIn("from [model.defaults]", str(ctx.exception))
+        # Nor does a role that names its own command: its argv is that command.
+        lines = self.config_path.read_text(encoding="utf-8").split("\n")
+        at = lines.index("[model.scorer]")
+        own = [i for i in range(at + 1, len(lines)) if lines[i].startswith("argv =")][0]
+        lines[own] = "command = '\"\" model'"
+        self.config_path.write_text("\n".join(lines), encoding="utf-8")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        self.assertIn("[model.scorer].argv element #0", str(ctx.exception))
+        self.assertNotIn("from [model.defaults]", str(ctx.exception))
+        del lines[own]
+        self.config_path.write_text("\n".join(lines), encoding="utf-8")
+        with self.assertRaises(ConfigError) as ctx:
+            load_config(self.config_path)
+        message = str(ctx.exception)
+        self.assertIn("[model.scorer].argv element #0", message)
+        self.assertIn("([model.scorer] takes argv from [model.defaults])", message)
+
+
+#: The integer fields a run writes into a record, one per table that has them.
+STORED_FIELDS = (
+    ("source", "max_messages"),
+    ("selection", "max_conversations_per_run"),
+    ("caps", "max_open_candidates"),
+    ("gate", "min_fixes"),
+    ("prompt", "max_transcript_chars"),
+)
+
+
+class AConfigIntegerNoRecordHoldsTests(unittest.TestCase):
+    """An integer no stored record holds is refused at load, wherever it is written.
+
+    Measured before (3.11 and 3.13, with ``loads_untrusted`` already refusing
+    one): a 401-digit ``[caps].max_open_candidates`` let ``doctor`` say ready
+    and the first ``daily --commit`` exit 0, then every later ``daily`` exited
+    3 over the receipt the first had written (``JSON integer of 401 digits``),
+    even after the config was fixed; a 401-digit rubric ``version`` made the
+    candidates it wrote unreadable.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name).resolve()
+        self.config_path = Path(build_env(self.base, dry_run=False, seed="stored-integers"))
+
+    def test_an_integer_no_stored_record_holds_is_refused_in_any_config_field(self):
+        original = self.config_path.read_text(encoding="utf-8")
+        for table, key in STORED_FIELDS:
+            for number in (MAX_STORED_INT + 1, -MAX_STORED_INT - 1, int(PAST_A_DOUBLE)):
+                with self.subTest(field=f"{table}.{key}", digits=len(str(abs(number)))):
+                    _set_field(self.config_path, table, key, str(number))
+                    with self.assertRaises(ConfigError) as ctx:
+                        load_config(self.config_path)
+                    message = str(ctx.exception)
+                    self.assertIn(
+                        f"{table}.{key} is an integer of {len(str(abs(number)))} digits, larger "
+                        "than any number a stored record holds",
+                        message,
+                    )
+                    self.assertNotIn(str(abs(number))[:40], message)
+            self.config_path.write_text(original, encoding="utf-8")
+
+    def test_a_name_that_is_not_plain_is_quoted_bounded_and_no_key_is_said_to_be_stored(self):
+        original = self.config_path.read_text(encoding="utf-8")
+        for key, spelled in (
+            ('"line\\nbreak"', "'caps.line\\nbreak'"),
+            ('"red\\u001b[31m"', "'caps.red\\x1b[31m'"),
+            ('"' + "k" * 5000 + '"', "more chars not quoted]"),
+        ):
+            with self.subTest(key=key[:12]):
+                self.config_path.write_text(
+                    original.replace("[caps]\n", f"[caps]\n{key} = {PAST_A_DOUBLE}\n", 1),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(self.config_path)
+                message = str(ctx.exception)
+                self.assertIn(spelled, message)
+                self.assertIn("is an integer of 401 digits", message)
+                self.assertIn("so no setting can take it", message)
+                self.assertNotIn("\n", message)
+                self.assertNotIn("\x1b", message)
+                self.assertLess(len(message), 1000)
+        self.config_path.write_text(original, encoding="utf-8")
+
+    def test_doctor_and_daily_refuse_it_before_anything_is_written(self):
+        _set_field(self.config_path, "caps", "max_open_candidates", PAST_A_DOUBLE)
+        cfg = ["--config", str(self.config_path)]
+        for proc in (run_cli([*cfg, "doctor"]), run_cli([*cfg, "daily", "--commit", "--day", DAY])):
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("caps.max_open_candidates is an integer of 401 digits", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(list((self.base / "state").rglob("*.json")))
+
+    def test_the_same_integer_in_a_rubric_is_refused_by_its_field(self):
+        rubric = sorted((self.base / "rubrics").glob("*.toml"))[0]
+        text = rubric.read_text(encoding="utf-8")
+        for old, new in (
+            ("version = 1\n", f"version = {PAST_A_DOUBLE}\n"),
+            ("weight = 3\n", f"weight = {MAX_STORED_INT + 1}\n"),
+        ):
+            with self.subTest(field=new.split(" ")[0]):
+                self.assertIn(old, text)
+                rubric.write_text(text.replace(old, new, 1), encoding="utf-8")
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(self.config_path)
+                where = "rubric.version" if old.startswith("version") else "criterion[0].weight"
+                self.assertIn(f"{rubric.name}: {where} is an integer of", str(ctx.exception))
+        rubric.write_text(text, encoding="utf-8")
+
+    def test_the_control_the_largest_integer_a_record_holds_is_written_and_read_back(self):
+        _set_field(self.config_path, "caps", "max_open_candidates", str(MAX_STORED_INT))
+        cfg = ["--config", str(self.config_path)]
+        for day in (DAY, "2026-03-02"):
+            with self.subTest(day=day):
+                proc = run_cli([*cfg, "daily", "--commit", "--day", day])
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+        receipts = sorted((self.base / "state" / "receipts").glob(f"{DAY}--*.json"))
+        self.assertTrue(receipts)
+        self.assertIn(str(MAX_STORED_INT), receipts[0].read_text(encoding="utf-8"))
+        listed = run_cli([*cfg, "candidates"])
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertNotIn("UNREADABLE", listed.stdout + listed.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -119,7 +120,12 @@ def loads_untrusted(text: str) -> Any:
     lost. A well-formed pair is one character by then and is untouched.
     """
     try:
-        value = json.loads(text, parse_float=_finite_float, parse_constant=_refuse_constant)
+        value = json.loads(
+            text,
+            parse_float=_finite_float,
+            parse_int=_double_sized_int,
+            parse_constant=_refuse_constant,
+        )
     except RecursionError as exc:
         raise ValueError("JSON is nested too deeply to be anything this tool reads") from exc
     if _SURROGATE_ESCAPE.search(text) or _LONE_SURROGATE.search(text):
@@ -158,6 +164,35 @@ def _without_lone_surrogates(value: Any) -> Any:
                     pending.append(item)
                 node[fix(key)] = item
     return value
+
+
+#: The largest integer a stored record holds: no double is larger (about
+#: 1.8e308), and ``loads_untrusted`` refuses an integer past it. The config and
+#: rubric loaders hold every integer they read to it, so a number a run writes
+#: into a receipt or a candidate is one the next command reads back.
+MAX_STORED_INT = int(sys.float_info.max)
+#: Its digits (309).
+_DOUBLE_INT_DIGITS = len(str(MAX_STORED_INT))
+
+
+def _double_sized_int(token: str) -> int:
+    """An integer literal, refused when no double could hold it, as ``1e400`` is.
+
+    Measured before: a stored validation's ``min_judge_preference_ratio`` of
+    401 digits parsed as a Python int and made ``review`` fall with
+    ``OverflowError`` from ``float()``, exit 70. JSON has no leading zeros, so
+    the digits are the magnitude, and more of them than Python reads from text
+    are refused here rather than by ``int`` with advice no reader can take.
+    """
+    digits = len(token.lstrip("-"))
+    if digits <= _DOUBLE_INT_DIGITS:
+        number = int(token)
+        if abs(number) <= MAX_STORED_INT:
+            return number
+    raise ValueError(
+        f"JSON integer of {digits} digits is larger than any double (the largest is about "
+        "1.8e308); nothing this tool reads can carry it"
+    )
 
 
 def _finite_float(token: str) -> float:
