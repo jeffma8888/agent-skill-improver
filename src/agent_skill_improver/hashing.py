@@ -38,6 +38,14 @@ def short(digest: str) -> str:
 
 
 def tree_digest(entries: dict[str, str]) -> str:
-    """Order-independent digest of a ``{relative_path: file_sha256}`` mapping."""
+    """Order-independent digest of a ``{relative_path: file_sha256}`` mapping.
+
+    A path is digested as the bytes the file system holds for it. A name that
+    is not UTF-8 reaches Python as lone surrogates (``os.fsdecode``), and
+    ``surrogateescape`` turns them back into those bytes, so two such names
+    stay two digests. Measured before: a strict encode made the first tree
+    reading of a daily run fall with ``UnicodeEncodeError`` for a skill
+    directory whose name is not UTF-8, and so every run after it.
+    """
     lines = [f"{k}\x00{v}" for k, v in sorted(entries.items())]
-    return sha256_bytes("\x01".join(lines).encode("utf-8"))
+    return sha256_bytes("\x01".join(lines).encode("utf-8", errors="surrogateescape"))

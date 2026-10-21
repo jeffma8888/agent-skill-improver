@@ -160,7 +160,13 @@ pipes:
   float that does not round to a finite double (1e400) or one of the
   non-standard tokens NaN, Infinity and -Infinity, is a named
   per-record failure (`MalformedModelOutput`, `RecordDefect`) rather than an
-  exception that escapes the per-record handlers and aborts the pass.
+  exception that escapes the per-record handlers and aborts the pass;
+- a JSON string holding one half of a surrogate pair on its own (a cut emoji)
+  reads as U+FFFD, so the record is kept and every later write can encode it;
+- a lone surrogate a string carries into a state write (how a file name that
+  is not UTF-8 reaches Python) is written as its JSON escape, so the write
+  never fails on it, and a tree digest takes such a name as the bytes the file
+  system holds.
 
 Two more things are refused before any child runs. A discovered thread id must
 satisfy `is_safe_thread_id` (no leading dash, no whitespace or control

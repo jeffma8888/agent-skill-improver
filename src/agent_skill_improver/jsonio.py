@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,28 @@ def dumps(obj: Any) -> str:
     of :func:`loads_untrusted`, which refuses to read one. Without it a writer
     handed ``float("nan")`` would emit the token ``NaN`` into a state leaf and
     the failure would surface later, on a read, as an unreadable record.
+
+    A lone surrogate is written as its JSON escape (``\\udcff``). It is how a
+    file name that is not UTF-8 reaches Python (``os.fsdecode``, and so
+    ``os.scandir`` and ``os.walk``, give each such byte as one), and with
+    ``ensure_ascii`` off the encoder writes it raw, which no UTF-8 encoder
+    accepts. Measured before: a fixtures entry with such a name, passed over
+    because it was not an export, made a committed daily run fall with
+    ``UnicodeEncodeError`` from the receipt write, with no receipt. A surrogate
+    can only sit inside a JSON string, where the escape is the same string to
+    any parser, with one exception: a high half directly followed by a low half
+    is read as the one character the pair spells. A directory listing gives
+    only low halves (U+DC80 to U+DCFF), so a file name never meets it.
+    :func:`loads_untrusted` reads a lone one back as U+FFFD.
     """
-    return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    text = json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)
+    if _LONE_SURROGATE.search(text):
+        text = _LONE_SURROGATE.sub(_json_escape, text)
+    return text + "\n"
+
+
+def _json_escape(match: re.Match[str]) -> str:
+    return f"\\u{ord(match.group()):04x}"
 
 
 def write_json(path: Path, obj: Any, *, mode: int = FILE_MODE) -> str:
@@ -48,6 +69,15 @@ def write_json(path: Path, obj: Any, *, mode: int = FILE_MODE) -> str:
 def read_json(path: Path) -> Any:
     """Read a JSON file a hand could have edited; deep nesting is a ``ValueError``."""
     return loads_untrusted(path.read_text(encoding="utf-8"))
+
+
+#: A JSON escape for one UTF-16 surrogate half (U+D800 to U+DFFF). Two of them
+#: in order decode to one character; one on its own decodes to a lone surrogate.
+_SURROGATE_ESCAPE = re.compile(r"\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
+#: A lone surrogate as ``json.loads`` leaves one in a decoded string.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+#: What a lone surrogate reads as: the Unicode replacement character.
+REPLACEMENT_CHARACTER = "\ufffd"
 
 
 def loads_untrusted(text: str) -> Any:
@@ -75,11 +105,59 @@ def loads_untrusted(text: str) -> Any:
     them), and the writer side matches: :func:`dumps` refuses a non-finite
     float, so a writer bug fails loudly at write time instead of leaving a leaf
     this reader can never read.
+
+    Strings are held to what a UTF-8 writer can encode. JSON can spell one half
+    of a UTF-16 surrogate pair on its own (``"\\ud83d"``), which is what a tool
+    that cuts an emoji between its halves writes, and ``json.loads`` decodes it
+    to a lone surrogate that no UTF-8 encoder accepts. Measured before: one
+    conversation export holding one such escape made a committed daily run fall
+    with ``UnicodeEncodeError`` from the conversation write, with no receipt,
+    and a scorer rationale or an improver's text holding one fell the same way
+    from the scorecard write and the patch hash. Each lone surrogate, in a
+    string or a key, now reads as U+FFFD: the record is kept (one cut emoji is
+    not a reason to lose a conversation) and the mark shows where text was
+    lost. A well-formed pair is one character by then and is untouched.
     """
     try:
-        return json.loads(text, parse_float=_finite_float, parse_constant=_refuse_constant)
+        value = json.loads(text, parse_float=_finite_float, parse_constant=_refuse_constant)
     except RecursionError as exc:
         raise ValueError("JSON is nested too deeply to be anything this tool reads") from exc
+    if _SURROGATE_ESCAPE.search(text) or _LONE_SURROGATE.search(text):
+        value = _without_lone_surrogates(value)
+    return value
+
+
+def _without_lone_surrogates(value: Any) -> Any:
+    """``value`` with each lone surrogate in its strings and keys made U+FFFD.
+
+    Iterative rather than recursive, so a document as deep as the decoder
+    accepted is walked without spending the stack the decoder just used.
+    """
+
+    def fix(text: str) -> str:
+        return _LONE_SURROGATE.sub(REPLACEMENT_CHARACTER, text)
+
+    if isinstance(value, str):
+        return fix(value)
+    pending: list[Any] = [value]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                if isinstance(item, str):
+                    node[index] = fix(item)
+                elif isinstance(item, (list, dict)):
+                    pending.append(item)
+        elif isinstance(node, dict):
+            entries = list(node.items())
+            node.clear()
+            for key, item in entries:
+                if isinstance(item, str):
+                    item = fix(item)
+                elif isinstance(item, (list, dict)):
+                    pending.append(item)
+                node[fix(key)] = item
+    return value
 
 
 def _finite_float(token: str) -> float:

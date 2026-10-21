@@ -1520,7 +1520,6 @@ class RollbackSafetyTests(Harness):
         cases = (
             ("target_path", "a\x00b/" + SKILL_FILENAME),
             ("target_path", "x" * 5000 + "/" + SKILL_FILENAME),
-            ("target_path", "\ud800/" + SKILL_FILENAME),
             ("backup_path", "x" * 5000),
             ("backup_path", "a\x00b"),
         )
@@ -1542,6 +1541,22 @@ class RollbackSafetyTests(Harness):
                     self.assertEqual(original_backup.read_text(encoding="utf-8"), backup_text)
                 finally:
                     target.write_text(previous, encoding="utf-8")
+
+    def test_a_target_path_holding_a_lone_surrogate_is_refused_with_nothing_written(self):
+        """A recorded path the manifest spells with a cut surrogate escape is read
+        as U+FFFD, so it names no file: a refusal, never a write elsewhere."""
+        target, manifest, previous = self.apply_a_change()
+        applied = target.read_text(encoding="utf-8")
+        self.assertNotEqual(applied, previous, "starts from a real apply")
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        raw["target_path"] = str(target.parent) + "\ud800/" + SKILL_FILENAME
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        self.assertIn("\\ud800", manifest.read_text(encoding="utf-8"), "written as an escape")
+        with self.assertRaises(BaseHashMismatch) as ctx:
+            self.store(read_only=False).rollback(manifest)
+        self.assertIn("\ufffd", str(ctx.exception))
+        self.assertEqual(target.read_text(encoding="utf-8"), applied)
+        self.assertEqual(sorted(p.name for p in self.canonical_dir.iterdir()), ["broken", "shared"])
 
     @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
     def test_a_target_path_through_a_symlink_loop_is_a_named_refusal(self):
