@@ -2675,6 +2675,166 @@ class ADocumentWithAByteOrderMarkIsImprovableTests(unittest.TestCase):
         self.assertIn(FIX_MARKER.encode(), after)
 
 
+class SchedulerTemplatesRefuseAPathTheyCannotCarryTests(unittest.TestCase):
+    """A path with a character the terminal output escapes cannot be carried by a
+    printed template, nor a line break by a cron one. Measured before: a
+    config under a directory whose name held a newline printed a cron job cut in
+    two (the rest of the path a crontab line of its own), and one holding
+    ``\\x01`` or a carriage return printed a property list that parsed and
+    named a config file that does not exist."""
+
+    def render(self, name: str, flavor: str):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve() / name
+            base.mkdir()
+            config_path = Path(build_env(base, dry_run=False)).resolve()
+            proc = run_cli(["--config", str(config_path), "scheduler-template", flavor])
+        return proc, config_path
+
+    def test_a_path_holding_a_line_break_or_an_escaped_character_is_refused(self):
+        refused = [
+            (name, flavor)
+            for name in ("carriage\rreturn", "ctl\x01x", "bidi\u202ex")
+            for flavor in ("cron", "launchd")
+        ] + [("line\nbreak", "cron")]
+        for name, flavor in refused:
+            with self.subTest(name=name, flavor=flavor):
+                proc, _config = self.render(name, flavor)
+                self.assertEqual(proc.returncode, RC_REFUSED, proc.stderr)
+                self.assertIn("the config file path", proc.stderr)
+                self.assertIn("Nothing was printed", proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertEqual(proc.stdout, "", "no part of a template is printed")
+
+    def test_the_control_a_tab_and_a_plist_line_break_are_carried_exactly(self):
+        import plistlib
+        import shlex
+
+        for name in ("tab\tx", "line\nbreak"):
+            with self.subTest(name=name, flavor="launchd"):
+                proc, config_path = self.render(name, "launchd")
+                self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+                argv = plistlib.loads(proc.stdout.encode("utf-8"))["ProgramArguments"]
+                self.assertEqual(argv[argv.index("--config") + 1], str(config_path))
+        proc, config_path = self.render("tab\tx", "cron")
+        self.assertEqual(proc.returncode, RC_OK, proc.stderr)
+        jobs = [
+            line
+            for line in proc.stdout.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "daily --commit" in line
+        ]
+        self.assertEqual(len(jobs), 1, proc.stdout)
+        tokens = shlex.split(jobs[0].split(None, 5)[5])
+        self.assertEqual(tokens[tokens.index("--config") + 1], str(config_path))
+
+    def render_in_process(
+        self,
+        flavor: str,
+        *,
+        repo_name: str | None = None,
+        python: str | None = None,
+        state_name: str | None = None,
+    ) -> tuple[int, str, str, str]:
+        """One path made unusual, the other three plain, rendered in this process.
+
+        Returns the exit code, stdout, stderr and the unusual path. The
+        interpreter path comes from the process itself, so it is the one way
+        to give a name APFS refuses to create (a lone surrogate).
+        """
+        import contextlib
+        import io
+        from unittest import mock
+
+        from agent_skill_improver import cli
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            config_path = Path(build_env(base / "plain", dry_run=False)).resolve()
+            repo, interpreter, unusual = cli.repo_root(), sys.executable, ""
+            if state_name is not None:
+                unusual = str(base / state_name)
+                text = config_path.read_text(encoding="utf-8")
+                line = 'state_dir = "state"'
+                self.assertEqual(text.count(line), 1)
+                config_path.write_text(
+                    text.replace(line, "state_dir = " + json.dumps(unusual)), encoding="utf-8"
+                )
+            if repo_name is not None:
+                repo = base / repo_name
+                shutil.copytree(cli.repo_root() / "packaging", repo / "packaging")
+                unusual = str(repo)
+            if python is not None:
+                interpreter = unusual = python
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.object(cli, "repo_root", return_value=repo),
+                mock.patch.object(sys, "executable", interpreter),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+            ):
+                code = cli.main(["--config", str(config_path), "scheduler-template", flavor])
+        return code, out.getvalue(), err.getvalue(), unusual
+
+    def test_each_of_the_other_three_paths_is_asked_on_its_own(self):
+        """The config path is plain in every case here, so a check that asked
+        only about it, or passed over any one path, prints a template."""
+        cases = (
+            ("the state directory", {"state_name": "st\x01ate"}),
+            ("the state directory", {"state_name": "bidi\u202ex"}),
+            ("the repository path", {"repo_name": "re\x01po"}),
+            ("the interpreter path", {"python": "/opt/py\x01/bin/python3"}),
+            ("the interpreter path", {"python": "/opt/py\u2028/bin/python3"}),
+        )
+        for label, how in cases:
+            for flavor in ("cron", "launchd"):
+                with self.subTest(label=label, how=how, flavor=flavor):
+                    code, out, err, _unusual = self.render_in_process(flavor, **how)
+                    self.assertEqual(code, RC_REFUSED, err)
+                    self.assertIn(label, err)
+                    self.assertIn("Nothing was printed", err)
+                    self.assertEqual(out, "", "no part of a template is printed")
+
+    def test_a_name_that_is_not_utf8_is_refused_as_the_interpreter_path(self):
+        """A name that is not UTF-8 reaches Python as a lone surrogate, which the
+        terminal output shows as its escape, so the job would name a path that
+        does not exist."""
+        python = "/opt/" + os.fsdecode(b"py\xff") + "/bin/python3"
+        self.assertNotEqual(
+            python.encode("utf-8", "surrogatepass"), python.encode("utf-8", "ignore")
+        )
+        for flavor in ("cron", "launchd"):
+            with self.subTest(flavor=flavor):
+                code, out, err, _unusual = self.render_in_process(flavor, python=python)
+                self.assertEqual(code, RC_REFUSED, err)
+                self.assertIn("the interpreter path", err)
+                self.assertEqual(out, "")
+
+    def test_a_line_break_in_any_path_is_refused_for_cron_and_carried_in_a_plist(self):
+        import plistlib
+
+        def strings(node: object) -> list[str]:
+            if isinstance(node, dict):
+                return [s for value in node.values() for s in strings(value)]
+            if isinstance(node, list):
+                return [s for value in node for s in strings(value)]
+            return [node] if isinstance(node, str) else []
+
+        for label, how in (
+            ("the state directory", {"state_name": "line\nbreak"}),
+            ("the repository path", {"repo_name": "line\nbreak"}),
+            ("the interpreter path", {"python": "/opt/line\nbreak/python3"}),
+        ):
+            with self.subTest(label=label):
+                code, out, err, _unusual = self.render_in_process("cron", **how)
+                self.assertEqual(code, RC_REFUSED, err)
+                self.assertIn(label, err)
+                self.assertEqual(out, "")
+                code, out, err, unusual = self.render_in_process("launchd", **how)
+                self.assertEqual(code, RC_OK, err)
+                carried = strings(plistlib.loads(out.encode("utf-8")))
+                self.assertTrue(any(unusual in s for s in carried), (unusual, carried))
+
+
 class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
     """The templates drop four paths into two foreign syntaxes: a crontab line,
     which the shell splits on spaces and cron turns ``%`` into a newline on, and

@@ -1365,6 +1365,36 @@ def _xml_quote(value: str) -> str:
     return escape(value)
 
 
+def _refuse_a_path_no_template_carries(label: str, value: str, *, flavor: str) -> None:
+    """Refuse a path the printed template could not carry exactly.
+
+    The template is text a person copies into a crontab or a property list.
+    The terminal-safe printer shows a control character, a bidi control or a
+    lone surrogate as its escape, so a job printed with one would name a path
+    that does not exist; and a crontab line ends at a line break, so the rest
+    of the path would be a line of its own, which cron reads as another job.
+    Measured before: a config under a directory whose name held a newline
+    printed a cron job cut in two, and one holding ``\\x01`` or a carriage
+    return printed a property list that parsed and named a config file that
+    does not exist. No quoting helps: the character does not survive the copy.
+    A property list carries a line break inside a string, so it is kept there.
+    """
+    if escape_for_terminal(value) != value:
+        reason = (
+            "a character the terminal output shows as its escape, so a job printed with it "
+            "would name a path that does not exist"
+        )
+    elif flavor == "cron" and "\n" in value:
+        reason = "a line break, where a crontab line ends, so the rest would be a job of its own"
+    else:
+        return
+    shown = escape_for_terminal(value).replace("\n", "\\n")
+    raise ConfigError(
+        f"{label} '{shown}' holds {reason}. Nothing was printed. Move the tree to a path "
+        f"without one to print a {flavor} template for it."
+    )
+
+
 def cmd_scheduler_template(args: argparse.Namespace) -> int:
     path = (
         repo_root()
@@ -1394,12 +1424,15 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     # A plain path is left byte-for-byte as it was, so quoting only appears
     # where it is needed.
     quote = _cron_quote if args.flavor == "cron" else _xml_quote
-    for marker, value in (
-        ("__REPO__", str(repo_root())),
-        ("__PYTHON__", sys.executable),
-        ("__CONFIG__", str(config_path)),
-        ("__STATE__", str(config.state_dir)),
-    ):
+    values = (
+        ("__REPO__", "the repository path", str(repo_root())),
+        ("__PYTHON__", "the interpreter path", sys.executable),
+        ("__CONFIG__", "the config file path", str(config_path)),
+        ("__STATE__", "the state directory", str(config.state_dir)),
+    )
+    for _marker, label, value in values:
+        _refuse_a_path_no_template_carries(label, value, flavor=args.flavor)
+    for marker, _label, value in values:
         text = text.replace(marker, quote(value))
     _say(text)
     _err(

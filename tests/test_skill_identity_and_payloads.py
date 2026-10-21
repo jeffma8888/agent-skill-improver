@@ -1626,6 +1626,290 @@ class RollbackSafetyTests(Harness):
         self.assertTrue(target.parent.is_symlink(), "the link itself is left in place")
 
 
+class WritesAreVerifiedByReadingThemBackTests(Harness):
+    """Apply and rollback both verify a write by reading it back.
+
+    So the write must be one its new owner can read, and a read-back that fails
+    happens after the write: it cannot be reported as a refusal that touched
+    nothing.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.target = self.canonical_dir / "shared" / SKILL_FILENAME
+        os.chmod(self.target, 0o644)
+
+    def tearDown(self) -> None:
+        if self.target.exists():
+            os.chmod(self.target, 0o644)
+        super().tearDown()
+
+    def apply(self) -> Path:
+        receipt = self.store(read_only=False).write_canonical(
+            self.target,
+            GOOD + "\n- an approved addition\n",
+            expected_sha256=sha256_file(self.target),
+            backup_dir=self.base / "bak",
+            skill_id="shared",
+        )
+        return Path(receipt.backup_manifest_path)
+
+    def test_a_skill_read_through_its_group_bits_is_applied_readable_by_its_new_owner(self):
+        """A process reading the skill through its group or other bits wrote the
+        applied text at that mode, as a file it now owns and cannot read: the
+        verification read failed, and apply reported "Nothing was touched" with
+        the text changed and no manifest to roll back from."""
+        from unittest import mock
+
+        real = FilesystemSkillStore._read_pinned
+        seen: list[int] = []
+
+        def first_read_through_group_bits(store, *args, **kwargs):
+            data, mode = real(store, *args, **kwargs)
+            seen.append(mode)
+            return (data, 0o044) if len(seen) == 1 else (data, mode)
+
+        with mock.patch.object(FilesystemSkillStore, "_read_pinned", first_read_through_group_bits):
+            manifest = self.apply()
+        self.assertEqual(
+            self.target.read_text(encoding="utf-8"), GOOD + "\n- an approved addition\n"
+        )
+        self.assertEqual(oct(stat.S_IMODE(self.target.stat().st_mode)), oct(0o444))
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))["target_mode"]
+        self.assertEqual(
+            recorded, oct(0o444), "the manifest records the mode the text was written at"
+        )
+        self.store(read_only=False).rollback(manifest)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), GOOD)
+
+    def test_the_control_a_skill_its_owner_can_read_keeps_its_exact_mode(self):
+        os.chmod(self.target, 0o640)
+        manifest = self.apply()
+        self.assertEqual(oct(stat.S_IMODE(self.target.stat().st_mode)), oct(0o640))
+        recorded = json.loads(manifest.read_text(encoding="utf-8"))["target_mode"]
+        self.assertEqual(recorded, oct(0o640))
+
+    def _unreadable_on_read(self, number: int):
+        """A ``_read_pinned`` that makes the document unreadable just before read ``number``."""
+        real = FilesystemSkillStore._read_pinned
+        calls: list[str] = []
+
+        def read(store, parent_fd, leaf, target, *, verb):
+            calls.append(verb)
+            if len(calls) == number:
+                os.chmod(self.target, 0)
+            return real(store, parent_fd, leaf, target, verb=verb)
+
+        return read
+
+    def skip_if_root(self) -> None:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:  # pragma: no cover - CI is not root
+            self.skipTest("root reads a file at mode 0")
+
+    def test_an_applied_text_that_cannot_be_read_back_is_undone_and_said_so(self):
+        """A verification read that failed raised the refusal the first read
+        raises, "the document could not be opened ... Nothing was touched",
+        with the applied text in place and no manifest written."""
+        from unittest import mock
+
+        self.skip_if_root()
+        with mock.patch.object(FilesystemSkillStore, "_read_pinned", self._unreadable_on_read(2)):
+            with self.assertRaises(BaseHashMismatch) as ctx:
+                self.apply()
+        message = str(ctx.exception)
+        self.assertIn("an unreadable document", message)
+        self.assertIn("original restored", message)
+        self.assertNotIn("Nothing was touched", message)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), GOOD)
+        self.assertEqual(oct(stat.S_IMODE(self.target.stat().st_mode)), oct(0o644))
+
+    def test_an_undone_apply_of_a_skill_read_through_its_group_bits_is_left_readable(self):
+        """The restore after a failed read-back is written at the same mode as the
+        applied text, so it too must keep the owner read bit."""
+        from unittest import mock
+
+        self.skip_if_root()
+        real = FilesystemSkillStore._read_pinned
+        calls: list[str] = []
+
+        def group_bits_then_unreadable(store, parent_fd, leaf, target, *, verb):
+            calls.append(verb)
+            if len(calls) == 2:
+                os.chmod(self.target, 0)
+            data, mode = real(store, parent_fd, leaf, target, verb=verb)
+            return (data, 0o044) if len(calls) == 1 else (data, mode)
+
+        with mock.patch.object(FilesystemSkillStore, "_read_pinned", group_bits_then_unreadable):
+            with self.assertRaises(BaseHashMismatch) as ctx:
+                self.apply()
+        self.assertIn("original restored", str(ctx.exception))
+        self.assertEqual(oct(stat.S_IMODE(self.target.stat().st_mode)), oct(0o444))
+        self.assertEqual(self.target.read_text(encoding="utf-8"), GOOD)
+
+    def test_something_else_at_the_name_before_the_read_back_is_replaced_by_the_original(self):
+        """A link, a fifo or bytes that are not UTF-8 put at the name between the
+        write and its read-back raised the refusal for a first read, saying
+        nothing was touched, and left whatever was there in place."""
+        from unittest import mock
+
+        decoy = write(self.base / "elsewhere" / "decoy.txt", "untouched\n")
+
+        def a_link() -> None:
+            os.unlink(self.target)
+            os.symlink(decoy, self.target)
+
+        def a_fifo() -> None:
+            os.unlink(self.target)
+            os.mkfifo(self.target)
+
+        def not_utf8() -> None:
+            self.target.write_bytes(b"\xff\xfe")
+
+        real = FilesystemSkillStore._read_pinned
+        for name, swap, why in (
+            ("link", a_link, "symbolic links"),
+            ("fifo", a_fifo, "not a regular file"),
+            ("bytes", not_utf8, "not valid UTF-8"),
+        ):
+            with self.subTest(swapped_in=name):
+                if name == "link" and not hasattr(os, "symlink"):  # pragma: no cover
+                    continue
+                if name == "fifo" and not hasattr(os, "mkfifo"):  # pragma: no cover
+                    continue
+                calls: list[str] = []
+
+                def read(store, parent_fd, leaf, target, *, verb, swap=swap, calls=calls):
+                    calls.append(verb)
+                    if len(calls) == 2:
+                        swap()
+                    return real(store, parent_fd, leaf, target, verb=verb)
+
+                with mock.patch.object(FilesystemSkillStore, "_read_pinned", read):
+                    with self.assertRaises(BaseHashMismatch) as ctx:
+                        self.apply()
+                message = str(ctx.exception)
+                self.assertIn("an unreadable document", message)
+                self.assertIn(why, message)
+                self.assertIn("original restored", message)
+                self.assertFalse(self.target.is_symlink())
+                self.assertTrue(stat.S_ISREG(self.target.lstat().st_mode))
+                self.assertEqual(self.target.read_text(encoding="utf-8"), GOOD)
+                self.assertEqual(decoy.read_text(encoding="utf-8"), "untouched\n")
+
+    def test_a_restored_text_that_cannot_be_read_back_is_named_as_written(self):
+        """The rollback's read-back raised the same "Nothing was touched"
+        refusal after the backup had already been written over the skill."""
+        from unittest import mock
+
+        self.skip_if_root()
+        manifest = self.apply()
+        with mock.patch.object(FilesystemSkillStore, "_read_pinned", self._unreadable_on_read(2)):
+            with self.assertRaises(BaseHashMismatch) as ctx:
+                self.store(read_only=False).rollback(manifest)
+        message = str(ctx.exception)
+        self.assertIn("was rewritten from", message)
+        self.assertIn("an unreadable document", message)
+        self.assertNotIn("Nothing was touched", message)
+        os.chmod(self.target, 0o644)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), GOOD, "the restore did land")
+
+    def test_a_directory_put_at_the_name_before_the_read_back_is_named_with_the_backup(self):
+        """No rename puts a file over a directory, so the original cannot be
+        restored there. Measured: the restore fell with a raw
+        ``IsADirectoryError``, exit 70, and nothing said where the copy taken
+        before the write was."""
+        from unittest import mock
+
+        real = FilesystemSkillStore._read_pinned
+        calls: list[str] = []
+
+        def read(store, parent_fd, leaf, target, *, verb):
+            calls.append(verb)
+            if len(calls) == 2:
+                os.unlink(self.target)
+                os.mkdir(self.target)
+            return real(store, parent_fd, leaf, target, verb=verb)
+
+        try:
+            with mock.patch.object(FilesystemSkillStore, "_read_pinned", read):
+                with self.assertRaises(BaseHashMismatch) as ctx:
+                    self.apply()
+            message = str(ctx.exception)
+            backup = self.base / "bak" / f"{SKILL_FILENAME}.bak"
+            self.assertIn("an unreadable document (not a regular file)", message)
+            self.assertIn("could not be put back", message)
+            self.assertIn(str(backup), message)
+            self.assertNotIn("original restored", message)
+            self.assertEqual(backup.read_text(encoding="utf-8"), GOOD, "the copy is kept")
+            self.assertEqual(sorted(p.name for p in self.target.parent.iterdir()), [SKILL_FILENAME])
+        finally:
+            if self.target.is_dir():
+                os.rmdir(self.target)
+
+    def test_a_skill_directory_that_stops_taking_files_before_the_restore_is_named_with_the_backup(
+        self,
+    ):
+        """Any refusal of the restore write is named with where the copy is, not
+        only a directory at the name. A skill directory made 0555 between the
+        write and the restore refuses the restore's new file with a
+        ``PermissionError``; caught only as ``IsADirectoryError`` it fell raw,
+        exit 70."""
+        from unittest import mock
+
+        self.skip_if_root()
+        real = FilesystemSkillStore._read_pinned
+        calls: list[str] = []
+        skill_dir = self.target.parent
+        dir_mode = stat.S_IMODE(skill_dir.stat().st_mode)
+
+        def read(store, parent_fd, leaf, target, *, verb):
+            calls.append(verb)
+            if len(calls) == 2:
+                self.target.write_text("something else\n", encoding="utf-8")
+                os.chmod(skill_dir, 0o555)
+            return real(store, parent_fd, leaf, target, verb=verb)
+
+        try:
+            with mock.patch.object(FilesystemSkillStore, "_read_pinned", read):
+                with self.assertRaises(BaseHashMismatch) as ctx:
+                    self.apply()
+        finally:
+            os.chmod(skill_dir, dir_mode)
+        message = str(ctx.exception)
+        backup = self.base / "bak" / f"{SKILL_FILENAME}.bak"
+        self.assertIn("could not be put back", message)
+        self.assertIn(str(backup), message)
+        self.assertIn("once the name can be written", message)
+        self.assertNotIn("original restored", message)
+        self.assertEqual(backup.read_text(encoding="utf-8"), GOOD, "the copy is kept")
+        self.assertEqual(sorted(p.name for p in skill_dir.iterdir()), [SKILL_FILENAME])
+
+    def test_the_restore_writes_the_bytes_read_before_the_write_not_a_second_read_of_the_copy(
+        self,
+    ):
+        """The original is put back from the bytes read and hashed before the
+        write. A second read of the backup's path would put back whatever is
+        at that path by then."""
+        from unittest import mock
+
+        real = FilesystemSkillStore._read_pinned
+        calls: list[str] = []
+        backup = self.base / "bak" / f"{SKILL_FILENAME}.bak"
+
+        def read(store, parent_fd, leaf, target, *, verb):
+            calls.append(verb)
+            if len(calls) == 2:
+                self.target.write_text("something else\n", encoding="utf-8")
+                backup.write_text("a copy changed after it was taken\n", encoding="utf-8")
+            return real(store, parent_fd, leaf, target, verb=verb)
+
+        with mock.patch.object(FilesystemSkillStore, "_read_pinned", read):
+            with self.assertRaises(BaseHashMismatch) as ctx:
+                self.apply()
+        self.assertIn("original restored", str(ctx.exception))
+        self.assertEqual(self.target.read_text(encoding="utf-8"), GOOD)
+
+
 class TreeChangeTests(unittest.TestCase):
     """Two readings of the tree, compared entry by entry and named by kind."""
 

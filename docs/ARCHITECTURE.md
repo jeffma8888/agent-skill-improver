@@ -405,6 +405,11 @@ permission the live file lacks: the recorded mode is honoured only as
 `write_canonical` spells it, narrowed to the live file's bits, and only if the
 owner can read the restored file back, which the post-write verification does;
 otherwise the live file's mode is kept, and the owner read bit is added to either.
+Apply writes under the same rule, the skill's own mode plus the owner read bit,
+because it verifies its write the same way. A read-back that fails after either
+write is reported as what it is: apply restores the original first (or, when a
+directory now holds the name, says where the copy taken before the write is), and
+rollback says the backup was written, rather than either claiming nothing was touched.
 Recovery must not be the step that loses the file.
 
 The live file is held to the same standard as the backup. Rollback undoes one

@@ -128,14 +128,15 @@ def _restorable_mode(recorded: Any, live_mode: int) -> int:
 
     Never a permission the live file lacks, and always one its owner can read,
     because the restore is verified by reading it back. In the flow this tool
-    runs the two modes agree: ``write_canonical`` records the skill's mode and
-    writes the applied text at it. They differ after a chmod since the apply or
-    a hand edit of the manifest, and then the recorded mode is honoured only in
-    the shape ``write_canonical`` records, narrowed to the live file's bits, and
-    only if its owner read bit survives that; otherwise the live file's mode is
-    kept. Either way the owner read bit is added: the restore is a new file this
-    process owns, and a live file read through its group or other bits would
-    otherwise be restored unreadable to its new owner.
+    runs the two modes agree: ``write_canonical`` records the mode it writes
+    the applied text at (the skill's own, plus the owner read bit). They differ
+    after a chmod since the apply or a hand edit of the manifest, and then the
+    recorded mode is honoured only in the shape ``write_canonical`` records,
+    narrowed to the live file's bits, and only if its owner read bit survives
+    that; otherwise the live file's mode is kept. Either way the owner read bit
+    is added: the restore is a new file this process owns, and a live file read
+    through its group or other bits would otherwise be restored unreadable to
+    its new owner.
 
     Measured before: the field was parsed as any octal number, so a hand-edited
     ``"0"`` or ``"0o200"`` restored the skill at a mode its owner cannot read,
@@ -629,6 +630,14 @@ class FilesystemSkillStore:
             # carry the writer's default rather than the mode the skill had --
             # silently tightening or loosening somebody else's file. Recorded in
             # the manifest so rollback can restore it too.
+            #
+            # Plus the owner read bit. The replacement is a new file this process
+            # owns, and the write is verified by reading it back, so a skill this
+            # process reads through its group or other bits would otherwise be
+            # written at a mode its new owner cannot read. Measured before: the
+            # verification read then failed and apply reported "Nothing was
+            # touched" with the text already changed and no manifest written.
+            written_mode = target_mode | stat.S_IRUSR
             backup_dir = Path(backup_dir)
             backup_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(backup_dir, 0o700)
@@ -648,7 +657,7 @@ class FilesystemSkillStore:
             new_sha = sha256_text(text)
             try:
                 _write_pinned(
-                    parent_fd, leaf, self._in_document_convention(text, data), mode=target_mode
+                    parent_fd, leaf, self._in_document_convention(text, data), mode=written_mode
                 )
             except OSError as exc:
                 # Measured before: a skill directory at 0555 made apply fall
@@ -658,15 +667,27 @@ class FilesystemSkillStore:
                     f"({exc.strerror or exc}). The skill is unchanged; the copy taken "
                     f"before the write is at {backup_path}."
                 ) from exc
-            written, _mode = self._read_pinned(parent_fd, leaf, target, verb="write")
-            written_sha = self._document_sha256(written, target)
+            written_sha, found = self._read_back(parent_fd, leaf, target)
             if written_sha != new_sha:
-                # Restore immediately: a write that did not land as intended is
-                # a rollback trigger, not something to report and leave in place.
-                _write_pinned(parent_fd, leaf, backup_path.read_bytes(), mode=target_mode)
+                # Restore immediately: a write that did not land as intended, or
+                # that cannot be read back, is a rollback trigger, not something
+                # to report and leave in place. The bytes are the ones read and
+                # backed up above, not a second read of the backup's path. A
+                # restore the platform refuses (a directory put at the name, which
+                # no rename puts a file over, or a skill directory that no longer
+                # takes a new file) is named with where the copy is.
+                try:
+                    _write_pinned(parent_fd, leaf, data, mode=written_mode)
+                except OSError as exc:
+                    raise BaseHashMismatch(
+                        f"post-write verification failed for {target} (expected "
+                        f"{new_sha[:12]}, found {found}), and the original could not be put "
+                        f"back ({exc.strerror or exc}). The copy taken before the write is at "
+                        f"{backup_path}: restore it by hand once the name can be written."
+                    ) from exc
                 raise BaseHashMismatch(
                     f"post-write verification failed for {target} "
-                    f"(expected {new_sha[:12]}, found {written_sha[:12]}); original restored"
+                    f"(expected {new_sha[:12]}, found {found}); original restored"
                 )
         finally:
             os.close(parent_fd)
@@ -682,7 +703,7 @@ class FilesystemSkillStore:
                 "previous_sha256": current,
                 "new_sha256": new_sha,
                 "backup_path": str(backup_path),
-                "target_mode": oct(target_mode),
+                "target_mode": oct(written_mode),
                 "rollback_command": rollback,
             },
         )
@@ -886,11 +907,13 @@ class FilesystemSkillStore:
                 f"It still holds the text this apply wrote, and the backup {backup} is "
                 "unchanged."
             ) from exc
-        restored_bytes, _mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
-        restored = self._document_sha256(restored_bytes, target)
+        restored, found = self._read_back(parent_fd, leaf, target)
         if restored != expected:
+            # The backup has been written over the skill by now, so a refusal
+            # saying nothing was touched would be false: say what is there.
             raise BaseHashMismatch(
-                f"rollback verification failed: restored sha {restored[:12]} != {expected[:12]}"
+                f"rollback verification failed: {target} was rewritten from {backup}, but "
+                f"reading it back found {found}, not {expected[:12]}. Compare the two by hand."
             )
         self._snapshot_cache = None
         return {
@@ -1076,6 +1099,29 @@ class FilesystemSkillStore:
             f"refusing to {verb} {spelled}: it lies under no configured skill root, so there "
             f"is no directory handle to pin it to. Nothing was touched."
         )
+
+    def _read_back(self, parent_fd: int, leaf: str, target: Path) -> tuple[str | None, str]:
+        """The hash of what a write just left at ``leaf``, and how to name it.
+
+        The verification read comes after the write, so it must not raise the
+        refusals the reads before a write raise: each says nothing was touched,
+        which is false by then. A document that cannot be opened, is not a
+        regular file or is not UTF-8 comes back as ``None`` with what was found,
+        for the caller to undo or report; otherwise its hash and the short form.
+        """
+        try:
+            data, _mode = self._read_pinned(parent_fd, leaf, target, verb="verify")
+            sha = self._document_sha256(data, target)
+        except (BaseHashMismatch, LinkedTargetRefused, UndecodableDocument) as exc:
+            cause = exc.__cause__
+            if isinstance(cause, OSError) and cause.strerror:
+                why = cause.strerror
+            elif isinstance(cause, UnicodeDecodeError):
+                why = "not valid UTF-8"
+            else:
+                why = "not a regular file"
+            return None, f"an unreadable document ({why})"
+        return sha, sha[:12]
 
     def _read_pinned(
         self, parent_fd: int, leaf: str, target: Path, *, verb: str
