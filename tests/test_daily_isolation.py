@@ -989,6 +989,74 @@ class PerRecordFailureTests(DailyHarness):
         del json
 
 
+class ScorerReplyShapeTests(DailyHarness):
+    """One scorer reply of the wrong shape is that record's problem, not the run's."""
+
+    def _run_with_every_criterion(self, field, value):
+        """A committed run whose scorer sets ``field`` to ``value`` on every criterion."""
+        import copy
+
+        class SpoiledScorer(InProcessRunner):
+            def run(self, *, role, system, user, response_schema):
+                payload = super().run(
+                    role=role, system=system, user=user, response_schema=response_schema
+                )
+                if role != "scorer":
+                    return payload
+                payload = copy.deepcopy(payload)
+                for item in payload.get("criteria", []):
+                    item[field] = value
+                return payload
+
+        config = self.env()
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        receipt = run_daily(
+            config,
+            source=FixtureConversationSource(config.source.fixtures_dir),
+            runner=SpoiledScorer(),
+            skill_store=store,
+            state=state,
+            clock=frozen_clock(),
+            day=DAY,
+            commit=True,
+        )
+        payload = receipt.to_dict()
+        self.assertEqual(payload["status"], "ok", payload["status"])
+        self.assertEqual(payload["counts"]["records_scored"], 5, "every fixture is still scored")
+        self.assertEqual(payload["counts"]["records_quarantined"], 0)
+        import json as _json
+
+        scorecards = sorted(config.state_dir.glob("scorecards/*.json"))
+        self.assertTrue(scorecards)
+        scores = [
+            score
+            for path in scorecards
+            for score in _json.loads(path.read_text(encoding="utf-8")).get("scores", [])
+        ]
+        return payload, scores
+
+    def test_a_scorer_reply_with_a_numeric_evidence_field_does_not_abort_the_run(self):
+        """Measured before: the ``evidence`` field was iterated as it came, a
+        number raised ``TypeError`` out of the parser, and the whole committed
+        run ended as an internal error with no receipt."""
+        payload, scores = self._run_with_every_criterion("evidence", 7)
+        self.assertEqual(payload["counts"]["candidates_proposed"], 0, "no evidence, no proposal")
+        reasons = [score.get("downgrade_reason", "") for score in scores]
+        self.assertTrue(
+            any("evidence must be an array of refs, got int" in r for r in reasons), reasons
+        )
+
+    def test_a_scorer_reply_with_a_confidence_too_large_for_a_float_does_not_abort_the_run(self):
+        """Measured before: ``float(10**400)`` raised ``OverflowError`` out of
+        the parser and the committed run ended with no receipt."""
+        _payload, scores = self._run_with_every_criterion("confidence", 10**400)
+        self.assertTrue(scores)
+        self.assertTrue(all(score.get("confidence") is None for score in scores), scores[:2])
+
+
 class ReviewableTextTests(DailyHarness):
     """Everything a proposal says is printed raw to the reviewer's terminal by
     ``asi review``, and the proposed text becomes the skill an agent loads. A

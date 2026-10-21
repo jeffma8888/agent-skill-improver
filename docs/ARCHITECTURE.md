@@ -245,6 +245,9 @@ Then the answer is distrusted, in this order:
 - a `PASS` or `FAIL` whose evidence reference does not resolve, or resolves to a
   different position than claimed → downgraded to `INSUFFICIENT` with
   `downgraded_from` recorded
+- an `evidence` field that is not an array at all (a number, a string, an
+  object) → one named malformed ref, the same downgrade, never a crash; the
+  reason spells out at most `MAX_SHOWN_BAD_REFS` refs and counts the rest
 
 `PASS` is held to exactly the same evidence standard as `FAIL`. Grading only the
 accusations produces a scorer that learns to approve.

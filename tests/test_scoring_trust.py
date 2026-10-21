@@ -331,6 +331,100 @@ class EvidenceTrustTests(unittest.TestCase):
         self.assertEqual(len(result.failures), 1)
 
 
+class EvidenceFieldShapeTests(unittest.TestCase):
+    """The ``evidence`` field is the model's. It used to be iterated as it came:
+    a number or a boolean raised ``TypeError`` out of the parser, which no caller
+    classifies, so one such scorer reply aborted a committed run as an internal
+    error with no receipt (measured end to end with the in-process scorer); a
+    string iterated character by character and an object by its keys, each a
+    malformed ref of its own, so one wrong field became hundreds of refusals in
+    the persisted reason."""
+
+    def setUp(self) -> None:
+        self.cid = rubric().criterion_ids[0]
+
+    def _one(self, **overrides):
+        item = {"criterion_id": self.cid, "verdict": "FAIL", "rationale": "r"}
+        item.update(overrides)
+        return card([item]).score_for(self.cid)
+
+    def test_a_non_array_evidence_field_is_one_named_malformed_ref_not_a_crash(self) -> None:
+        for value in (
+            7,
+            1.5,
+            True,
+            "x" * 300,
+            {"element_id": "m", "position": 1},
+            0,
+            False,
+            "",
+            {},
+        ):
+            with self.subTest(value=type(value).__name__):
+                score = self._one(evidence=value)
+                self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+                self.assertIs(score.downgraded_from, Verdict.FAIL)
+                self.assertIn(
+                    f"evidence must be an array of refs, got {type(value).__name__}",
+                    score.downgrade_reason,
+                )
+                self.assertNotIn(" and ", score.downgrade_reason, "one field, one refusal")
+                self.assertLess(len(score.downgrade_reason), 200, score.downgrade_reason)
+
+    def test_a_null_evidence_field_reads_as_no_evidence(self) -> None:
+        score = self._one(evidence=None)
+        self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+        self.assertIn("needs >= 1 evidence ref(s), got 0", score.downgrade_reason)
+
+    def test_the_control_shows_an_array_of_refs_still_resolves(self) -> None:
+        conv = conversation("failing.json")
+        item = {"criterion_id": self.cid, "verdict": "FAIL", "rationale": "r"}
+        item["evidence"] = [good_ref(conv)]
+        score = card([item], conv=conv).score_for(self.cid)
+        self.assertIs(score.verdict, Verdict.FAIL)
+        self.assertEqual(len(score.evidence), 1)
+
+    def test_many_malformed_refs_are_summarised_not_spelled_out(self) -> None:
+        """The reason lands in the scorecard and the failure record; the model
+        decides how many refs there are, so the count must not decide the size."""
+        from agent_skill_improver.domain.scoring import MAX_SHOWN_BAD_REFS
+
+        score = self._one(evidence=["not-a-ref"] * 50)
+        self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+        reason = score.downgrade_reason
+        self.assertEqual(reason.count("evidence ref must be an object"), MAX_SHOWN_BAD_REFS)
+        self.assertIn(f" and {50 - MAX_SHOWN_BAD_REFS} more", reason)
+        few = self._one(evidence=["not-a-ref"] * MAX_SHOWN_BAD_REFS)
+        self.assertNotIn(" more", few.downgrade_reason)
+
+
+class ConfidenceFieldTests(unittest.TestCase):
+    """``confidence`` is stored with the score, never decided on, and the
+    model's to fill. Measured before: an integer too large for a float (JSON
+    integers are unbounded, and ``loads_untrusted`` leaves them alone) raised
+    ``OverflowError`` out of the parser, and ``true`` was stored as 1.0."""
+
+    def _confidence_of(self, value):
+        cid = rubric().criterion_ids[0]
+        item = {"criterion_id": cid, "verdict": "FAIL", "rationale": "r", "confidence": value}
+        return card([item]).score_for(cid).confidence
+
+    def test_a_confidence_too_large_for_a_float_is_none_not_a_crash(self) -> None:
+        for value in (10**400, -(10**400)):
+            with self.subTest(sign="-" if value < 0 else "+"):
+                self.assertIsNone(self._confidence_of(value))
+
+    def test_a_confidence_that_is_not_a_number_is_none(self) -> None:
+        for value in (True, False, "0.9", [0.9], {"v": 0.9}, None):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(self._confidence_of(value))
+
+    def test_the_control_a_numeric_confidence_is_kept_as_a_float(self) -> None:
+        self.assertEqual(self._confidence_of(0.75), 0.75)
+        self.assertEqual(self._confidence_of(1), 1.0)
+        self.assertIsInstance(self._confidence_of(1), float)
+
+
 class IsolationTests(unittest.TestCase):
     def test_only_fail_becomes_a_failure_case(self) -> None:
         conv = conversation("failing.json")

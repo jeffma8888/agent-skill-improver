@@ -13,8 +13,9 @@ Two rules carry the honesty of the whole loop and both live here:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_SCORECARD
 from .conversation import EvidenceRef, NormalizedConversation
@@ -182,6 +183,52 @@ def parse_scorecard(
     )
 
 
+#: How many malformed evidence refs a downgrade reason spells out. The reason is
+#: persisted in the scorecard and the failure record, and the model decides how
+#: many refs there are.
+MAX_SHOWN_BAD_REFS = 3
+
+
+def _evidence_list(raw: Any, bad_refs: list[str]) -> list[Any]:
+    """The criterion's ``evidence`` as the array the contract asks for, or nothing.
+
+    The field is the model's and used to be iterated as it came. A number or a
+    boolean there raised ``TypeError`` out of the parser, which no caller
+    classifies: measured before, one such scorer reply aborted a committed daily
+    run as an internal error with no receipt. A string iterated character by
+    character and an object by its keys, each a "malformed ref" of its own, so
+    one wrong field became hundreds of refusals in the persisted reason. Any
+    shape but an array (or null, read as empty) is now one named malformed ref,
+    so a decided verdict on a criterion that requires evidence goes the way a
+    malformed ref always sends it: INSUFFICIENT.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        bad_refs.append(f"evidence must be an array of refs, got {type(raw).__name__}")
+        return []
+    return list(raw)
+
+
+def _confidence(raw: Any) -> float | None:
+    """The criterion's ``confidence`` as a float, or None when it is not one.
+
+    Stored with the score and never decided on, and the model's to fill. A
+    boolean is not a confidence, though Python counts it as a number. JSON
+    integers are unbounded and ``loads_untrusted`` leaves them alone, so one
+    too large for a float raised ``OverflowError`` out of the parser, which no
+    caller classifies: measured, a scorer reply with ``10**400`` there aborted
+    a committed daily run with no receipt, as the ``evidence`` field did.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    try:
+        value = float(raw)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _build_score(
     item: Mapping[str, Any],
     *,
@@ -206,7 +253,7 @@ def _build_score(
 
     refs: list[EvidenceRef] = []
     bad_refs: list[str] = []
-    for raw_ref in item.get("evidence", []) or []:
+    for raw_ref in _evidence_list(item.get("evidence"), bad_refs):
         try:
             refs.append(EvidenceRef.from_dict(raw_ref))
         except ValueError as exc:
@@ -216,8 +263,7 @@ def _build_score(
     # A ref that does not resolve is the model's claim, not evidence: it is
     # named in the reason (bounded, redacted) and stored nowhere else.
     resolved = tuple(r for r in refs if r not in unresolved)
-    confidence = item.get("confidence")
-    conf = float(confidence) if isinstance(confidence, (int, float)) else None
+    conf = _confidence(item.get("confidence"))
     rationale = _clip(item.get("rationale"))
 
     # Trust rule: a decided verdict needs resolvable evidence when the
@@ -225,7 +271,11 @@ def _build_score(
     if verdict.is_decided and criterion.requires_evidence:
         reason = ""
         if bad_refs:
-            reason = f"malformed evidence refs: {'; '.join(bad_refs)}"
+            shown = "; ".join(bad_refs[:MAX_SHOWN_BAD_REFS])
+            hidden = len(bad_refs) - MAX_SHOWN_BAD_REFS
+            reason = f"malformed evidence refs: {shown}" + (
+                f" and {hidden} more" if hidden > 0 else ""
+            )
         elif len(refs) < max(rubric.min_evidence_refs, 1):
             reason = f"needs >= {max(rubric.min_evidence_refs, 1)} evidence ref(s), got {len(refs)}"
         elif unresolved:
