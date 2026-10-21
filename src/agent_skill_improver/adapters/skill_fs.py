@@ -48,6 +48,7 @@ from ..errors import (
     NonDocumentWriteRefused,
     ReadOnlyViolation,
     SelfMutationRefused,
+    SkillWriteFailed,
     UndecodableDocument,
 )
 from ..hashing import normalize_text, sha256_file, sha256_text
@@ -149,6 +150,31 @@ def _restorable_mode(recorded: Any, live_mode: int) -> int:
         if narrowed & stat.S_IRUSR:
             mode = narrowed
     return mode | stat.S_IRUSR
+
+
+def _read_regular_file(path: Path) -> bytes | None:
+    """``path``'s bytes when it is a regular file, else ``None``.
+
+    Opened without following a link and without blocking, then judged by
+    ``fstat`` on the open handle, so what is judged is what is read: a link
+    or a fifo put in place after the checks before this is never read through
+    or waited on. A link raises ``OSError`` (``ELOOP``) from the open. The raw
+    handle is judged and read, and closed whatever happens: measured before,
+    ``os.fdopen`` on a directory raised without closing the handle it was given.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def _entry_kind(path: Path) -> str:
@@ -620,9 +646,18 @@ class FilesystemSkillStore:
                     f"but source hashes {current[:12]}; refusing to proceed"
                 )
             new_sha = sha256_text(text)
-            _write_pinned(
-                parent_fd, leaf, self._in_document_convention(text, data), mode=target_mode
-            )
+            try:
+                _write_pinned(
+                    parent_fd, leaf, self._in_document_convention(text, data), mode=target_mode
+                )
+            except OSError as exc:
+                # Measured before: a skill directory at 0555 made apply fall
+                # with a raw PermissionError on the temp file, exit 70.
+                raise SkillWriteFailed(
+                    f"refusing to apply: {target} could not be written "
+                    f"({exc.strerror or exc}). The skill is unchanged; the copy taken "
+                    f"before the write is at {backup_path}."
+                ) from exc
             written, _mode = self._read_pinned(parent_fd, leaf, target, verb="write")
             written_sha = self._document_sha256(written, target)
             if written_sha != new_sha:
@@ -699,7 +734,9 @@ class FilesystemSkillStore:
         # command fall as an internal error. Nothing is written before this
         # returns, so a refusal says so.
         try:
-            parent_fd, leaf = self._judge_rollback(target, backup, expected)
+            parent_fd, leaf, restored_bytes = self._judge_rollback(
+                target, backup, expected, manifest_path=Path(manifest_path)
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
             raise BackupUnusable(
@@ -712,6 +749,7 @@ class FilesystemSkillStore:
                 leaf,
                 target,
                 backup=backup,
+                data=restored_bytes,
                 expected=expected,
                 applied=applied,
                 manifest=manifest,
@@ -719,21 +757,52 @@ class FilesystemSkillStore:
         finally:
             os.close(parent_fd)
 
-    def _judge_rollback(self, target: Path, backup: Path, expected: str) -> tuple[int, str]:
+    def _judge_rollback(
+        self, target: Path, backup: Path, expected: str, *, manifest_path: Path
+    ) -> tuple[int, str, bytes]:
         """Every check :meth:`rollback` makes before the live file is read.
 
-        Returns the pinned parent handle and leaf the restore goes through. Any
-        refusal here leaves the tree exactly as it was.
+        Returns the pinned parent handle and leaf the restore goes through, and
+        the backup's bytes: read once, so the bytes whose hash is checked here
+        are the bytes written. Any refusal here leaves the tree exactly as it was.
         """
         self._assert_document(target)
         self._assert_not_protected(target)
-        if not backup.is_file():
+        if backup.is_symlink() or not backup.is_file():
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} is missing or is not a "
-                "regular file. "
+                f"refusing to roll back {target}: backup {backup} is missing, a symbolic "
+                f"link or not a regular file. {target} is unchanged."
+            )
+        # Apply writes the backup and its manifest into one directory under the
+        # state tree. Measured before: a manifest naming a backup anywhere else
+        # (a protected file, a copy outside the state tree) whose hash matched
+        # was read and written into the skill.
+        if backup.parent.resolve() != manifest_path.parent.resolve():
+            raise BackupUnusable(
+                f"refusing to roll back {target}: backup {backup} is not in the directory of "
+                f"its manifest {manifest_path}, where apply writes it, so it is not the copy "
+                f"this apply took. {target} is unchanged."
+            )
+        data = _read_regular_file(backup)
+        if data is None:
+            raise BackupUnusable(
+                f"refusing to roll back {target}: backup {backup} is not a regular file. "
                 f"{target} is unchanged."
             )
-        stored = sha256_file(backup)
+        # Apply backs up only a document it read as UTF-8, so a backup that is
+        # not is not that copy. Measured before: read with its bad bytes
+        # replaced, such a backup hashed as the text it stood in for, was
+        # written into the skill, and the read after the write then said
+        # nothing was written.
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BackupUnusable(
+                f"refusing to roll back {target}: backup {backup} is not valid UTF-8 at byte "
+                f"{exc.start} ({exc.reason}), and apply backs up only a document it read as "
+                f"UTF-8, so it is not the copy this apply took. {target} is unchanged."
+            ) from exc
+        stored = sha256_text(text)
         if stored != expected:
             raise BackupUnusable(
                 f"refusing to roll back {target}: backup {backup} hashes {stored[:12]} but the "
@@ -755,12 +824,19 @@ class FilesystemSkillStore:
         # link redirects the restore just as surely, and a same-text twin at the
         # far end would pass the applied-hash check below.
         self._assert_no_link_below_root(target)
+        # The recovery command writes where apply writes and nowhere else. Asked
+        # after the link checks, which name a link more exactly than this would.
+        # Measured before: a manifest edited to name the mirror's copy, with
+        # ``new_sha256`` set to that copy's hash, overwrote the mirror and
+        # reported it rolled back; apply refuses that target as a mirror.
+        self.assert_canonical_target(target, action="roll back")
         if not target.is_file():
             raise BaseHashMismatch(
                 f"refusing to roll back {target}: the recorded target is not a regular file "
                 f"any more, so nothing here can be verified as the text this apply wrote."
             )
-        return self._open_parent_pinned(target, verb="roll back")
+        parent_fd, leaf = self._open_parent_pinned(target, verb="roll back")
+        return parent_fd, leaf, data
 
     def _rollback_pinned(
         self,
@@ -769,6 +845,7 @@ class FilesystemSkillStore:
         target: Path,
         *,
         backup: Path,
+        data: bytes,
         expected: str,
         applied: str,
         manifest: dict[str, Any],
@@ -799,7 +876,16 @@ class FilesystemSkillStore:
         # one edited into a mode the restore cannot honestly use (see
         # _restorable_mode) is treated the same: the live file's mode.
         mode = _restorable_mode(manifest.get("target_mode"), live_mode)
-        _write_pinned(parent_fd, leaf, backup.read_bytes(), mode=mode)
+        try:
+            _write_pinned(parent_fd, leaf, data, mode=mode)
+        except OSError as exc:
+            # Measured before: a skill directory at 0555 made rollback fall
+            # with a raw PermissionError on the temp file, exit 70.
+            raise SkillWriteFailed(
+                f"refusing to roll back: {target} could not be written ({exc.strerror or exc}). "
+                f"It still holds the text this apply wrote, and the backup {backup} is "
+                "unchanged."
+            ) from exc
         restored_bytes, _mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
         restored = self._document_sha256(restored_bytes, target)
         if restored != expected:

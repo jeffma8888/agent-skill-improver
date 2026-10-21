@@ -1552,7 +1552,7 @@ class RollbackSafetyTests(Harness):
         raw["target_path"] = str(target.parent) + "\ud800/" + SKILL_FILENAME
         manifest.write_text(json.dumps(raw), encoding="utf-8")
         self.assertIn("\\ud800", manifest.read_text(encoding="utf-8"), "written as an escape")
-        with self.assertRaises(BaseHashMismatch) as ctx:
+        with self.assertRaises(MirrorEditRefused) as ctx:
             self.store(read_only=False).rollback(manifest)
         self.assertIn("\ufffd", str(ctx.exception))
         self.assertEqual(target.read_text(encoding="utf-8"), applied)

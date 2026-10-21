@@ -134,6 +134,15 @@ class BackupUnusable(SafetyRefusal):
     """
 
 
+class SkillWriteFailed(SafetyRefusal):
+    """The platform refused the write of a skill document, which is unchanged.
+
+    The replacement is written beside the document and renamed over it, so a
+    failure to create, write or rename it (a skill directory this process
+    cannot write, a full disk) leaves the live file exactly as it was.
+    """
+
+
 class ApprovalRequired(SafetyRefusal):
     """Promotion attempted without a valid human approval token."""
 
