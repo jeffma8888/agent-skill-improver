@@ -712,7 +712,9 @@ def deadline(seconds: float) -> Iterator[None]:
         return
 
     def expired(signum: int, frame: object) -> None:
-        raise AssertionError(f"blocked for more than {seconds}s; a fifo is being waited on")
+        raise AssertionError(
+            f"blocked for more than {seconds}s: a fifo is waited on, or the work outgrows its input"
+        )
 
     previous = signal.signal(signal.SIGALRM, expired)
     signal.setitimer(signal.ITIMER_REAL, seconds)

@@ -9,6 +9,7 @@ into a terminal, and forwarding that to a model command is an avoidable leak.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 
@@ -29,6 +30,13 @@ class _Shape:
     #: When true, group 1 (the key name and separator) is kept and only what
     #: follows is replaced, so ``?access_token=...&x=1`` stays a readable URL.
     keep_prefix: bool = False
+    #: For a shape whose first run of characters can hold a later start of the
+    #: same shape: where a match can start, and the run that follows the start.
+    #: A start with no match after it fails where that run ends, and so does
+    #: every later start inside the run, so the scan resumes past the run (see
+    #: :func:`_matches`). Both or neither.
+    start: re.Pattern[str] | None = None
+    run: re.Pattern[str] | None = None
 
 
 #: Every shape ``tools/leakscan.py`` refuses in the repository is recognised
@@ -44,6 +52,14 @@ _SHAPES: tuple[_Shape, ...] = (
     _Shape(
         "jwt",
         re.compile(r"\be" + r"yJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
+        # A JWT segment may hold ``-``, and ``-`` is not a word character, so
+        # each ``-eyJ`` inside a run is a start of its own. Measured before:
+        # searched with the pattern alone, every such start was tried and ran
+        # to the end of the run, so text full of them took time in the square
+        # of its length (64 KiB: about 0.7 s on 3.11, 1.1 s on 3.13; each
+        # doubling, four times as long).
+        start=re.compile(r"\be" + r"yJ"),
+        run=re.compile(r"[A-Za-z0-9_-]*"),
     ),
     _Shape("bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")),
     _Shape(
@@ -117,12 +133,37 @@ HIGH_CONFIDENCE_LABELS: frozenset[str] = frozenset(
 )
 
 
+def _matches(shape: _Shape, text: str) -> Iterator[re.Match[str]]:
+    """``shape``'s matches in ``text``: the ones ``finditer`` finds, in time linear in the text.
+
+    A shape without ``start`` is its pattern's ``finditer``. With it, each
+    start is matched in place; one with no match after it fails where the
+    ``run`` after it ends (the run's characters are the only ones the first
+    segment takes, so no shorter segment can succeed), and a later start
+    inside the same run meets the same end with less before it, so it fails
+    too and is never tried. The scan resumes at the run's end, where a start
+    may sit right after it. A match is never empty: it begins with its start.
+    """
+    if shape.start is None or shape.run is None:
+        yield from shape.pattern.finditer(text)
+        return
+    pos = 0
+    while (start := shape.start.search(text, pos)) is not None:
+        found = shape.pattern.match(text, start.start())
+        if found is not None:
+            yield found
+            pos = found.end()
+            continue
+        run = shape.run.match(text, start.end())
+        pos = run.end() if run is not None else start.end()
+
+
 def credential_labels(text: str) -> tuple[str, ...]:
     """The high-confidence credential shapes present in ``text``, sorted."""
     found = {
         shape.label
         for shape in _SHAPES
-        if shape.label in HIGH_CONFIDENCE_LABELS and shape.pattern.search(text)
+        if shape.label in HIGH_CONFIDENCE_LABELS and next(_matches(shape, text), None) is not None
     }
     return tuple(sorted(found))
 
@@ -178,13 +219,25 @@ def kept_prose(value: object, *, limit: int | None = None) -> str:
 
 
 def redact(text: str) -> RedactionResult:
-    """Replace recognised secret shapes with labelled placeholders."""
+    """Replace recognised secret shapes with labelled placeholders.
+
+    Each shape is applied to the text the shapes before it left, as ``subn``
+    applied it, through :func:`_matches`, so the time it takes is in proportion
+    to the text whatever the text holds.
+    """
     counts: dict[str, int] = {}
     out = text
     for shape in _SHAPES:
         placeholder = PLACEHOLDER.format(label=shape.label)
-        repl = r"\g<1>" + placeholder if shape.keep_prefix else placeholder
-        out, n = shape.pattern.subn(repl, out)
+        pieces: list[str] = []
+        last = n = 0
+        for found in _matches(shape, out):
+            pieces.append(out[last : found.start()])
+            pieces.append(found.group(1) + placeholder if shape.keep_prefix else placeholder)
+            last = found.end()
+            n += 1
         if n:
+            pieces.append(out[last:])
+            out = "".join(pieces)
             counts[shape.label] = counts.get(shape.label, 0) + n
     return RedactionResult(out, counts)

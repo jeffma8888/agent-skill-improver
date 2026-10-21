@@ -19,10 +19,17 @@ import unittest
 from pathlib import Path
 
 from agent_skill_improver.domain.redaction import (
+    _SHAPES,
     HIGH_CONFIDENCE_LABELS,
+    PLACEHOLDER,
+    _matches,
     credential_labels,
+    kept_prose,
+    quoted_value,
     redact,
 )
+
+from tests.test_skill_identity_and_payloads import deadline
 
 REPO = Path(__file__).resolve().parent.parent
 _SPEC = importlib.util.spec_from_file_location("leakscan", REPO / "tools" / "leakscan.py")
@@ -150,6 +157,123 @@ class HighConfidenceDetectorTests(unittest.TestCase):
         self.assertTrue(HIGH_CONFIDENCE_LABELS <= labels, HIGH_CONFIDENCE_LABELS - labels)
         self.assertNotIn("secret-assignment", HIGH_CONFIDENCE_LABELS)
         self.assertNotIn("url-credential", HIGH_CONFIDENCE_LABELS)
+
+
+class MaskingTimeTests(unittest.TestCase):
+    """Masking takes time in proportion to the text, whatever the text holds.
+
+    Measured before: a JWT segment may hold ``-``, so each ``-eyJ`` inside a
+    run of token characters was a start of its own, and each was scanned to
+    the end of the run; 64 KiB of such text took about 0.7 s on 3.11 and 1.1 s
+    on 3.13, and each doubling four times as long. Model output is masked
+    before it is cut, up to the 4 MiB a role may print, so one role's reply
+    could hold a daily run for most of an hour or more.
+    """
+
+    HEADER = _j("e", "yJ")
+    #: 256 KiB of starts with no token after any of them: about 18 s before.
+    STARTS = (HEADER + "-") * 65_536
+
+    def token(self, fill: str = "a") -> str:
+        return self.HEADER + fill * 20 + "." + self.HEADER + "b" * 20 + "." + "c" * 30
+
+    def test_text_full_of_token_starts_and_no_token_is_masked_in_linear_time(self):
+        with deadline(5.0):
+            result = redact(self.STARTS)
+            labels = credential_labels(self.STARTS)
+        self.assertEqual(result.text, self.STARTS, "there is no token here, so nothing is masked")
+        self.assertEqual(labels, ())
+
+    def test_every_path_that_quotes_model_output_masks_such_text_in_linear_time(self):
+        from agent_skill_improver.adapters.bounded_process import quotable
+
+        with deadline(5.0):
+            quoted = quotable(self.STARTS, limit=400, from_end=False)
+            kept = kept_prose(self.STARTS, limit=2000)
+            shown = quoted_value(self.STARTS)
+        self.assertEqual(quoted, self.STARTS[:400])
+        self.assertTrue(kept.startswith(self.STARTS[:2000]))
+        self.assertIn("more chars not quoted", shown)
+
+    def test_a_token_right_after_a_run_with_no_token_is_still_masked(self):
+        token = self.token()
+        text = (self.HEADER + "-") * 1000 + " " + token + " tail"
+        result = redact(text)
+        self.assertNotIn(token, result.text)
+        self.assertEqual(result.counts.get("jwt"), 1)
+        self.assertTrue(result.text.endswith(PLACEHOLDER.format(label="jwt") + " tail"))
+        self.assertEqual(credential_labels(text), ("jwt",))
+
+    def test_a_token_right_after_a_short_false_start_is_still_masked(self):
+        """The false start's run ends at the dot; the token starts right after it."""
+        token = self.token()
+        text = self.HEADER + "-aaa." + token
+        self.assertEqual(redact(text).text, self.HEADER + "-aaa." + PLACEHOLDER.format(label="jwt"))
+
+    def test_a_token_after_a_word_character_and_a_dash_is_still_masked(self):
+        """The ``eyJ`` right after a word character is no start, since the
+        pattern needs a word boundary there; the one after the ``-`` is. A
+        start found without the boundary would skip to the end of the run and
+        past the token."""
+        token = self.token()
+        for before in ("a", "_", "\u00e9", "\u0663"):
+            with self.subTest(before=before):
+                text = before + self.HEADER + "-" + token
+                result = redact(text)
+                self.assertEqual(result.counts.get("jwt"), 1)
+                self.assertNotIn(token, result.text)
+                self.assertEqual(credential_labels(text), ("jwt",))
+
+    def test_a_token_whose_later_segments_hold_further_starts_is_masked_once(self):
+        """The scan resumes where a token ends, never inside it."""
+        segment = self.HEADER + "c" * 10
+        text = self.HEADER + "a" * 10 + "." + segment + "." + segment + "." + segment
+        result = redact(text)
+        self.assertEqual(result.counts, {"jwt": 1})
+        self.assertEqual(result.text, PLACEHOLDER.format(label="jwt") + "." + segment)
+
+    def _samples(self) -> list[str]:
+        import random
+
+        rng = random.Random(133)
+        pieces = [
+            self.HEADER,
+            self.HEADER + "a" * 10,
+            "." + self.HEADER + "b" * 10,
+            "-",
+            ".",
+            "_",
+            " ",
+            "a" * 5,
+            "b" * 10,
+            "x",
+            "=",
+            "&",
+            "?",
+            _j("tok", "en="),
+            _j("s", "k-") + "q" * 20,
+            _j("x", "oxb-") + "1" * 10,
+        ]
+        return ["".join(rng.choice(pieces) for _ in range(rng.randint(0, 14))) for _ in range(4000)]
+
+    def test_the_control_the_scan_finds_what_each_pattern_finds(self):
+        for text in self._samples():
+            for shape in _SHAPES:
+                expected = [(m.start(), m.end()) for m in shape.pattern.finditer(text)]
+                found = [(m.start(), m.end()) for m in _matches(shape, text)]
+                self.assertEqual(found, expected, (shape.label, text))
+
+    def test_the_control_redaction_leaves_what_the_patterns_alone_leave(self):
+        for text in self._samples():
+            out, counts = text, {}
+            for shape in _SHAPES:
+                placeholder = PLACEHOLDER.format(label=shape.label)
+                repl = r"\g<1>" + placeholder if shape.keep_prefix else placeholder
+                out, n = shape.pattern.subn(repl, out)
+                if n:
+                    counts[shape.label] = n
+            result = redact(text)
+            self.assertEqual((result.text, result.counts), (out, counts), text)
 
 
 if __name__ == "__main__":
