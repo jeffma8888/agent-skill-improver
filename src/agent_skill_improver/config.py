@@ -32,7 +32,7 @@ from .adapters.conversation_cli import (
 from .adapters.bounded_process import MAX_TIMEOUT_SECONDS
 from .adapters.model_command import RoleCommand, role_command_from_mapping
 from .domain.authorship import DEFAULT_AGENT_TITLE_MARKERS
-from .domain.redaction import QUOTED_VALUE_CHARS, quoted_value
+from .domain.redaction import QUOTED_VALUE_CHARS, quoted_value, redact
 from .domain.isolation import source_class
 from .domain.rubric import Rubric
 from .domain.skills import SkillRoot
@@ -537,13 +537,20 @@ _PLAIN_NAME = re.compile(r"[A-Za-z0-9_.\[\]-]+")
 def _named(where: str) -> str:
     """A dotted name from ``_document_nodes`` as a refusal prints it.
 
-    Bare when it is plain and short, else ``quoted_value``: a quoted TOML key
-    may hold a line break or a terminal escape, and a dotted key may nest as
-    deep as the file is long. Measured before: a raw line break and a raw
-    ``ESC[31m`` reached the message as written, a 5,000-character key came
-    back whole, and a key nested 50,000 deep made a 339 KB message.
+    Bare when it is plain, short and nothing in it is masked, else
+    ``quoted_value``: a quoted TOML key may hold a line break or a terminal
+    escape, a dotted key may nest as deep as the file is long, and a key is
+    where a pasted token lands when it is used as an env name. Measured before:
+    a raw line break and a raw ``ESC[31m`` reached the message as written, a
+    5,000-character key came back whole, a key nested 50,000 deep made a 339 KB
+    message, and a ``ghp_`` or ``sk-ant-`` token used as an env name was
+    printed whole, where the ``=`` refusal masked the same name.
     """
-    if len(where) <= QUOTED_VALUE_CHARS and _PLAIN_NAME.fullmatch(where):
+    if (
+        len(where) <= QUOTED_VALUE_CHARS
+        and _PLAIN_NAME.fullmatch(where)
+        and redact(where).text == where
+    ):
         return where
     return quoted_value(where)
 
@@ -573,6 +580,41 @@ def _refuse_unstorable_integers(raw: Mapping[str, Any], source: Path) -> None:
             )
 
 
+def _refuse_nul(raw: Mapping[str, Any], config_path: Path) -> None:
+    """Refuse a NUL in any key or string of the config, at any depth.
+
+    Every string a config holds is a path, a word of a command line, an
+    environment entry, a value rendered into one of those, or a label printed
+    beside them, and the platform takes each as a NUL-terminated string. TOML
+    can spell one (``"\\u0000"``), and Python refuses it only at the call that
+    uses it, with a ``ValueError`` (``embedded null byte``; for a path on 3.13,
+    ``lstat: embedded null character in path``). Measured before: a NUL in
+    ``[run].state_dir``, ``[run].base_dir``, ``[rubrics].dir`` or a
+    ``[[skill_root]]`` path made ``doctor`` and ``daily`` fall there, exit 70;
+    in a word of a ``[model.*]`` or ``[source]`` command, or in a
+    ``[model.*].env`` entry, ``doctor`` said ready and ``daily`` fell at its
+    first call. The field is named (``_named``) and its value never shown: an
+    environment entry may be a credential. Walked in document order
+    (``_document_nodes``).
+    """
+    for where, value in _document_nodes(raw):
+        if isinstance(value, str):
+            if "\x00" in value:
+                raise ConfigError(
+                    f"{config_path}: {_named(where)} holds a NUL character (\\x00), which no "
+                    "path, command word or environment entry can carry; it would be refused at "
+                    "the first call that used it. Remove it."
+                )
+        elif isinstance(value, Mapping):
+            for key in value:
+                if "\x00" in key:
+                    raise ConfigError(
+                        f"{config_path}: a key in {_named(where) if where else 'the top level'} holds a "
+                        "NUL character (\\x00), which no path, command word or environment entry "
+                        "can carry. Remove it."
+                    )
+
+
 def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None) -> Config:
     """Load and validate a config file. Raises :class:`ConfigError`."""
     config_path = Path(path).expanduser().resolve()
@@ -585,6 +627,7 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
         # more digits than Python reads from text, which tomllib lets through.
         raise ConfigError(f"{config_path}: invalid TOML: {exc}") from exc
     _refuse_unstorable_integers(raw, config_path)
+    _refuse_nul(raw, config_path)
 
     over = dict(overrides or {})
     _refuse_unknown_keys(raw, TOP_LEVEL_KEYS, where="the config file")

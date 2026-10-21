@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,6 +29,7 @@ from agent_skill_improver.app.receipt import STATUS_STOOD_DOWN
 from agent_skill_improver.app.state import StateStore, safe_name
 from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.config import load_config
+from agent_skill_improver.domain.candidate import validate_candidate_id
 from agent_skill_improver.errors import (
     ConfigError,
     LinkedTargetRefused,
@@ -1857,6 +1859,116 @@ class ARunDayThatCannotNameACandidateIsRefusedFirstTests(DailyHarness):
         payload = receipt.to_dict()
         self.assertEqual(payload["skill_tree"]["skills_discovered"], len(store.known_skill_ids()))
         self.assertGreaterEqual(payload["counts"]["records_scored"], 1)
+
+    def test_a_candidate_cap_too_wide_to_number_an_id_is_named_not_the_day_or_skill(self):
+        """The sequence number is probed at the cap's width, so a cap of more
+        digits than the id has room for is what breaks it. Measured before: a
+        171-digit ``[caps].max_candidates_per_run`` with a date-sized day and a
+        short skill was refused as "Use a shorter --day or a shorter skill
+        directory name", neither of which was at fault."""
+        config = self.env(max_candidates_per_run=10**170)
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            run_daily(
+                config,
+                source=self._UntouchedSource(),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=DAY,
+                commit=True,
+            )
+        message = str(ctx.exception)
+        self.assertIn("[caps].max_candidates_per_run has 171 digits", message)
+        self.assertIn(f"on run day {DAY!r}", message)
+        self.assertIn("maximum 204 characters", message)
+        skill = re.search(r"for skill '([^']+)'", message).group(1)
+        fits = 204 - len(f"CAND-{DAY}--{skill}")
+        self.assertIn(f"Lower the cap to at most {fits} digits.", message)
+        self.assertTrue(validate_candidate_id(f"CAND-{DAY}-{'9' * fits}-{skill}"))
+        with self.assertRaises(ValueError):
+            validate_candidate_id(f"CAND-{DAY}-{'9' * (fits + 1)}-{skill}")
+        self.assertIn("No conversation was read or scored", message)
+        self.assertNotIn("shorter --day", message)
+        written = [p for p in config.state_dir.rglob("*") if p.is_file() and p.name != "README.txt"]
+        self.assertEqual([p.name for p in written], ["daily.lock"])
+
+    def test_the_control_a_wide_cap_with_a_day_and_skill_too_long_anyway_blames_those(self):
+        """A cap wider than two digits is named only when the id would fit at
+        two: a 64-character day and a 140-character skill do not fit at any
+        width, so they are what the refusal names."""
+        from tests.support import TDD_SKILL, write_skill
+
+        config = self.env(max_candidates_per_run=1000)
+        long_skill = "y" * 140
+        write_skill(
+            self.base / "skills-canonical", long_skill, TDD_SKILL.replace("tdd", long_skill)
+        )
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        day = "x" * 64
+        with self.assertRaises(ConfigError) as ctx:
+            run_daily(
+                config,
+                source=self._UntouchedSource(),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=day,
+                commit=True,
+            )
+        message = str(ctx.exception)
+        self.assertIn(f"run day {day!r} (64 characters) cannot name a candidate", message)
+        self.assertIn("shorter --day", message)
+        self.assertNotIn("max_candidates_per_run", message)
+
+    def test_an_id_that_fits_one_sequence_digit_but_not_two_blames_the_names_not_the_cap(self):
+        """The sequence number is never narrower than two digits, so an id that
+        fits only at one is the day's and the skill's to shorten: no cap would
+        help. A 186-character skill on a date-sized day is one character over
+        at two digits and fits at one."""
+        from tests.support import TDD_SKILL, write_skill
+
+        config = self.env()
+        long_skill = "y" * 186
+        validate_candidate_id(f"CAND-{DAY}-9-{long_skill}")
+        with self.assertRaises(ValueError):
+            validate_candidate_id(f"CAND-{DAY}-99-{long_skill}")
+        write_skill(
+            self.base / "skills-canonical", long_skill, TDD_SKILL.replace("tdd", long_skill)
+        )
+        state = StateStore(config.state_dir, clock=frozen_clock())
+        store = FilesystemSkillStore(
+            config.skill_roots, read_only=True, protected_paths=config.protected_paths
+        )
+        self.assertIn(long_skill, store.known_skill_ids(), "the long skill is a real one")
+        with self.assertRaises(ConfigError) as ctx:
+            run_daily(
+                config,
+                source=self._UntouchedSource(),
+                runner=InProcessRunner(),
+                skill_store=store,
+                state=state,
+                clock=frozen_clock(),
+                day=DAY,
+                commit=True,
+            )
+        message = str(ctx.exception)
+        self.assertIn(f"skill {long_skill!r} (186 characters)", message)
+        self.assertIn("shorter --day", message)
+        self.assertNotIn("max_candidates_per_run", message)
+
+    def test_the_control_a_cap_wide_but_still_fitting_runs_to_a_candidate(self):
+        config = self.env(max_candidates_per_run=10**100)
+        receipt, _, _ = self.run_pass(config, day=DAY)
+        self.assertGreaterEqual(receipt.to_dict()["counts"]["candidates_proposed"], 1)
 
 
 class IdempotenceAndLockTests(DailyHarness):

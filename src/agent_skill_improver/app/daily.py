@@ -953,21 +953,48 @@ def _assert_every_skill_can_be_named(
     ``CAND-{day}-{seq}-{safe_name(skill)}``; this forms it here for every known
     skill, with the sequence number at the widest it can reach (two digits, or
     the per-run candidate cap when that is wider), and refuses on the first one
-    that does not fit. Stated limit: the sequence number also skips over ids a
-    previous run of the same day already used, so a day re-run more than the
-    cap allows can push it one digit wider than probed.
+    that does not fit. The refusal names the cap, and how many digits fit, when
+    the id would fit with a two-digit sequence number, since only the cap's
+    width breaks it then; it names the day and the skill otherwise, an id that
+    fits only at one digit included, since no cap numbers below two. Stated limit: the sequence number also
+    skips over ids a previous run of the same day already used, so a day re-run
+    more than the cap allows can push it one digit wider than probed.
+
+    Measured before: a 171-digit ``[caps].max_candidates_per_run`` with a
+    date-sized day and a short skill was refused as a day or skill name too
+    long, and told to shorten them.
     """
     seq_ceiling = max(99, max_candidates_per_run)
     for skill_id in sorted(skill_ids):
-        probe = f"CAND-{run_day}-{seq_ceiling:02d}-{safe_name(skill_id)}"
+        name = safe_name(skill_id)
         try:
-            validate_candidate_id(probe)
+            validate_candidate_id(f"CAND-{run_day}-{seq_ceiling:02d}-{name}")
         except ValueError as exc:
+            if _names_a_candidate(f"CAND-{run_day}-99-{name}"):
+                digits = len(str(max_candidates_per_run))
+                fits = max(
+                    width
+                    for width in range(2, digits)
+                    if _names_a_candidate(f"CAND-{run_day}-{'9' * width}-{name}")
+                )
+                raise ConfigError(
+                    f"[caps].max_candidates_per_run has {digits} digits, too many to number "
+                    f"a candidate for skill {skill_id!r} on run day {run_day!r}: {exc}. Lower "
+                    f"the cap to at most {fits} digits. No conversation was read or scored."
+                ) from None
             raise ConfigError(
                 f"run day {run_day!r} ({len(run_day)} characters) cannot name a candidate for "
                 f"skill {skill_id!r} ({len(skill_id)} characters): {exc}. Use a shorter --day "
                 f"or a shorter skill directory name. No conversation was read or scored."
             ) from None
+
+
+def _names_a_candidate(candidate_id: str) -> bool:
+    try:
+        validate_candidate_id(candidate_id)
+    except ValueError:
+        return False
+    return True
 
 
 def _no_skills_reason(skill_store: Any) -> str:

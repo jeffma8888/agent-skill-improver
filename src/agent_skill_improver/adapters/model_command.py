@@ -56,7 +56,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
-from ..domain.redaction import redact
+from ..domain.redaction import quoted_value, redact
 from ..errors import MalformedModelOutput, TransientFailure
 from ..jsonio import loads_untrusted
 from .bounded_process import (
@@ -399,6 +399,18 @@ def role_command_from_mapping(role: str, raw: Mapping[str, Any]) -> RoleCommand:
         not isinstance(k, str) or not isinstance(v, str) for k, v in env_raw.items()
     ):
         raise ValueError(f"[model.{role}].env must be a table of string -> string")
+    for name in env_raw:
+        if name and "=" not in name:
+            continue
+        # The child's environment is a list of NAME=value entries, so a name
+        # holding "=" is refused by the platform at the call (measured before:
+        # doctor said ready, then daily fell with "illegal environment variable
+        # name", exit 70), and an empty one was passed as "=value", naming nothing.
+        raise ValueError(
+            f"[model.{role}].env name {quoted_value(name)} is not one an environment can "
+            "hold: a name is "
+            "never empty and never holds '='. Rename it."
+        )
     return RoleCommand(
         role=role,
         argv=tuple(argv),
