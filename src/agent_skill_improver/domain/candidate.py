@@ -79,11 +79,11 @@ def validate_run_day(day: str) -> str:
     if not RUN_DAY_RE.fullmatch(day):
         hint = ""
         if "/" in day and RUN_DAY_RE.fullmatch(day.replace("/", "-")):
-            hint = f"; a date is spelled with hyphens, {day.replace('/', '-')!r}"
+            hint = f"; a date is spelled with hyphens, {quoted_value(day.replace('/', '-'))}"
         raise ValueError(
-            f"run day {day!r} cannot name a candidate: a day must start with an ASCII letter "
-            f"or digit and contain only ASCII letters, digits, dot, underscore or hyphen "
-            f"(maximum {RUN_DAY_MAX_CHARS} characters){hint}"
+            f"run day {quoted_value(day)} cannot name a candidate: a day must start with an "
+            "ASCII letter or digit and contain only ASCII letters, digits, dot, underscore or "
+            f"hyphen (maximum {RUN_DAY_MAX_CHARS} characters){hint}"
         )
     return day
 

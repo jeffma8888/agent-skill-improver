@@ -25,12 +25,13 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import shlex
 import sys
 import traceback
 import unicodedata
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NoReturn, Sequence
 
 from . import __version__
 from .clock import SystemClock, day_key, iso
@@ -56,7 +57,7 @@ from .domain.isolation import (
 from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
-from .domain.redaction import quoted_value
+from .domain.redaction import quoted_value, redact
 from .app.state import DIR_MODE, OPEN_STATUSES, SET_ASIDE_KINDS, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
@@ -1778,26 +1779,101 @@ def _run_day_argument(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+#: A whole number as int() reads it from text, the digits in group 1.
+_WHOLE_NUMBER_TEXT = re.compile(r"[+-]?(\d+(?:_\d+)*)")
+
+
 def _positive_int_argument(value: str) -> int:
     """``--limit``: a page size of 0 or less has no meaning, and the page
-    description would otherwise say ``N of at most -1``."""
+    description would otherwise say ``N of at most -1``. The value is quoted
+    bounded (``quoted_value``); a number with more digits than Python reads
+    from text (``sys.get_int_max_str_digits``) is told so, where before it was
+    refused as not a whole number."""
     try:
         number = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"must be a whole number, got {value!r}") from None
+        # int()'s own base-10 spelling: a sign, then digits with single
+        # underscores between them, which the digit limit does not count.
+        spelled = _WHOLE_NUMBER_TEXT.fullmatch(value.strip())
+        digits = spelled.group(1).replace("_", "") if spelled else ""
+        readable = sys.get_int_max_str_digits()
+        if digits and readable and len(digits) > readable:
+            raise argparse.ArgumentTypeError(
+                f"must be a whole number of at most {readable} digits, the most Python "
+                f"reads from text; got {len(digits)} digits: {quoted_value(value)}"
+            ) from None
+        raise argparse.ArgumentTypeError(
+            f"must be a whole number, got {quoted_value(value)}"
+        ) from None
     if number < 1:
-        raise argparse.ArgumentTypeError(f"must be at least 1, got {value!r}")
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {quoted_value(value)}")
     return number
 
 
+#: How many unrecognized arguments the refusal quotes before it counts the rest.
+QUOTED_EXTRA_ARGUMENTS = 8
+
+
+def _unrecognized_arguments(extras: Sequence[str]) -> str:
+    """argparse's own message joins the leftover words raw; this one quotes
+    each through ``quoted_value`` and counts what it does not quote."""
+    shown = " ".join(quoted_value(word) for word in extras[:QUOTED_EXTRA_ARGUMENTS])
+    rest = len(extras) - QUOTED_EXTRA_ARGUMENTS
+    more = f" ... and {rest} more not quoted" if rest > 0 else ""
+    return f"unrecognized arguments: {shown}{more}"
+
+
+#: The most of an argparse refusal that is printed whole. Past it, the start
+#: and the last ``ARGPARSE_MESSAGE_TAIL`` characters are kept, the end being
+#: where argparse names the options an ambiguous one could match.
+ARGPARSE_MESSAGE_CHARS = 1_600
+ARGPARSE_MESSAGE_TAIL = 200
+
+
+def _bounded_argparse_message(message: str) -> str:
+    """A refusal as ``_EscapingParser.error`` prints it: masked by the
+    redaction shapes, then cut in the middle when it is longer than
+    ``ARGPARSE_MESSAGE_CHARS``, with the count of what was left out. The
+    messages handed to argparse here (the run day's, the page size's, an
+    invalid choice and the unrecognized arguments) quote each typed value
+    through ``quoted_value`` and stay under the limit; argparse's own
+    "ambiguous option" and "ignored explicit argument" repeat the typed word
+    whole."""
+    text = redact(message).text
+    if len(text) <= ARGPARSE_MESSAGE_CHARS:
+        return text
+    head = ARGPARSE_MESSAGE_CHARS - ARGPARSE_MESSAGE_TAIL
+    left_out = len(text) - ARGPARSE_MESSAGE_CHARS
+    return (
+        f"{text[:head]} ... [{left_out} more chars not shown] ... "
+        f"{text[-ARGPARSE_MESSAGE_TAIL:]}"
+    )
+
+
 class _EscapingParser(argparse.ArgumentParser):
-    """argparse writes usage and errors to the terminal itself, and its
-    "unrecognized arguments" message repeats argv raw. Subparsers inherit this
-    class, so the one override covers every message argparse prints."""
+    """argparse writes usage and errors to the terminal itself: here what it
+    prints is escaped for the terminal (``_print_message``) and what it
+    refuses is masked and bounded (``error``). The "unrecognized arguments"
+    message is built by ``_unrecognized_arguments``, which ``main`` calls.
+    Subparsers inherit this class, so the overrides reach each subcommand's
+    parser too."""
 
     def _print_message(self, message: str, file: Any = None) -> None:
         if message:
             (file or sys.stderr).write(escape_for_terminal(message))
+
+    def error(self, message: str) -> NoReturn:
+        super().error(_bounded_argparse_message(message))
+
+    def _check_value(self, action: argparse.Action, value: Any) -> None:
+        """argparse's "invalid choice" repeats the typed value whole (a
+        subcommand, a ``set-aside --kind`` or a ``scheduler-template``
+        flavor); here it is quoted bounded and the choices are still listed."""
+        if action.choices is not None and value not in action.choices:
+            choices = ", ".join(map(repr, action.choices))
+            raise argparse.ArgumentError(
+                action, f"invalid choice: {quoted_value(value)} (choose from {choices})"
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1927,7 +2003,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args, extras = parser.parse_known_args(list(argv) if argv is not None else None)
+    if extras:
+        parser.error(_unrecognized_arguments(extras))
     if not hasattr(args, "json"):
         args.json = False
     if not hasattr(args, "config"):

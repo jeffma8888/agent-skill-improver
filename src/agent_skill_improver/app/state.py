@@ -62,6 +62,7 @@ from ..domain.candidate import (
     one_line_label,
     validate_candidate_id,
 )
+from ..domain.redaction import quoted_value
 from ..errors import ConfigError, SafetyRefusal, StateUnreadable
 from ..jsonio import FILE_MODE, loads_untrusted, write_json, write_text_atomic
 
@@ -640,7 +641,12 @@ class StateStore:
         try:
             validated = validate_candidate_id(candidate_id)
         except ValueError as exc:
-            raise StateUnreadable(f"invalid candidate id {candidate_id!r}: {exc}") from exc
+            # The id is whatever the operator typed: quoted bounded and masked,
+            # so a 100,000-character paste is cut and a credential of a shape
+            # redaction knows is masked.
+            raise StateUnreadable(
+                f"invalid candidate id {quoted_value(candidate_id)}: {exc}"
+            ) from exc
         return self.dir("candidates") / f"{validated}.json"
 
     def write_candidate(self, candidate: Candidate) -> Path:
