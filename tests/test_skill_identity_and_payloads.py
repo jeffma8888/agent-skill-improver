@@ -1219,7 +1219,7 @@ class RollbackSafetyTests(Harness):
     leaves the operator with a corrupt file and nothing left to restore from.
     """
 
-    def apply_a_change(self) -> tuple[Path, Path, str]:
+    def apply_a_change(self, backup: str = "bak") -> tuple[Path, Path, str]:
         """Perform a real write and return the target, its manifest and the old text."""
         target = self.canonical_dir / "shared" / SKILL_FILENAME
         previous = target.read_text(encoding="utf-8")
@@ -1227,10 +1227,22 @@ class RollbackSafetyTests(Harness):
             target,
             GOOD + "\n- an approved addition\n",
             expected_sha256=sha256_file(target),
-            backup_dir=self.base / "bak",
+            backup_dir=self.base / backup,
             skill_id="shared",
         )
         return target, Path(receipt.backup_manifest_path), previous
+
+    def rollback_with(
+        self, field: str, value: object, *, backup: str, live: int = 0o640
+    ) -> tuple[Path, str, str]:
+        """Apply, set one manifest field, chmod the live file to ``live`` and roll back."""
+        target, manifest, previous = self.apply_a_change(backup)
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        raw[field] = value
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        os.chmod(target, live)
+        self.store(read_only=False).rollback(manifest)
+        return target, previous, oct(stat.S_IMODE(target.stat().st_mode))
 
     def test_a_manifest_without_a_recorded_mode_restores_at_the_live_files_mode(self):
         """Manifests written before ``target_mode`` existed carry none; the
@@ -1392,6 +1404,156 @@ class RollbackSafetyTests(Harness):
         with self.assertRaises(BackupUnusable) as ctx:
             self.store(read_only=False).rollback(manifest)
         self.assertIn("new_sha256", str(ctx.exception))
+
+    def test_a_recorded_mode_the_owner_cannot_read_back_restores_at_the_live_mode(self):
+        """The restore is verified by reading it back. A recorded mode without
+        the owner's read bit wrote the skill unreadable, then reported a
+        refusal with the file already rewritten."""
+        for i, recorded in enumerate(("0o0", "0o7", "0o200", "0o4000")):
+            with self.subTest(recorded=recorded):
+                target, previous, mode = self.rollback_with(
+                    "target_mode", recorded, backup=f"bak-{i}"
+                )
+                self.assertEqual(target.read_text(encoding="utf-8"), previous)
+                self.assertEqual(mode, oct(0o640))
+
+    def test_a_recorded_mode_not_spelled_as_written_is_not_honoured(self):
+        """``-1`` restored the skill at 0o7777 and reported success."""
+        spellings = ("-1", "0o777777", "0o77777", "0o", "7", "644", 420, "0o644 ", ["0o644"])
+        for i, recorded in enumerate(spellings):
+            with self.subTest(recorded=recorded):
+                target, previous, mode = self.rollback_with(
+                    "target_mode", recorded, backup=f"bak-{i}"
+                )
+                self.assertEqual(target.read_text(encoding="utf-8"), previous)
+                self.assertEqual(mode, oct(0o640))
+
+    def test_the_control_an_honest_recorded_mode_is_restored(self):
+        """As the apply leaves it (the live file at the recorded mode), and after a
+        chmod that widened the live file since: the restore is the recorded mode."""
+        cases = (("0o600", 0o640), ("0o644", 0o644), ("0o4644", 0o4644), ("0o640", 0o660))
+        for i, (recorded, live) in enumerate(cases):
+            with self.subTest(recorded=recorded, live=oct(live)):
+                target, previous, mode = self.rollback_with(
+                    "target_mode", recorded, backup=f"bak-{i}", live=live
+                )
+                self.assertEqual(target.read_text(encoding="utf-8"), previous)
+                self.assertEqual(mode, oct(int(recorded, 8)))
+
+    def test_a_recorded_mode_wider_than_the_live_file_is_narrowed_to_it(self):
+        """A recorded mode in the honest shape restored setuid, setgid or world
+        write the live file never had, and reported success."""
+        for i, recorded in enumerate(("0o7777", "0o777", "0o666", "0o6755", "0o644")):
+            with self.subTest(recorded=recorded):
+                target, previous, mode = self.rollback_with(
+                    "target_mode", recorded, backup=f"bak-{i}"
+                )
+                self.assertEqual(target.read_text(encoding="utf-8"), previous)
+                self.assertEqual(mode, oct(0o640))
+
+    def test_a_live_file_its_owner_cannot_read_is_restored_readable_by_its_owner(self):
+        """A process reading the skill through its group or other bits restored it
+        at that mode as a file it now owns and cannot read: the verification read
+        failed and the command reported nothing touched with the bytes changed."""
+        from unittest import mock
+
+        target, manifest, previous = self.apply_a_change()
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        raw["target_mode"] = None
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        real = FilesystemSkillStore._read_pinned
+        seen: list[int] = []
+
+        def first_read_through_group_bits(store, *args, **kwargs):
+            data, mode = real(store, *args, **kwargs)
+            seen.append(mode)
+            return (data, 0o044) if len(seen) == 1 else (data, mode)
+
+        with mock.patch.object(FilesystemSkillStore, "_read_pinned", first_read_through_group_bits):
+            self.store(read_only=False).rollback(manifest)
+        self.assertEqual(target.read_text(encoding="utf-8"), previous)
+        self.assertEqual(oct(stat.S_IMODE(target.stat().st_mode)), oct(0o444))
+
+    def test_a_manifest_field_that_is_not_text_is_refused_by_that_name(self):
+        cases = (
+            ("target_path", 7),
+            ("backup_path", ["a"]),
+            ("previous_sha256", {"a": 1}),
+            ("new_sha256", True),
+            ("target_path", ""),
+            ("backup_path", "   "),
+        )
+        for i, (field, value) in enumerate(cases):
+            with self.subTest(field=field, value=value):
+                target, manifest, previous = self.apply_a_change(f"bak-{i}")
+                try:
+                    applied = target.read_text(encoding="utf-8")
+                    self.assertNotEqual(applied, previous, "each case starts from a real apply")
+                    raw = json.loads(manifest.read_text(encoding="utf-8"))
+                    raw[field] = value
+                    manifest.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaises(BackupUnusable) as ctx:
+                        self.store(read_only=False).rollback(manifest)
+                    self.assertIn(field, str(ctx.exception))
+                    self.assertEqual(target.read_text(encoding="utf-8"), applied)
+                finally:
+                    target.write_text(previous, encoding="utf-8")
+
+    def test_a_path_the_platform_cannot_judge_is_refused_before_anything_is_written(self):
+        """A NUL byte or an over-long name raised ValueError or OSError out of
+        the recovery command; nothing had been written, and now it says so."""
+        cases = (
+            ("target_path", "a\x00b/" + SKILL_FILENAME),
+            ("target_path", "x" * 5000 + "/" + SKILL_FILENAME),
+            ("target_path", "\ud800/" + SKILL_FILENAME),
+            ("backup_path", "x" * 5000),
+            ("backup_path", "a\x00b"),
+        )
+        for i, (field, value) in enumerate(cases):
+            with self.subTest(field=field, value=value[:8]):
+                target, manifest, previous = self.apply_a_change(f"bak-{i}")
+                try:
+                    applied = target.read_text(encoding="utf-8")
+                    self.assertNotEqual(applied, previous, "each case starts from a real apply")
+                    raw = json.loads(manifest.read_text(encoding="utf-8"))
+                    original_backup = Path(raw["backup_path"])
+                    backup_text = original_backup.read_text(encoding="utf-8")
+                    raw[field] = value
+                    manifest.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaises(BackupUnusable) as ctx:
+                        self.store(read_only=False).rollback(manifest)
+                    self.assertRegex(str(ctx.exception), "No file was touched|is unchanged")
+                    self.assertEqual(target.read_text(encoding="utf-8"), applied)
+                    self.assertEqual(original_backup.read_text(encoding="utf-8"), backup_text)
+                finally:
+                    target.write_text(previous, encoding="utf-8")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
+    def test_a_target_path_through_a_symlink_loop_is_a_named_refusal(self):
+        """On 3.11 ``resolve`` raised RuntimeError for a loop on the way to the
+        target, and the recovery command fell as an internal error."""
+        loops = {
+            "one link": (("loop", "loop"),),
+            "two links": (("ping", "pong"), ("pong", "ping")),
+        }
+        for i, (label, links) in enumerate(loops.items()):
+            with self.subTest(label):
+                target, manifest, previous = self.apply_a_change(f"bak-{i}")
+                made = [self.canonical_dir / name for name, _to in links]
+                try:
+                    applied = target.read_text(encoding="utf-8")
+                    for (name, to), link in zip(links, made):
+                        os.symlink(to, link)
+                    raw = json.loads(manifest.read_text(encoding="utf-8"))
+                    raw["target_path"] = str(made[0] / SKILL_FILENAME)
+                    manifest.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaises((BackupUnusable, LinkedTargetRefused)):
+                        self.store(read_only=False).rollback(manifest)
+                    self.assertEqual(target.read_text(encoding="utf-8"), applied)
+                finally:
+                    for link in made:
+                        link.unlink(missing_ok=True)
+                    target.write_text(previous, encoding="utf-8")
 
     @unittest.skipUnless(hasattr(os, "symlink"), "platform has no symlinks")
     def test_a_target_that_became_a_symlink_is_refused_and_the_link_target_untouched(self):

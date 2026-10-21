@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import secrets
 import shlex
 import stat
@@ -114,6 +115,40 @@ def _write_pinned(parent_fd: int, leaf: str, data: bytes, *, mode: int) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+#: How ``write_canonical`` spells the mode it records: ``oct()`` of the
+#: permission bits, which never runs past four octal digits.
+_RECORDED_MODE = re.compile(r"0o[0-7]{1,4}")
+
+
+def _restorable_mode(recorded: Any, live_mode: int) -> int:
+    """The mode a rollback writes the restored text at.
+
+    Never a permission the live file lacks, and always one its owner can read,
+    because the restore is verified by reading it back. In the flow this tool
+    runs the two modes agree: ``write_canonical`` records the skill's mode and
+    writes the applied text at it. They differ after a chmod since the apply or
+    a hand edit of the manifest, and then the recorded mode is honoured only in
+    the shape ``write_canonical`` records, narrowed to the live file's bits, and
+    only if its owner read bit survives that; otherwise the live file's mode is
+    kept. Either way the owner read bit is added: the restore is a new file this
+    process owns, and a live file read through its group or other bits would
+    otherwise be restored unreadable to its new owner.
+
+    Measured before: the field was parsed as any octal number, so a hand-edited
+    ``"0"`` or ``"0o200"`` restored the skill at a mode its owner cannot read,
+    the verification read then failed and the command reported a refusal with
+    the file already rewritten and unreadable, and ``"-1"``, ``"0o7777"`` or
+    ``"0o6755"`` restored it with setuid, setgid or world write and reported
+    success.
+    """
+    mode = live_mode
+    if isinstance(recorded, str) and _RECORDED_MODE.fullmatch(recorded):
+        narrowed = int(recorded, 8) & live_mode
+        if narrowed & stat.S_IRUSR:
+            mode = narrowed
+    return mode | stat.S_IRUSR
 
 
 def _entry_kind(path: Path) -> str:
@@ -650,17 +685,52 @@ class FilesystemSkillStore:
         since the start; rollback holding the same line is the symmetric half.
         """
         manifest = self._read_backup_manifest(manifest_path)
-        target = Path(str(manifest["target_path"]))
-        backup = Path(str(manifest["backup_path"]))
-        expected = str(manifest["previous_sha256"])
-        applied = str(manifest["new_sha256"])
+        target = Path(manifest["target_path"])
+        backup = Path(manifest["backup_path"])
+        expected = manifest["previous_sha256"]
+        applied = manifest["new_sha256"]
         if self.read_only:
             raise ReadOnlyViolation(f"refusing to roll back {target}: store is read-only")
+        # The manifest's paths are text anyone with the state tree can edit, so
+        # judging them can fail in the platform's hands as well as ours. A NUL
+        # byte or a name past the filesystem's limit raised ValueError or
+        # OSError from the first stat, and on 3.11 a symlink loop on the way
+        # to the target raised RuntimeError from ``resolve``; each made the
+        # command fall as an internal error. Nothing is written before this
+        # returns, so a refusal says so.
+        try:
+            parent_fd, leaf = self._judge_rollback(target, backup, expected)
+        except (OSError, ValueError, RuntimeError) as exc:
+            reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+            raise BackupUnusable(
+                f"refusing to roll back: what backup manifest {manifest_path} names could not "
+                f"be checked ({reason}). No file was touched."
+            ) from exc
+        try:
+            return self._rollback_pinned(
+                parent_fd,
+                leaf,
+                target,
+                backup=backup,
+                expected=expected,
+                applied=applied,
+                manifest=manifest,
+            )
+        finally:
+            os.close(parent_fd)
+
+    def _judge_rollback(self, target: Path, backup: Path, expected: str) -> tuple[int, str]:
+        """Every check :meth:`rollback` makes before the live file is read.
+
+        Returns the pinned parent handle and leaf the restore goes through. Any
+        refusal here leaves the tree exactly as it was.
+        """
         self._assert_document(target)
         self._assert_not_protected(target)
         if not backup.is_file():
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} is missing. "
+                f"refusing to roll back {target}: backup {backup} is missing or is not a "
+                "regular file. "
                 f"{target} is unchanged."
             )
         stored = sha256_file(backup)
@@ -690,19 +760,7 @@ class FilesystemSkillStore:
                 f"refusing to roll back {target}: the recorded target is not a regular file "
                 f"any more, so nothing here can be verified as the text this apply wrote."
             )
-        parent_fd, leaf = self._open_parent_pinned(target, verb="roll back")
-        try:
-            return self._rollback_pinned(
-                parent_fd,
-                leaf,
-                target,
-                backup=backup,
-                expected=expected,
-                applied=applied,
-                manifest=manifest,
-            )
-        finally:
-            os.close(parent_fd)
+        return self._open_parent_pinned(target, verb="roll back")
 
     def _rollback_pinned(
         self,
@@ -737,13 +795,10 @@ class FilesystemSkillStore:
             )
         # The backup was tightened to 0600 when it was taken, so restoring its
         # bytes must carry the skill's recorded mode or the skill ends up
-        # owner-only. Manifests written before the field existed have no mode;
-        # fall back to the live file's current mode rather than guessing.
-        recorded_mode = str(manifest.get("target_mode", ""))
-        try:
-            mode = int(recorded_mode, 8) if recorded_mode else live_mode
-        except ValueError:
-            mode = live_mode
+        # owner-only. A manifest written before the field existed has none, and
+        # one edited into a mode the restore cannot honestly use (see
+        # _restorable_mode) is treated the same: the live file's mode.
+        mode = _restorable_mode(manifest.get("target_mode"), live_mode)
         _write_pinned(parent_fd, leaf, backup.read_bytes(), mode=mode)
         restored_bytes, _mode = self._read_pinned(parent_fd, leaf, target, verb="roll back")
         restored = self._document_sha256(restored_bytes, target)
@@ -790,15 +845,19 @@ class FilesystemSkillStore:
                 f"refusing to roll back: backup manifest {path} is not a JSON object. "
                 "No file was touched."
             )
+        # Each is text in a manifest this tool wrote. A number or an object
+        # there used to be coerced with str() and refused later under another
+        # name (a hash mismatch, a non-document write of "7"), never this one.
         missing = [
             field
             for field in ("target_path", "backup_path", "previous_sha256", "new_sha256")
-            if not str(manifest.get(field, "")).strip()
+            if not isinstance(manifest.get(field), str) or not manifest[field].strip()
         ]
         if missing:
             raise BackupUnusable(
                 f"refusing to roll back: backup manifest {path} is missing "
-                f"{', '.join(missing)}. No file was touched."
+                f"{', '.join(missing)}, or holds something other than text there. "
+                "No file was touched."
             )
         return manifest
 

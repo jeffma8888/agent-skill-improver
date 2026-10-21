@@ -389,11 +389,17 @@ left the token matching and put unreviewed text into a skill file.
 `rollback` restores the backup through the same `_assert_document` gate and
 verifies the restored hash against the recorded base. Everything it can check
 without touching the live file it checks first: the manifest must carry a target,
-a backup path and a previous hash, and the backup on disk must hash to that
-previous hash. A backup that was truncated, edited or lost is therefore a
-`BackupUnusable` refusal with the skill still in its applied state, rather than an
-overwrite followed by the discovery that the restored content was never the
-original. Recovery must not be the step that loses the file.
+a backup path, a previous hash and the applied hash, each as text, and the backup
+on disk must hash to that previous hash. A backup that was truncated, edited or
+lost, or a recorded path the platform cannot even judge (a NUL byte, a name past
+the filesystem's limit), is therefore a `BackupUnusable` refusal with the skill
+still in its applied state, rather than an overwrite followed by the discovery
+that the restored content was never the original. The restore never grants a
+permission the live file lacks: the recorded mode is honoured only as
+`write_canonical` spells it, narrowed to the live file's bits, and only if the
+owner can read the restored file back, which the post-write verification does;
+otherwise the live file's mode is kept, and the owner read bit is added to either.
+Recovery must not be the step that loses the file.
 
 The live file is held to the same standard as the backup. Rollback undoes one
 apply, so the only text it may overwrite is the text that apply wrote: the
