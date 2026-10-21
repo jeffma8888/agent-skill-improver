@@ -132,8 +132,41 @@ def is_kept_receipt_name(name: str) -> bool:
 
 def keyed_name(value: str) -> str:
     """A readable, collision-resistant stem for an exact untrusted identifier."""
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"{safe_name(value)[:96]}--{digest}"
+    return f"{safe_name(value)[:96]}--{_id_digest(value)}"
+
+
+def _id_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+#: The most bytes a file name takes on the file systems a state tree lives on
+#: (APFS, HFS+, ext4 and most others). A record name past it cannot be created.
+FILE_NAME_MAX = 255
+
+
+def keyed_pair_name(first: str, second: str, *, suffix: str = ".json") -> str:
+    """``keyed_name(first)--keyed_name(second)`` and ``suffix``, cut to one file name.
+
+    A keyed name is up to 162 characters, so two joined, with ``.json``, are up
+    to 331, and a file name holds 255. A pair that fits is named as it always
+    was. One that does not keeps both digests whole and cuts only the readable
+    stems, to 116 characters between them, so the name stays distinct for every
+    distinct pair. Measured before: a 100-character conversation id scored
+    against a 100-character rubric id made a committed ``daily`` fall at its
+    first scorecard with ``File name too long``, exit 70, after ``doctor`` said
+    ready and the conversation was written, with no receipt.
+    """
+    name = f"{keyed_name(first)}--{keyed_name(second)}{suffix}"
+    if len(name) <= FILE_NAME_MAX:
+        return name
+    head, tail = safe_name(first)[:96], safe_name(second)[:96]
+    room = FILE_NAME_MAX - len(suffix) - 3 * len("--") - 2 * 64
+    keep_tail = min(len(tail), max(room // 2, room - len(head)))
+    keep_head = room - keep_tail
+    return (
+        f"{head[:keep_head]}--{_id_digest(first)}--{tail[:keep_tail]}--"
+        f"{_id_digest(second)}{suffix}"
+    )
 
 
 @dataclass(frozen=True)
@@ -586,15 +619,13 @@ class StateStore:
     def write_scorecard(
         self, conversation_id: str, rubric_id: str, payload: dict[str, Any]
     ) -> Path:
-        name = f"{keyed_name(conversation_id)}--{keyed_name(rubric_id)}.json"
-        path = self.dir("scorecards") / name
+        path = self.dir("scorecards") / keyed_pair_name(conversation_id, rubric_id)
         return self._persist(path, lambda: write_json(path, payload))
 
     def write_failures(
         self, conversation_id: str, rubric_id: str, payload: list[dict[str, Any]]
     ) -> Path:
-        name = f"{keyed_name(conversation_id)}--{keyed_name(rubric_id)}.json"
-        path = self.dir("failures") / name
+        path = self.dir("failures") / keyed_pair_name(conversation_id, rubric_id)
         return self._persist(
             path, lambda: write_json(path, {"schema": "asi.failures.v1", "cases": payload})
         )
@@ -698,7 +729,7 @@ class StateStore:
 
     # -- quarantine / defer ---------------------------------------------
     def quarantine(self, record_id: str, *, stage: str, reason: str, detail: Any = None) -> Path:
-        path = self.dir("quarantine") / f"{keyed_name(record_id)}--{keyed_name(stage)}.json"
+        path = self.dir("quarantine") / keyed_pair_name(record_id, stage)
         payload = {
             "schema": "asi.quarantine.v1",
             "record_id": record_id,
@@ -717,7 +748,7 @@ class StateStore:
         first, do nothing about the second -- so a single counter covering both is
         uninformative in exactly the situation you would want to consult it.
         """
-        path = self.dir("refusals") / f"{keyed_name(record_id)}--{keyed_name(stage)}.json"
+        path = self.dir("refusals") / keyed_pair_name(record_id, stage)
         payload = {
             "schema": "asi.refusal.v1",
             "record_id": record_id,

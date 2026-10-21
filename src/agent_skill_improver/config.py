@@ -73,7 +73,76 @@ FAIRNESS_DIMENSIONS = ("class", "workspace", "date")
 _UNEXPANDED_VARIABLE = re.compile(r"\$(?:\{([^}]*)\}?|([A-Za-z_][A-Za-z0-9_]*))")
 
 
-def _expand(raw: str, *, base: Path) -> Path:
+def _platform_name_limits() -> tuple[int, int]:
+    """The most bytes a file name and a whole path hold here (NAME_MAX, PATH_MAX)."""
+    try:
+        return os.pathconf("/", "PC_NAME_MAX"), os.pathconf("/", "PC_PATH_MAX")
+    except (AttributeError, OSError, ValueError):  # pragma: no cover - POSIX reports both
+        return 255, 1024
+
+
+NAME_MAX, PATH_MAX = _platform_name_limits()
+
+#: ``conversations``, the longest name in ``app.state.SUBDIRS`` (a test holds
+#: the two together; ``config`` does not import ``app``).
+_LONGEST_STATE_SUBDIR = 13
+
+#: An upper bound on the bytes a record adds below the state directory: a
+#: subdirectory and at most two names below it (a backup file in its
+#: candidate's directory under ``backups`` has the most levels), each name at
+#: most NAME_MAX, so a state directory this much under PATH_MAX holds every
+#: record the store writes. The store forms no name past 255 bytes
+#: (``app.state.FILE_NAME_MAX``), and none past NAME_MAX could be written at
+#: all. The records written measure less than this.
+STATE_PATH_RESERVE = 1 + _LONGEST_STATE_SUBDIR + 2 * (1 + NAME_MAX)
+
+
+def _within_name_limits(path: Path, *, what: str, longest: int = PATH_MAX - 1) -> Path:
+    """``path``, or a ``ConfigError`` when the platform could not use it.
+
+    A name past NAME_MAX bytes, or a path past PATH_MAX less its terminator, is
+    refused by the system calls on it (``stat``, ``open``, ``mkdir``,
+    ``listdir``, and pathlib's ``exists`` and ``is_file``) with ``File name too
+    long``, while ``os.path.isfile`` says False and ``Path.resolve`` returns it
+    unchecked (measured, 3.11 and 3.13); ``longest`` asks for less, for a
+    directory that needs room below it. Measured before: a 300-byte name in
+    ``state_dir``, ``[rubrics].dir``, ``fixtures_dir`` or the ``--config`` path
+    made ``doctor`` and ``daily`` fall with that ``OSError``, exit 70; in
+    ``base_dir``, ``doctor`` fell the same way and ``daily`` refused with a
+    ``SafetyRefusal``; a 300-byte ``[rubrics].enabled`` id made ``doctor`` fall
+    too. ``what`` names the field, the skill root, the rubric's file or the
+    config file. A path that could never exist is refused even where a run
+    would have gone on without it (a mirror or other read-only skill root,
+    which a run reads only when it is there, or a ``base_dir`` that no relative
+    path uses): before, such a config ran. The path is quoted bounded, since it
+    is as long as the operator wrote it, or longer once resolved.
+    """
+    for part in path.parts:
+        size = len(os.fsencode(part))
+        if size > NAME_MAX:
+            raise ConfigError(
+                f"{what} {quoted_value(str(path))} has a name of {size} bytes, and a file "
+                f"name here holds at most {NAME_MAX}: the system would refuse to open, list "
+                "or create it "
+                "(File name too long). Shorten it. No record was written."
+            )
+    size = len(os.fsencode(str(path)))
+    if size > longest:
+        raise ConfigError(
+            f"{what} {quoted_value(str(path))} is {size} bytes long, and here it can be at "
+            f"most {longest}"
+            + (
+                ""
+                if longest == PATH_MAX - 1
+                else f" so that {STATE_PATH_RESERVE} bytes are left below it for the records "
+                f"the store writes, in a path of at most {PATH_MAX - 1}"
+            )
+            + ". Shorten it. No record was written."
+        )
+    return path
+
+
+def _expand(raw: str, *, base: Path, what: str, longest: int = PATH_MAX - 1) -> Path:
     """A configured path with ``~`` and ``$VARIABLE`` expanded, or a refusal.
 
     ``expandvars`` keeps an unset variable as literal text, so a path such as
@@ -101,7 +170,9 @@ def _expand(raw: str, *, base: Path) -> Path:
             "literal text as a directory."
         )
     path = Path(expanded)
-    return path if path.is_absolute() else (base / path)
+    return _within_name_limits(
+        path if path.is_absolute() else (base / path), what=what, longest=longest
+    )
 
 
 def _state_dir_as_written(path: Path) -> Path:
@@ -484,7 +555,11 @@ def package_dir() -> Path:
 def _base_dir_for(config_path: Path, run_table: Mapping[str, Any]) -> Path:
     declared = run_table.get("base_dir")
     if isinstance(declared, str) and declared.strip():
-        return _expand(declared, base=config_path.parent).resolve()
+        # Measured again once resolved: a link in it may lead somewhere longer.
+        return _within_name_limits(
+            _expand(declared, base=config_path.parent, what="[run].base_dir").resolve(),
+            what="[run].base_dir",
+        )
     parent = config_path.parent
     # A config that lives in a `config/` directory belongs to the repo above it.
     if parent.name == "config":
@@ -617,7 +692,7 @@ def _refuse_nul(raw: Mapping[str, Any], config_path: Path) -> None:
 
 def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None) -> Config:
     """Load and validate a config file. Raises :class:`ConfigError`."""
-    config_path = Path(path).expanduser().resolve()
+    config_path = _within_name_limits(Path(path).expanduser().resolve(), what="config file")
     if not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
     try:
@@ -635,8 +710,19 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
         _refuse_unknown_keys(_require_table(raw, name), TABLE_KEYS[name], where=f"[{name}]")
     run_table = _require_table(raw, "run")
     base_dir = _base_dir_for(config_path, run_table)
-    state_dir = _state_dir_as_written(
-        _expand(_str_field(run_table, "state_dir", "state", where="run"), base=base_dir)
+    state_dir = _within_name_limits(
+        _state_dir_as_written(
+            _expand(
+                _str_field(run_table, "state_dir", "state", where="run"),
+                base=base_dir,
+                what="[run].state_dir",
+                longest=PATH_MAX - 1 - STATE_PATH_RESERVE,
+            )
+        ),
+        what="[run].state_dir",
+        # Measured before: a state_dir of 849 bytes passed doctor, then made a
+        # committed daily fall mid-run with File name too long, records written.
+        longest=PATH_MAX - 1 - STATE_PATH_RESERVE,
     )
     dry_run = _bool_field(run_table, "dry_run", True, where="run")
     if "dry_run" in over and over["dry_run"] is not None:
@@ -663,7 +749,9 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
     }
     rub_dir = _require_table(raw, "rubrics").get("dir", "rubrics")
     if isinstance(rub_dir, str):
-        protected_dirs["the rubrics directory"] = _expand(rub_dir, base=config_path.parent)
+        protected_dirs["the rubrics directory"] = _expand(
+            rub_dir, base=config_path.parent, what="[rubrics].dir"
+        )
     protected = [config_path, *protected_dirs.values()]
     _assert_editable_roots_outside_protected(skill_roots, protected_dirs)
     guard_table = _require_table(raw, "guard")
@@ -740,7 +828,9 @@ def _load_source(table: Mapping[str, Any], *, base_dir: Path) -> SourceConfig:
     if kind not in SOURCE_KINDS:
         raise ConfigError(f"[source].kind must be one of {SOURCE_KINDS}, got {kind!r}")
     fixtures_raw = _str_field(table, "fixtures_dir", "", where="source")
-    fixtures_dir = _expand(fixtures_raw, base=base_dir) if fixtures_raw else None
+    fixtures_dir = (
+        _expand(fixtures_raw, base=base_dir, what="[source].fixtures_dir") if fixtures_raw else None
+    )
     if kind == SOURCE_FIXTURES and fixtures_dir is None:
         raise ConfigError('[source].fixtures_dir is required when kind = "fixtures"')
     workspaces = table.get("workspaces", [])
@@ -907,7 +997,7 @@ def _load_skill_roots(raw: Any, *, base_dir: Path) -> tuple[SkillRoot, ...]:
         roots.append(
             SkillRoot(
                 id=rid,
-                path=_expand(path, base=base_dir),
+                path=_expand(path, base=base_dir, what=f"skill_root {quoted_value(rid)} path"),
                 precedence=_int_field(
                     entry, "precedence", 100, where=f"skill_root.{rid}", minimum=0
                 ),
@@ -1038,7 +1128,9 @@ def _assert_editable_roots_outside_protected(
 def _load_rubrics(
     table: Mapping[str, Any], *, config_dir: Path, base_dir: Path
 ) -> tuple[Rubric, ...]:
-    directory = _expand(_str_field(table, "dir", "rubrics", where="rubrics"), base=config_dir)
+    directory = _expand(
+        _str_field(table, "dir", "rubrics", where="rubrics"), base=config_dir, what="[rubrics].dir"
+    )
     enabled = table.get("enabled", [])
     if not isinstance(enabled, list) or not enabled or any(not isinstance(x, str) for x in enabled):
         raise ConfigError("[rubrics].enabled must be a non-empty list of rubric ids")
@@ -1050,8 +1142,12 @@ def _load_rubrics(
         )
     rubrics: list[Rubric] = []
     for rubric_id in enabled:
-        # Resolved so a message about it names one real path, not `config/../rubrics`.
-        path = (directory / f"{rubric_id}.toml").resolve()
+        # Resolved so a message about it names one real path, not `config/../rubrics`,
+        # and measured once resolved: an id too long for a file name, or a linked
+        # rubrics directory that resolves past PATH_MAX, made is_file() fall
+        # (measured: a 300-byte id, and a link to a 1000-byte directory).
+        named = f"the file for rubric {quoted_value(rubric_id)} in [rubrics].enabled"
+        path = _within_name_limits((directory / f"{rubric_id}.toml").resolve(), what=named)
         if not path.is_file():
             raise ConfigError(f"rubric {rubric_id!r} not found at {path}")
         text = _read_utf8_or_refuse(path, what=f"rubric {rubric_id!r}")
