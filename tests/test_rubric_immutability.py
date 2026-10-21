@@ -257,6 +257,169 @@ class ProtectedPathTests(unittest.TestCase):
             load_config(config_path)
 
 
+class ARubricFieldIsReadAsWrittenOrRefusedTests(unittest.TestCase):
+    """Measured before: ``requires_evidence = 0`` or ``= ""`` turned the evidence
+    rule off, so a FAIL citing nothing stood as a FAIL; ``= "false"`` left it on;
+    and a misspelt ``insufficient_when`` loaded and vanished from every scorer
+    prompt, the field the rubric guide calls the most load-bearing in the file."""
+
+    def load(self, text: str) -> Rubric:
+        import tomllib
+
+        return Rubric.from_mapping(tomllib.loads(text))
+
+    def test_a_requires_evidence_that_is_not_a_boolean_is_refused_by_name(self):
+        for spelled, kind in (
+            ('"false"', "str"),
+            ('"no"', "str"),
+            ("0", "int"),
+            ("1", "int"),
+            ('""', "str"),
+            ("[]", "list"),
+        ):
+            with self.subTest(spelled=spelled):
+                text = RUBRIC_TOML.replace(
+                    "requires_evidence = true", f"requires_evidence = {spelled}"
+                )
+                with self.assertRaises(ValueError) as ctx:
+                    self.load(text)
+                self.assertEqual(
+                    str(ctx.exception),
+                    f"criterion only-criterion requires_evidence must be true or false, got {kind}",
+                )
+
+    def test_the_control_a_boolean_requires_evidence_is_kept_and_absent_means_true(self):
+        on = self.load(RUBRIC_TOML)
+        off = self.load(
+            RUBRIC_TOML.replace("requires_evidence = true", "requires_evidence = false")
+        )
+        absent = self.load(RUBRIC_TOML.replace("requires_evidence = true\n", ""))
+        self.assertEqual(
+            [r.criteria[0].requires_evidence for r in (on, off, absent)], [True, False, True]
+        )
+
+    def test_a_misspelt_key_is_refused_with_the_nearest_key(self):
+        cases = (
+            (
+                "insufficient_when =",
+                "insufficent_when =",
+                "[[criterion]] #0",
+                "'insufficent_when' (did you mean insufficient_when?)",
+            ),
+            (
+                "requires_evidence =",
+                "require_evidence =",
+                "[[criterion]] #0",
+                "'require_evidence' (did you mean requires_evidence?)",
+            ),
+            (
+                "min_evidence_refs =",
+                "min_evidence_ref =",
+                "[rubric]",
+                "'min_evidence_ref' (did you mean min_evidence_refs?)",
+            ),
+            (
+                "[[criterion]]",
+                "[[criteria]]",
+                "the rubric file",
+                "'criteria' (did you mean criterion?)",
+            ),
+        )
+        for old, new, where, hint in cases:
+            with self.subTest(key=new):
+                with self.assertRaises(ValueError) as ctx:
+                    self.load(RUBRIC_TOML.replace(old, new))
+                message = str(ctx.exception)
+                self.assertTrue(message.startswith(f"{where} has unknown key(s): {hint}."), message)
+                self.assertIn("refused rather than ignored", message)
+
+    def test_a_title_or_insufficient_when_that_is_not_text_is_refused(self):
+        cases = (
+            (
+                'title = "The only criterion"',
+                "title = 5",
+                "criterion only-criterion title must be a string, got int",
+            ),
+            (
+                'insufficient_when = "the transcript does not show whether the thing was attempted"',
+                'insufficient_when = ["a"]',
+                "criterion only-criterion insufficient_when must be a string, got list",
+            ),
+            (
+                'title = "A sample rubric"',
+                "title = { a = 1 }",
+                "[rubric].title must be a string, got dict",
+            ),
+        )
+        for old, new, expected in cases:
+            with self.subTest(field=new):
+                with self.assertRaises(ValueError) as ctx:
+                    self.load(RUBRIC_TOML.replace(old, new))
+                self.assertEqual(str(ctx.exception), expected)
+
+    def test_an_implicates_entry_that_is_empty_or_repeated_is_refused(self):
+        with_implicates = RUBRIC_TOML.replace("weight = 2\n", "weight = 2\nimplicates = {}\n")
+        cases = (
+            ('["a", "b", "a"]', "criterion only-criterion implicates lists 'a' more than once"),
+            ('["a", " "]', "criterion only-criterion implicates holds an empty skill id"),
+        )
+        for spelled, expected in cases:
+            with self.subTest(implicates=spelled):
+                with self.assertRaises(ValueError) as ctx:
+                    self.load(with_implicates.replace("implicates = {}", f"implicates = {spelled}"))
+                self.assertEqual(str(ctx.exception), expected)
+        kept = self.load(with_implicates.replace("implicates = {}", 'implicates = ["a", "b"]'))
+        self.assertEqual(kept.criteria[0].implicates, ("a", "b"))
+
+    def test_an_unknown_key_is_quoted_bounded_and_only_a_close_one_gets_a_hint(self):
+        """A trailing space printed bare was invisible, a key as long as the file
+        was printed whole, and a key with nothing close (``TITLE``) gets the
+        list of accepted keys, not a guess."""
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+
+        with self.assertRaises(ValueError) as ctx:
+            self.load(RUBRIC_TOML.replace("requires_evidence =", '"requires_evidence " ='))
+        self.assertIn("'requires_evidence ' (did you mean requires_evidence?)", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            self.load(RUBRIC_TOML.replace('title = "A sample', 'TITLE = "A sample'))
+        message = str(ctx.exception)
+        self.assertTrue(
+            message.startswith("[rubric] has unknown key(s): 'TITLE'. Accepted"), message
+        )
+        self.assertIn("Accepted keys are id, min_evidence_refs, title, version.", message)
+        long_key = "k" * 100_000
+        with self.assertRaises(ValueError) as ctx:
+            self.load(RUBRIC_TOML.replace("weight = 2\n", f"weight = 2\n{long_key} = 1\n"))
+        message = str(ctx.exception)
+        self.assertIn("more chars not quoted]", message)
+        self.assertLess(len(message), QUOTED_VALUE_CHARS + 600)
+
+    def test_an_absent_title_is_the_id_it_titles(self):
+        rubric = self.load(
+            RUBRIC_TOML.replace('title = "A sample rubric"\n', "").replace(
+                'title = "The only criterion"\n', ""
+            )
+        )
+        self.assertEqual(rubric.title, "sample")
+        self.assertEqual(rubric.criteria[0].title, "only-criterion")
+
+    def test_a_misspelt_rubric_key_is_a_config_error_naming_the_file(self):
+        from tests.support import build_env
+
+        with TemporaryDirectory() as tmp:
+            config_path = build_env(Path(tmp), rubric_ids=("instruction-compliance",))
+            rubric_file = Path(tmp) / "rubrics" / "instruction-compliance.toml"
+            text = rubric_file.read_text(encoding="utf-8")
+            self.assertIn("\ninsufficient_when = ", text)
+            rubric_file.write_text(
+                text.replace("\ninsufficient_when = ", "\ninsufficent_when = ", 1), encoding="utf-8"
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(config_path)
+            self.assertIn(str(rubric_file.resolve()), str(ctx.exception))
+            self.assertIn("did you mean insufficient_when?", str(ctx.exception))
+
+
 class ADefinitionFileThatCannotBeReadIsAConfigErrorTests(unittest.TestCase):
     """``is_file`` passing does not mean the bytes can be read, or that they are
     UTF-8. Measured before: a config file at mode 000 ended ``doctor`` with a

@@ -183,10 +183,21 @@ def parse_scorecard(
     )
 
 
-#: How many malformed evidence refs a downgrade reason spells out. The reason is
-#: persisted in the scorecard and the failure record, and the model decides how
-#: many refs there are.
+#: How many malformed or unresolved evidence refs a downgrade reason spells out.
+#: The reason is persisted in the scorecard and the failure record, and the
+#: model decides how many refs there are.
 MAX_SHOWN_BAD_REFS = 3
+
+
+def _unresolved_ref(ref: EvidenceRef) -> str:
+    """One ref that did not resolve, as a reason names it: both halves quoted.
+
+    Both are the model's: an element id is its text, and a position is a JSON
+    integer, which has no bound. Measured before: the position was printed
+    raw, so five refs at a 4300-digit position (the most a decoder reads) made
+    one downgrade reason of 12,985 characters, persisted and printed.
+    """
+    return f"{quoted_value(ref.element_id)}@{quoted_value(ref.position)}"
 
 
 def _evidence_list(raw: Any, bad_refs: list[str]) -> list[Any]:
@@ -279,8 +290,9 @@ def _build_score(
         elif len(refs) < max(rubric.min_evidence_refs, 1):
             reason = f"needs >= {max(rubric.min_evidence_refs, 1)} evidence ref(s), got {len(refs)}"
         elif unresolved:
-            shown = ", ".join(f"{quoted_value(r.element_id)}@{r.position}" for r in unresolved[:3])
-            more = f" and {len(unresolved) - 3} more" if len(unresolved) > 3 else ""
+            shown = ", ".join(_unresolved_ref(r) for r in unresolved[:MAX_SHOWN_BAD_REFS])
+            hidden = len(unresolved) - MAX_SHOWN_BAD_REFS
+            more = f" and {hidden} more" if hidden > 0 else ""
             reason = f"evidence does not resolve in conversation: {shown}{more}"
         if reason:
             notes.append(f"criterion {cid}: {verdict.value} downgraded to INSUFFICIENT ({reason})")

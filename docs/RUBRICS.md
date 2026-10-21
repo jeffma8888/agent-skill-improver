@@ -8,7 +8,11 @@ produces a stream of confident edits to files an agent obeys.
 
 One TOML file per rubric, in the directory named by `[rubrics].dir`, with the file
 stem equal to the declared id. Loading is read-only and every file is hashed; the
-hash is recorded on every scorecard it produced.
+hash is recorded on every scorecard it produced. Every key is checked: one the
+loader does not read is refused, quoted, with the nearest key it does when one is
+close and every key it does listed, `requires_evidence`
+must be `true` or `false`, `title` and `insufficient_when` must be strings, and
+`implicates` must name each skill once.
 
 ```toml
 [rubric]

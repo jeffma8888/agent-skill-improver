@@ -235,6 +235,32 @@ class EvidenceTrustTests(unittest.TestCase):
         self.assertIn(" and 3 more", score.downgrade_reason)
         self.assertLess(len(score.downgrade_reason), 3 * QUOTED_VALUE_CHARS + 200)
 
+    def test_an_unresolved_position_is_quoted_bounded_like_its_element_id(self) -> None:
+        """A JSON integer has no bound, and the position was printed raw."""
+        from agent_skill_improver.domain.redaction import QUOTED_VALUE_CHARS
+
+        huge = int("9" * 4300)
+        refs = [{"element_id": f"made-up-{i}", "position": huge} for i in range(5)]
+        score = self._one(evidence=refs)
+        self.assertIs(score.verdict, Verdict.INSUFFICIENT)
+        self.assertIn("made-up-0", score.downgrade_reason)
+        self.assertIn("more chars not quoted]", score.downgrade_reason)
+        self.assertIn(" and 2 more", score.downgrade_reason)
+        self.assertEqual(score.downgrade_reason.count("@"), 3, "three refs spelled out")
+        self.assertLess(len(score.downgrade_reason), 3 * 2 * QUOTED_VALUE_CHARS + 300)
+
+    def test_the_control_a_small_unresolved_position_is_named_whole(self) -> None:
+        score = self._one(evidence=[{"element_id": "fabricated", "position": 3}])
+        self.assertIn("'fabricated'@3", score.downgrade_reason)
+
+    def test_exactly_as_many_unresolved_refs_as_are_shown_says_no_more(self) -> None:
+        from agent_skill_improver.domain.scoring import MAX_SHOWN_BAD_REFS
+
+        refs = [{"element_id": f"made-up-{i}", "position": i} for i in range(MAX_SHOWN_BAD_REFS)]
+        score = self._one(evidence=refs)
+        self.assertEqual(score.downgrade_reason.count("@"), MAX_SHOWN_BAD_REFS)
+        self.assertNotIn("more", score.downgrade_reason)
+
     def test_a_ref_that_resolves_is_stored_beside_one_that_does_not(self) -> None:
         message = self.conv.messages[0]
         good = {"element_id": message.element_id, "position": message.position}
