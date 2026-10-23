@@ -525,8 +525,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # finding for this report, not a refusal that pre-empts it. With a bad
     # layout the runner gets no scratch root, so nothing is created through
     # the link on the way to the verdict.
+    # A state directory this process cannot reach inside is asked about first:
+    # below it ``exists`` raises rather than answers, so the question it would
+    # answer is already settled. Its reason is the whole layout verdict, which
+    # keeps every check below that waits on a sound layout from asking.
+    unreachable = state.reach_problem()
     layout_problems: list[str] = []
-    state_present = config.state_dir.exists() or config.state_dir.is_symlink()
+    state_present = (
+        unreachable is not None or config.state_dir.exists() or config.state_dir.is_symlink()
+    )
     if state_present:
         layout_problems = state.layout_problems()
     # A candidate record that does not read stands `daily` down (the queue
@@ -642,7 +649,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     left_alone: list[str] = []
     misplaced_directories: list[str] = []
     if state_present:
-        if layout_problems:
+        if unreachable:
+            problems.append(unreachable)
+        elif layout_problems:
             problems.append(
                 f"the state layout under {config.state_dir} is not confined to it: "
                 f"{layout_problems[0]}"
@@ -811,7 +820,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "file_mode": oct(STATE_FILE_MODE),
             "repaired": permissions_repaired,
             "still_wrong": permission_problems,
-            "unsafe_layout": layout_problems,
+            "unsafe_layout": [] if unreachable else layout_problems,
+            "unreachable": unreachable,
             "left_alone": left_alone,
             "misplaced_directories": misplaced_directories,
         },
@@ -866,9 +876,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"source       {config.source.kind} -> {source_status}  " f"[{isolation.source_class}]",
         f"isolation    mode={isolation.mode} verified={isolation.verified} "
         f"required={isolation.required} satisfied={isolation.satisfied}",
-        f"state perms  dirs {oct(DIR_MODE)} / files {oct(STATE_FILE_MODE)}, "
-        f"{len(permissions_repaired)} repaired, {len(permission_problems)} still wrong, "
-        f"{len(layout_problems)} not a real directory, {len(left_alone)} left alone",
+        (
+            f"state perms  dirs {oct(DIR_MODE)} / files {oct(STATE_FILE_MODE)}, not measured: "
+            "this process cannot reach inside the state directory"
+            if unreachable
+            else f"state perms  dirs {oct(DIR_MODE)} / files {oct(STATE_FILE_MODE)}, "
+            f"{len(permissions_repaired)} repaired, {len(permission_problems)} still wrong, "
+            f"{len(layout_problems)} not a real directory, {len(left_alone)} left alone"
+        ),
         f"roles        {', '.join(sorted(config.model_roles)) or '<none configured>'}",
         f"skill roots  {len(config.skill_roots)} configured, {len(store.existing_roots())} present",
         f"skills       {len(store.known_skill_ids())} discovered, {len(broken)} do not load, "

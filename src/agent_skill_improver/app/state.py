@@ -412,8 +412,13 @@ class StateStore:
 
         An absent directory is not a problem -- ``ensure`` creates those. A root
         that is a link is reported alone, because every path below it would be
-        resolved through the link.
+        resolved through the link. So is a root this process cannot reach
+        inside (``reach_problem``): nothing below it can be measured, so every
+        check and repair that waits on this list waits on that one reason.
         """
+        reason = _reach_reason(self.root)
+        if reason:
+            return [reason]
         reason = _ancestor_layout_reason(self.root)
         if reason:
             return [reason]
@@ -427,8 +432,20 @@ class StateStore:
                 problems.append(reason)
         return problems
 
+    def reach_problem(self) -> str | None:
+        """Why this process cannot look inside the state directory, or None.
+
+        Asked before anything else that measures the tree: below a directory
+        this process may not search, ``lstat``, ``Path.exists`` and
+        ``Path.is_symlink`` raise rather than answer. Nothing is changed.
+        """
+        return _reach_reason(self.root)
+
     def verify_layout(self) -> None:
         """Fail closed when the layout is not confined to the configured root."""
+        reason = _reach_reason(self.root)
+        if reason:
+            raise ConfigError(reason)
         problems = self.layout_problems()
         if not problems:
             return
@@ -585,6 +602,9 @@ class StateStore:
         # command that never calls ``ensure()`` takes into the tree: an aliased
         # ancestor would redirect the mkdir and the chmod in ``dir`` just as surely
         # as an aliased root.
+        reason = _reach_reason(self.root)
+        if reason:
+            raise ConfigError(reason)
         reason = _ancestor_layout_reason(self.root)
         if reason:
             raise SafetyRefusal(
@@ -1484,6 +1504,94 @@ def _ancestor_layout_reason(root: Path) -> str | None:
         if not stat.S_ISDIR(entry.st_mode):
             return f"ancestor {_shown(current)} exists and is not a directory"
     return None
+
+
+def _reach_reason(root: Path) -> str | None:
+    """Why this process cannot look inside ``root``, or None if it can.
+
+    Each component of the path as written, ``root`` last, is measured with
+    ``lstat``; the first real directory this process may not search is named
+    with its mode, the cause and the fix (``_unsearchable_reason``). Below such
+    a directory ``lstat`` raises rather than answers, and ``Path.exists`` and
+    ``Path.is_symlink`` raise with it. A component that
+    is a link, not a directory, absent or not itself measurable ends the walk
+    with no verdict: those are the layout checks' to name, and no link is
+    followed here. A ``..`` steps back only over a component this walk has
+    just measured to be a real directory, so the lexical parent is the
+    physical one. Measured before: a state directory at mode 0600 or 0000, or
+    with its parent at either mode, fresh or built, ended ``doctor``,
+    ``daily``, ``candidates``, ``set-aside``, ``review``, ``apply`` and
+    ``rollback`` as internal errors (exit 70) with a ``PermissionError``
+    traceback, on Python 3.11 and 3.13.
+    """
+    absolute = root.absolute()
+    components = absolute.parts[1:]
+    current = Path(absolute.anchor)
+    for index, component in enumerate(components):
+        if component == "..":
+            current = current.parent
+            continue
+        current /= component
+        try:
+            entry = os.lstat(current)
+        except OSError:
+            return None
+        if not stat.S_ISDIR(entry.st_mode):
+            return None
+        if os.access(current, os.X_OK):
+            continue
+        return _unsearchable_reason(root, current, entry, last=index == len(components) - 1)
+    return None
+
+
+def _unsearchable_reason(root: Path, blocker: Path, entry: os.stat_result, *, last: bool) -> str:
+    """The reason ``_reach_reason`` gives once ``os.access`` has said no, with the
+    cause the entry shows and the fix for that cause.
+
+    The mode bits explain a refusal only when this process owns ``blocker`` and
+    the owner's search bit is clear. A directory another user owns is not this
+    process's to re-mode, and one whose mode grants its owner search is refused
+    by an access control list or another policy, which ``chmod`` leaves in
+    place. Measured (3.13): ``os.access`` refuses search of a 0700 directory
+    that carries a deny-search ACL entry, and ``chmod 700`` leaves the entry and
+    the refusal in place; ``/private/var/root`` (root's, 0750) refuses this
+    user search and is not this user's to re-mode. A directory refused for more
+    than one cause is named for the first this order finds: another owner, then
+    the owner's search bit, then a policy.
+    """
+    mode = f"0o{stat.S_IMODE(entry.st_mode):03o}"
+    if entry.st_uid != os.getuid():
+        cause = (
+            f"is owned by another user (uid {entry.st_uid}, mode {mode}), and this process "
+            "may not search it"
+        )
+        fix = "ask its owner for search permission or point [run].state_dir at a directory you own"
+    elif not entry.st_mode & stat.S_IXUSR:
+        cause = f"is mode {mode}, which this process cannot search"
+        fix = (
+            "restore it with chmod 700"
+            if last
+            else "give your user search permission on it (chmod u+x) or point [run].state_dir "
+            "elsewhere"
+        )
+    else:
+        cause = (
+            f"is mode {mode}, which lets its owner search it, but an access control list or "
+            "another policy denies this process search"
+        )
+        fix = (
+            "remove that entry (ls -led on macOS or getfacl on Linux shows it) or point "
+            "[run].state_dir elsewhere"
+        )
+    if last:
+        return (
+            f"the state directory {_shown(root)} {cause}, so nothing in it can be checked or "
+            f"used; {fix}"
+        )
+    return (
+        f"the state directory {_shown(root)} cannot be reached: {_shown(blocker)} above it "
+        f"{cause}; {fix}"
+    )
 
 
 def _layout_reason(path: Path, root: Path) -> str | None:

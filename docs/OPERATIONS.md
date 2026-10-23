@@ -65,7 +65,14 @@ here rather than an `IsolationRequired` refusal discovered by a scheduled run.
 The report names the variable and the shape, never the value.
 
 `doctor` also repairs `state/` permissions on the way through and reports what it
-changed. A repair that cannot take effect is a refusal, not a warning. An entry
+changed. A repair that cannot take effect is a refusal, not a warning. One repair
+it does not attempt: in a state directory this process cannot search, or below a
+directory it cannot search, nothing can be measured, so `doctor` names the
+directory at fault, the cause (its mode, another user's ownership, or an access
+control list or other policy) and the fix as its one state `PROBLEM`, exit 1
+(`state_permissions.unreachable` in JSON, null otherwise). Every other command that
+opens the state directory refuses it in the same words, exit 3. Neither creates
+anything or changes a mode. An entry
 inside the tree that is not a regular file or directory (a symlink, a fifo or a
 socket some other tool left there) is neither repaired nor removed: this tool
 only creates regular files and directories, so its mode is not this tool's to
