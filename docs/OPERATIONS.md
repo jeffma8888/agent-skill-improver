@@ -116,6 +116,8 @@ remedy in each reason is to move it aside or repair it by hand.
 | 4 | a required file was missing |
 | 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree. The next `daily` exits 5 as well (`BlockedRunUnreviewed`, before the lock, any record written or any conversation read) until one committed run is started with `--commit --mutation-reviewed 2026-01-01` naming the blocked run's day |
 | 70 | an exception no command anticipated, with its traceback on stderr. A bug report, never a negative answer; 70 is `EX_SOFTWARE` from `sysexits.h` |
+| 129 | stopped by SIGHUP, which a closed terminal sends, before the command finished: `stopped by SIGHUP` on stderr. A model or source command it had started was ended with it; records are written whole or not at all (a temporary file renamed into place), and the next run starts as usual. A SIGHUP the caller ignores (`nohup` ignores it) does not stop the run |
+| 143 | stopped by SIGTERM, which launchd and systemd send to stop a job, the same way: `stopped by SIGTERM` on stderr. Further stop signals are ignored until the process has exited, so the status stays 143. A signal that arrives while Python is still starting, before the command runs, ends the process by the signal instead. Ctrl-C is Python's own, a traceback ending in KeyboardInterrupt, and it ends the model command the same way |
 
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
 "the tool declined and told you why", and 70 as "file a bug": no crash inside a

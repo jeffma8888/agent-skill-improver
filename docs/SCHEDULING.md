@@ -108,6 +108,15 @@ traceback on stderr; no crash inside a command exits 1, so a 1 in a scheduler
 log is a negative answer the tool actually gave (a broken install that fails
 before the command starts is the Python interpreter's 1, with its own traceback).
 
+A stop is not a crash either. launchd and systemd stop a job with SIGTERM, and a
+closed terminal sends SIGHUP; the run then exits 143 or 129 with `stopped by
+SIGTERM` (or `SIGHUP`) on stderr, and the model or source command it was waiting
+on is ended with it. More stop signals after the first are ignored until it has
+exited, so the status a scheduler reads is the stop's. That command runs in a
+session of its own, so a signal sent to the run's process does not reach it:
+before this, it went on running after the run had gone, past its own timeout.
+Nothing needs clearing; the next scheduled run starts as usual.
+
 Exit 5 is the one to page on. It means `blocked`: the skill tree's digest changed
 while the run was in flight, so something wrote to a live skill during the pass.
 The daily loop never does, so either another process edited a skill file or an

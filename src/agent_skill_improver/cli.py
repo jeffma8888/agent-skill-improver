@@ -27,11 +27,14 @@ import ast
 import os
 import re
 import shlex
+import signal
 import sys
+import threading
 import traceback
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping, NoReturn, Sequence
+from typing import Any, Iterator, Mapping, NoReturn, Sequence
 
 from . import __version__
 from .clock import SystemClock, day_key, iso
@@ -76,6 +79,83 @@ RC_BLOCKED = 5
 #: read a crash as a negative answer; the traceback stays on stderr. The value
 #: is sysexits.h EX_SOFTWARE.
 RC_INTERNAL_ERROR = 70
+#: Signals that stop a command the way Ctrl-C does: each is raised in the main
+#: thread as :class:`Stopped`, so every ``finally`` runs (the model or source
+#: command is ended with the run, the lock released, a half-written file
+#: removed). A stopped command exits 128 plus the signal number, the shell's
+#: spelling of death by that signal (POSIX fixes SIGHUP at 1, SIGTERM at 15).
+STOP_SIGNALS = ("SIGTERM", "SIGHUP")
+RC_STOPPED_BY_SIGHUP = 128 + 1
+RC_STOPPED_BY_SIGTERM = 128 + 15
+
+
+class Stopped(BaseException):
+    """A stop signal arrived. Not an ``Exception``, so no handler that isolates
+    one conversation's or one skill's failure can catch it and carry on."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextmanager
+def _stop_signals_unwind(*, exiting: bool = False) -> Iterator[None]:
+    """Turn each of ``STOP_SIGNALS`` into :class:`Stopped` while a command runs.
+
+    A model or source command runs in a session of its own
+    (``start_new_session``), so a signal sent to the run's process does not
+    reach it, and ``run_bounded`` ends it in a ``finally``. Measured before:
+    SIGTERM, which a scheduler sends to stop a job, or SIGHUP, which a closed
+    terminal sends, during a model call killed the run where it stood (exit
+    -15, -1, no message) and left the model command running, re-parented to
+    process 1 and past its own timeout, until it wrote its answer to an output
+    nobody read. Only a signal still at its default action is taken over, so
+    one the caller ignores (``nohup`` ignores SIGHUP) stays ignored. A second
+    signal while the first unwinds is let pass, so the cleanup it set off is
+    not cut short. Off the main thread nothing is installed: Python runs a
+    handler on that thread only, and refuses to install one from any other.
+
+    Ctrl-C stays Python's own: each press raises ``KeyboardInterrupt``. From the
+    first press a stop signal is let pass too, so it cannot cut short the
+    cleanup Ctrl-C set off. With ``exiting`` (the process's own command,
+    :func:`entry`) the stop signals are left ignored after a stop or a Ctrl-C
+    rather than put back, so one more arriving while the process exits cannot
+    end it by the signal and change the status a scheduler reads.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    stopping = False
+
+    def stop(signum: int, frame: object) -> None:
+        nonlocal stopping
+        if stopping:
+            return
+        stopping = True
+        raise Stopped(signum)
+
+    def interrupt(signum: int, frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+        raise KeyboardInterrupt
+
+    previous: dict[int, Any] = {}
+    for name in STOP_SIGNALS:
+        signum = getattr(signal, name, None)
+        if signum is not None and signal.getsignal(signum) is signal.SIG_DFL:
+            previous[signum] = signal.signal(signum, stop)
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        previous[signal.SIGINT] = signal.signal(signal.SIGINT, interrupt)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            if exiting and stopping and signum != signal.SIGINT:
+                # SIG_IGN rather than a handler of ours: Python puts its own
+                # handlers back to the default as it shuts down.
+                handler = signal.SIG_IGN
+            signal.signal(signum, handler)
+
 
 BENIGN_RUN_STATUSES = ("ok", "stood-down", "partial")
 #: ``doctor`` warns when the newest daily receipt is older than this many
@@ -2002,6 +2082,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run one command and return its exit status. The signal handlers it
+    takes over while the command runs are put back before it returns."""
+    return _main(argv, exiting=False)
+
+
+def entry() -> NoReturn:
+    """``asi`` and ``python -m agent_skill_improver``: run the process's own
+    command line and exit with its status. After a stop the stop signals stay
+    ignored until the process has exited (``_stop_signals_unwind``)."""
+    sys.exit(_main(None, exiting=True))
+
+
+def _main(argv: Sequence[str] | None, *, exiting: bool) -> int:
     parser = build_parser()
     args, extras = parser.parse_known_args(list(argv) if argv is not None else None)
     if extras:
@@ -2011,6 +2104,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not hasattr(args, "config"):
         args.config = None
     _OPEN_STORES.clear()
+    # The handlers stay taken over while a failure is reported, so a stop
+    # signal then is a stop too, and one more while the stop is reported is
+    # let pass. Measured before: with the handlers put back as the command
+    # ended, a burst of 40 SIGTERMs 2 ms apart printed the stop and then
+    # ended the run by the signal, exit -15, three times of three.
+    with _stop_signals_unwind(exiting=exiting):
+        try:
+            return _run_and_report(args)
+        except Stopped as exc:
+            _report_unreported_repairs()
+            _err(
+                f"stopped by {signal.Signals(exc.signum).name} before the command finished; "
+                "any model or source command it had started was ended with it\n"
+            )
+            return 128 + exc.signum
+        finally:
+            # Nothing from this command is attributed to the next in-process call.
+            _OPEN_STORES.clear()
+
+
+def _run_and_report(args: argparse.Namespace) -> int:
+    """Run the parsed command and turn how it ended into an exit status."""
     # A mode reset the command made and did not report itself is named before
     # whatever ends the command, so the refusal or the traceback never hides it.
     try:
@@ -2047,9 +2162,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         _err("internal error: this is a bug in asi, not a negative answer\n")
         _err(traceback.format_exc())
         return RC_INTERNAL_ERROR
-    finally:
-        # Nothing from this command is attributed to the next in-process call.
-        _OPEN_STORES.clear()
 
 
 if __name__ == "__main__":  # pragma: no cover

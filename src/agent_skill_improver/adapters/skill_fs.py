@@ -102,8 +102,17 @@ def _write_pinned(parent_fd: int, leaf: str, data: bytes, *, mode: int) -> None:
     the handle was opened on, whatever the path now says.
     """
     tmp = f".tmp-{leaf}-{os.getpid()}-{secrets.token_hex(4)}.part"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
     try:
+        # Opened inside the ``try``, so a stop that lands as the open returns,
+        # before the descriptor is held, still has the file removed. A name
+        # already taken is another writer's, and is left alone.
+        try:
+            fd = os.open(
+                tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd
+            )
+        except FileExistsError:
+            tmp = ""
+            raise
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
@@ -111,10 +120,11 @@ def _write_pinned(parent_fd: int, leaf: str, data: bytes, *, mode: int) -> None:
             os.fchmod(handle.fileno(), mode)
         os.rename(tmp, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
     except BaseException:
-        try:
-            os.unlink(tmp, dir_fd=parent_fd)
-        except FileNotFoundError:
-            pass
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
         raise
 
 

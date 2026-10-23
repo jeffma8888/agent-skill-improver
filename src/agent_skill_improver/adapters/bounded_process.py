@@ -158,6 +158,23 @@ def run_bounded(
         env=None if env is None else dict(env),
         start_new_session=True,
     )
+    try:
+        return _read_bounded(proc, stdin, deadline, timeout_seconds, max_output_bytes)
+    except BaseException:
+        # Whatever ends this call before the loop's own ``finally`` is set up
+        # (a stop signal, a thread that cannot start) ends the child too.
+        if proc.poll() is None:
+            _kill(proc)
+        raise
+
+
+def _read_bounded(
+    proc: subprocess.Popen[bytes],
+    stdin: bytes,
+    deadline: float,
+    timeout_seconds: float,
+    max_output_bytes: int,
+) -> BoundedResult:
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     stdin_pipe, stdout_pipe, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
 

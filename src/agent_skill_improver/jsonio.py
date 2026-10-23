@@ -5,7 +5,7 @@ key order and separators must not drift between runs.
 
 Permissions matter for a different reason. Everything written through here is
 derived from private conversation content -- raw exports, scorecards, candidate
-records, receipts, backups. ``tempfile.mkstemp`` already creates 0600, but
+records, receipts, backups. The temp file is created 0600, but
 ``os.replace`` preserves the temp file's mode rather than the destination's, so
 the mode is set explicitly with ``os.fchmod`` before the rename. Explicitly,
 because the alternative is inheriting whatever the operator's umask happens to
@@ -19,8 +19,8 @@ import json
 import math
 import os
 import re
+import secrets
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -232,7 +232,25 @@ def write_bytes_atomic(path: Path, data: bytes, *, mode: int = FILE_MODE) -> Non
     followed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".part")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(TEMP_NAME_TRIES):
+        # A ``str``, so no Python code (``__fspath__``) runs between the name and
+        # the file: named before it is created, a stop that lands as the open
+        # returns, before the descriptor is held, still finds the file to remove.
+        tmp = os.path.join(str(path.parent), f".tmp-{secrets.token_hex(6)}.part")
+        # Measured before, with ``tempfile.mkstemp`` naming and creating it in
+        # one call: a SIGTERM during ``apply`` left ``.tmp-*.part`` in
+        # ``state/candidates`` once in twelve stops.
+        try:
+            fd = os.open(tmp, flags, 0o600)
+            break
+        except FileExistsError:
+            continue  # another writer's name, not this one's to remove
+        except BaseException:
+            _remove_if_there(tmp)
+            raise
+    else:
+        raise FileExistsError(f"no free temporary name in {path.parent}")
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -241,8 +259,17 @@ def write_bytes_atomic(path: Path, data: bytes, *, mode: int = FILE_MODE) -> Non
             os.fchmod(handle.fileno(), mode)
         os.replace(tmp, path)
     except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
+        _remove_if_there(tmp)
         raise
+
+
+#: Random temporary names tried before a write gives up: each is 48 bits, so
+#: more than one try is already a collision nobody will see.
+TEMP_NAME_TRIES = 100
+
+
+def _remove_if_there(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass

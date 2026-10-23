@@ -129,8 +129,15 @@ class Rubric:
         if not isinstance(rid, str) or not rid.strip():
             raise ValueError("[rubric].id must be a non-empty string")
         version = meta.get("version", 1)
-        if not isinstance(version, int) or isinstance(version, bool):
-            raise ValueError("[rubric].version must be an integer")
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            # A candidate records this version, and the record reader takes
+            # only one of at least 1 (``RubricBinding``). Measured before: a
+            # version of 0 or -5 loaded, daily wrote a validated candidate, and
+            # review refused it as altered since it was written, which it was not.
+            raise ValueError(
+                "[rubric].version must be a whole number of at least 1: each candidate "
+                "records it, and a record with a version below 1 is refused when read"
+            )
         raw_criteria = raw.get("criterion")
         if not isinstance(raw_criteria, list) or not raw_criteria:
             raise ValueError("rubric file needs at least one [[criterion]]")
