@@ -155,10 +155,10 @@ class AGluedCredentialIsMaskedTests(unittest.TestCase):
                     )
                 self.assertEqual(credential_labels(f"{name} = request.form.get('csrf')"), ())
 
-    def test_a_url_parameter_after_an_escaped_ampersand_is_masked_by_the_assignment_shape(self):
-        """``url-credential`` begins at ``?`` or ``&``; an ``&`` written ``\u0026``
-        in JSON or ``%26`` in a URL leaves it nothing to begin at, and the
-        assignment shape, beginning after the escape, masks the value."""
+    def test_a_url_parameter_after_an_escaped_ampersand_is_masked(self):
+        """An ``&`` written ``\\u0026`` in JSON or ``%26`` in a URL begins a URL
+        parameter as ``&`` does (``_URL_PARAM``), so its value is masked as a
+        URL credential's, up to the whitespace after it."""
         value = "Zq8vLm3pXr7tWk2s"
         names = (
             "token",
@@ -179,7 +179,7 @@ class AGluedCredentialIsMaskedTests(unittest.TestCase):
                     self.assertEqual(
                         result.text,
                         f"https://h.example/cb?a=1{amp}{name}="
-                        + PLACEHOLDER.format(label="secret-assignment")
+                        + PLACEHOLDER.format(label="url-credential")
                         + " next",
                     )
 

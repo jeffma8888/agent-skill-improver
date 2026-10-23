@@ -67,6 +67,39 @@ _LEAD = (
 _TAIL = r"(?![A-Za-z0-9])"
 
 
+#: Where a URL parameter begins: ``?`` or ``&`` as written, ``&`` as JSON text
+#: escapes it (``\u0026``), or either percent-encoded, as in a URL carried
+#: inside another one's parameter (``%3F``, ``%26``), whose ``=`` is then
+#: ``%3D``. A signed URL from a cloud store names its signature with the
+#: store's prefix (``X-Amz-Signature``, ``X-Goog-Signature``), and its
+#: ``X-Amz-Security-Token`` is a session credential.
+_URL_PARAM = (
+    r"(?:[?&]|\\u0026|%3F|%26)(?:x-(?:amz|goog)-)?"
+    r"(?:access[_-]?token|auth[_-]?token|security[_-]?token|api[_-]?key|apikey|token|secret"
+    + r"|pass"
+    + r"word|client[_-]?secret|sig|signature|key)(?:=|%3D)"
+)
+#: A parameter's value. It ends at the next parameter (``&`` as written or as
+#: ``\u0026``, or ``%26`` before a name and ``=`` or ``%3D``), at a fragment,
+#: or at a character a URL cannot hold as written: whitespace, a double quote,
+#: or a single quote that nothing a URL can hold follows. A backslash escape,
+#: escaped once or more, ends it when it stands for ASCII whitespace, a double
+#: quote, ``#`` or ``&`` (``\"``, ``\n``, ``\u0022``, ``\u0026``). Anything else
+#: is part of the value, escapes included (``\/``, ``\u002B``): the assignment
+#: shape cannot mask past a placeholder, so a value cut short at a character it
+#: can hold would leave the rest of the secret in the text. It stopped only at
+#: ``&``, ``#`` and whitespace before, so a quoted URL lost the rest of its line
+#: to the placeholder: the closing quote, the JSON after it, every later
+#: parameter of a nested or JSON-escaped URL. A run of backslashes is taken
+#: whole, so a long one is read once.
+_URL_VALUE = (
+    r"(?:[^&\s#\\\"'%]"
+    r"|\\++(?!(?-i:[\"nrtfv]|u(?:000[9a-dA-D]|001[c-fC-F]|002[0236])))"
+    r"|'(?![\s\"<>\[\]^`{|}]|\Z)"
+    r"|%(?!26[a-z0-9._~-]+(?:=|%3d)))"
+)
+
+
 def _lead(first: str) -> str:
     """``_LEAD`` for a shape whose first character is one of ``first``.
 
@@ -127,11 +160,7 @@ _SHAPES: tuple[_Shape, ...] = (
     ),
     _Shape(
         "url-credential",
-        re.compile(
-            r"(?i)([?&](?:access[_-]?token|auth[_-]?token|api[_-]?key|apikey|token|secret"
-            + r"|pass"
-            + r"word|client[_-]?secret|sig|signature|key)=)[^&\s#]{8,}"
-        ),
+        re.compile(r"(?i)(" + _URL_PARAM + r")" + _URL_VALUE + r"{8,}"),
         keep_prefix=True,
     ),
     # Assignments keep the key name and replace only the value, so a reader
