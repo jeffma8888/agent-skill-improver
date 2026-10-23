@@ -128,6 +128,19 @@ def _write_pinned(parent_fd: int, leaf: str, data: bytes, *, mode: int) -> None:
         raise
 
 
+def _remove_manifest(path: Path) -> None:
+    """Remove the manifest of a write that left the skill holding its original text.
+
+    Best effort: a manifest left behind names a write that never landed, and
+    ``rollback`` refuses a candidate still at its base as never applied, so a
+    failure here must not hide the refusal the caller is about to raise.
+    """
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 #: How ``write_canonical`` spells the mode it records: ``oct()`` of the
 #: permission bits, which never runs past four octal digits.
 _RECORDED_MODE = re.compile(r"0o[0-7]{1,4}")
@@ -665,6 +678,30 @@ class FilesystemSkillStore:
                     f"but source hashes {current[:12]}; refusing to proceed"
                 )
             new_sha = sha256_text(text)
+            manifest_path = backup_dir / "backup.json"
+            rollback = shlex.join(["cp", str(backup_path), str(target)])
+            # Written before the skill is, so an apply stopped or crashed at any
+            # point after the skill write leaves the manifest ``rollback``
+            # restores from and a second ``apply`` records the write by
+            # (``earlier_write``). Where the skill is known to hold its original
+            # text again, it is removed below. Measured before, with it written
+            # after: an apply stopped as the write returned left the skill
+            # changed, the candidate ``validated`` and no manifest, and
+            # ``rollback`` answered that the candidate was never applied.
+            write_json(
+                manifest_path,
+                {
+                    "schema": "asi.backup.v1",
+                    "target_path": str(target),
+                    "skill_id": skill_id,
+                    "actor": actor,
+                    "previous_sha256": current,
+                    "new_sha256": new_sha,
+                    "backup_path": str(backup_path),
+                    "target_mode": oct(written_mode),
+                    "rollback_command": rollback,
+                },
+            )
             try:
                 _write_pinned(
                     parent_fd, leaf, self._in_document_convention(text, data), mode=written_mode
@@ -672,6 +709,7 @@ class FilesystemSkillStore:
             except OSError as exc:
                 # Measured before: a skill directory at 0555 made apply fall
                 # with a raw PermissionError on the temp file, exit 70.
+                _remove_manifest(manifest_path)
                 raise SkillWriteFailed(
                     f"refusing to apply: {target} could not be written "
                     f"({exc.strerror or exc}). The skill is unchanged; the copy taken "
@@ -695,28 +733,13 @@ class FilesystemSkillStore:
                         f"back ({exc.strerror or exc}). The copy taken before the write is at "
                         f"{backup_path}: restore it by hand once the name can be written."
                     ) from exc
+                _remove_manifest(manifest_path)
                 raise BaseHashMismatch(
                     f"post-write verification failed for {target} "
                     f"(expected {new_sha[:12]}, found {found}); original restored"
                 )
         finally:
             os.close(parent_fd)
-        manifest_path = backup_dir / "backup.json"
-        rollback = shlex.join(["cp", str(backup_path), str(target)])
-        write_json(
-            manifest_path,
-            {
-                "schema": "asi.backup.v1",
-                "target_path": str(target),
-                "skill_id": skill_id,
-                "actor": actor,
-                "previous_sha256": current,
-                "new_sha256": new_sha,
-                "backup_path": str(backup_path),
-                "target_mode": oct(written_mode),
-                "rollback_command": rollback,
-            },
-        )
         self._snapshot_cache = None
         return WriteReceipt(
             path=str(target),
@@ -726,6 +749,41 @@ class FilesystemSkillStore:
             backup_path=str(backup_path),
             backup_manifest_path=str(manifest_path),
             rollback_command=rollback,
+        )
+
+    def earlier_write(
+        self, manifest_path: Path, *, path: Path, previous_sha256: str, new_sha256: str
+    ) -> WriteReceipt | None:
+        """The receipt of the write ``manifest_path`` records, if it is this one.
+
+        An ``apply`` stopped or crashed after it wrote the skill, and before it
+        recorded the candidate applied, leaves the skill holding the candidate's
+        text and the manifest ``write_canonical`` wrote before the write. This
+        answers whether ``manifest_path`` records that write: the same document
+        (both resolved, as the write resolved it), from ``previous_sha256`` to
+        ``new_sha256``. A manifest that cannot be read, or records anything
+        else, is not that write and the answer is ``None``. Nothing is written;
+        the manual command is rebuilt from the recorded paths rather than read.
+        """
+        try:
+            manifest = self._read_backup_manifest(manifest_path)
+            same_document = Path(manifest["target_path"]).resolve() == Path(path).resolve()
+        except (BackupUnusable, OSError, ValueError, RuntimeError):
+            return None
+        if not same_document or (manifest["previous_sha256"], manifest["new_sha256"]) != (
+            previous_sha256,
+            new_sha256,
+        ):
+            return None
+        skill_id = manifest.get("skill_id")
+        return WriteReceipt(
+            path=manifest["target_path"],
+            skill_id=skill_id if isinstance(skill_id, str) else "",
+            previous_sha256=previous_sha256,
+            new_sha256=new_sha256,
+            backup_path=manifest["backup_path"],
+            backup_manifest_path=str(manifest_path),
+            rollback_command=shlex.join(["cp", manifest["backup_path"], manifest["target_path"]]),
         )
 
     def rollback(self, manifest_path: Path) -> dict[str, Any]:

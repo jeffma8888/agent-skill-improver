@@ -45,6 +45,7 @@ from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDA
 from ..domain.integrity import verify_full_integrity
 from ..domain.validation import ValidationRecord
 from ..errors import (
+    AsiError,
     LockHeld,
     ApprovalRequired,
     AutomationRefused,
@@ -55,6 +56,12 @@ from ..errors import (
 from ..hashing import sha256_text, short
 from .lock import RunLock
 from .state import StateStore
+
+#: The note an apply that records an earlier run's write adds to the candidate.
+FINISHING_NOTE = (
+    "recorded by a second run of this apply: an earlier run wrote the skill and did "
+    "not record it; "
+)
 
 APPLY_ENV_HINT = (
     "Promotion is a human action. Run it from an interactive shell: "
@@ -202,6 +209,17 @@ def apply_candidate(
         base_text = read_live_base_text(skill_store, candidate)
         live_sha = sha256_text(base_text)
         if live_sha != candidate.target.base_sha256:
+            earlier = _earlier_write_of(candidate, live_sha, skill_store, state)
+            if earlier is not None:
+                # An earlier run of this apply wrote the skill and stopped before
+                # it recorded the write. The human gate holds as for a first run;
+                # the base the diff is checked against is no longer the live
+                # text, and that run checked it before it wrote.
+                approval.verify(expected_token=candidate.required_approval_token)
+                _refuse_unwritable_receipt(state, "apply", candidate)
+                return _record_apply(
+                    candidate, earlier, approval, gate, state, clock, operator, finishing=True
+                )
             raise BaseHashMismatch(
                 f"refusing to apply {candidate.id}: {candidate.target.canonical_path} now hashes "
                 f"{short(live_sha)} but the candidate was written against "
@@ -245,6 +263,8 @@ def _record_apply(
     state: StateStore,
     clock: Clock,
     operator: str,
+    *,
+    finishing: bool = False,
 ) -> dict[str, Any]:
     applied = Candidate(
         id=candidate.id,
@@ -264,10 +284,10 @@ def _record_apply(
         notes=candidate.notes
         + (
             f"applied {iso(clock.now())} by human:{operator or 'unspecified'}; "
-            f"rollback: {receipt.rollback_command}",
+            + (FINISHING_NOTE if finishing else "")
+            + f"rollback: {receipt.rollback_command}",
         ),
     )
-    state.write_candidate(applied)
     out = {
         "schema": "asi.apply_receipt.v1",
         "candidate_id": candidate.id,
@@ -278,8 +298,37 @@ def _record_apply(
         "gate": gate,
         "mirror_paths_not_written": list(candidate.target.mirror_paths),
     }
+    if finishing:
+        out["finishes_an_earlier_run"] = True
+    # The receipt before the candidate's status: a stop between the two leaves
+    # the candidate ``validated`` over a skill that holds its text, which the
+    # next apply records. The other order left a candidate marked applied with
+    # no receipt, which nothing writes later.
     state.write_action_receipt("apply", candidate.id, out)
+    state.write_candidate(applied)
     return out
+
+
+def _earlier_write_of(
+    candidate: Candidate, live_sha: str, skill_store: Any, state: StateStore
+) -> Any:
+    """The unrecorded write of this candidate the live file holds, else ``None``.
+
+    It is one only when the live text is the candidate's own new text and the
+    newest backup manifest of this candidate records that write, from the
+    candidate's base to that text, for the same document.
+    """
+    if live_sha != sha256_text(candidate.patch.new_text):
+        return None
+    manifest = state.latest_backup_manifest(candidate.id)
+    if manifest is None:
+        return None
+    return skill_store.earlier_write(
+        manifest,
+        path=Path(candidate.target.canonical_path),
+        previous_sha256=candidate.target.base_sha256,
+        new_sha256=live_sha,
+    )
 
 
 @contextmanager
@@ -362,9 +411,32 @@ def rollback_candidate(
                 f"no backup manifest found for {candidate.id}; nothing to roll back. "
                 "A candidate that was never applied has nothing to restore."
             )
+        if candidate.status == STATUS_VALIDATED and _still_at_its_base(skill_store, candidate):
+            # The manifest is written ahead of the skill, so an apply stopped
+            # before its skill write leaves one for a write that never landed.
+            # Restoring "from" it would close a candidate never applied as
+            # rolled back, and the apply that would finish it is then refused.
+            raise GateFailed(
+                f"{candidate.id} was never applied: its skill still holds the text it was "
+                "proposed against, so there is nothing to roll back. An apply of it stopped "
+                "before its skill write leaves this; run that apply again to apply it."
+            )
         _refuse_unwritable_receipt(state, "rollback", candidate)
         result = skill_store.rollback(manifest)
         return _record_rollback(candidate, manifest, result, state, clock)
+
+
+def _still_at_its_base(skill_store: Any, candidate: Candidate) -> bool:
+    """Whether the candidate's document still holds the text it was proposed against.
+
+    A document this cannot read is not judged here; the rollback's own checks
+    name what is wrong with it.
+    """
+    try:
+        text = read_live_base_text(skill_store, candidate, action="roll back")
+    except AsiError:
+        return False
+    return sha256_text(text) == candidate.target.base_sha256
 
 
 def _record_rollback(

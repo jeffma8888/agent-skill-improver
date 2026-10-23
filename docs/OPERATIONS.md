@@ -392,11 +392,11 @@ these are normally caught inside the daily pass instead and land in the receipt'
 
 | Refusal | Meaning |
 | --- | --- |
-| `GateFailed` | on `review`/`apply`: the candidate is not exactly `validated`, because it failed the gate or is closed (`applied`, `rolled-back`, `gate-failed`, `blocked-run`); a closed candidate never exposes a token or an apply command again. On `rollback`: no backup manifest exists for the candidate, so there is nothing to roll back |
+| `GateFailed` | on `review`/`apply`: the candidate is not exactly `validated`, because it failed the gate or is closed (`applied`, `rolled-back`, `gate-failed`, `blocked-run`); a closed candidate never exposes a token or an apply command again. On `rollback`: no backup manifest exists for the candidate, so there is nothing to roll back, or the candidate is still `validated` and its skill holds the text it was proposed against (an apply of it stopped before its skill write), so it was never applied: run that apply again |
 | `CandidateTampered` | a derived field of the candidate record (patch hash, approval challenge, diff, target identity, status against the recorded gate, validation binding) does not recompute from its inputs. The file was edited after it was written; nothing was backed up or applied. Do not "fix" the record: re-propose |
 | `ApprovalRequired` | no token was passed, `--i-reviewed-this` is missing, or the token does not match the challenge recomputed from the candidate id, base hash and patch text. Re-run `review` and copy the token it prints now |
 | `AutomationRefused` | you are inside a scheduled run. Apply or roll back from an interactive shell |
-| `BaseHashMismatch` | on `review` or `apply`: the skill file changed since the candidate was built, or what is at its path is not a regular file (a fifo or a device: refused on the open handle rather than read or waited on). The record is intact as far as it can be checked without the file (a record that fails its own recomputation is `CandidateTampered`, checked first); the evidence no longer describes this file, so re-run `asi daily --commit` to propose and validate against the new base |
+| `BaseHashMismatch` | on `review` or `apply`: the skill file changed since the candidate was built, or what is at its path is not a regular file (a fifo or a device: refused on the open handle rather than read or waited on). The record is intact as far as it can be checked without the file (a record that fails its own recomputation is `CandidateTampered`, checked first); the evidence no longer describes this file, so re-run `asi daily --commit` to propose and validate against the new base. An `apply` stopped after it wrote the skill is not refused this way when run again: it records the write (see Recovery) |
 | `MirrorEditRefused` | the target is not a canonical editable root |
 | `CredentialInSkill` | the skill file holds a token, key or key block, so no model role was shown it and nothing was proposed. Remove the credential from the skill; the next pass proposes normally |
 | `NonDocumentWriteRefused` | the target is not a `SKILL.md` |
@@ -439,6 +439,18 @@ second run finds the previous text already in place and reports
 
 **A run crashed mid-pass.** Re-run it. The day key makes the pass idempotent:
 existing records are re-used rather than re-scored. Nothing needs cleaning up.
+
+**An `apply` or `rollback` was stopped.** Run the same command again; a stop
+signal during either says so on stderr. An apply writes the backup manifest
+before the skill, and its receipt before it marks the candidate applied, so the
+next run applies as usual if the skill still holds the base text, records the
+apply if the skill already holds exactly the candidate's text and the manifest
+records that write (after the same token check, with a `finishes` line in its
+report), and is refused with `GateFailed`, naming the status `applied`, if the
+first run had finished: nothing is left to do then. A rollback stopped after its restore finds the previous text in place
+and records it. Anything else, such as an edit to the skill since the stop, is
+refused as before. Do not reach for `rollback` after an apply that stopped
+before its skill write: it refuses, as the candidate was never applied.
 
 **A stale lock.** `state/locks/daily.lock` is an `flock`, released by the kernel
 when the process exits, however it exits; the file that remains is inert and

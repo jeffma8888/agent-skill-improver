@@ -89,6 +89,19 @@ RC_STOPPED_BY_SIGHUP = 128 + 1
 RC_STOPPED_BY_SIGTERM = 128 + 15
 
 
+#: What a stopped ``apply`` or ``rollback`` adds to the stop: each is finished
+#: by the same command run again, which records a write the stopped run made
+#: (``apply_candidate`` through the manifest written before the skill, rollback
+#: by finding the previous text already in place).
+FINISH_BY_RUNNING_AGAIN = {
+    "apply": "run the same apply again to finish it: a skill write this run made and did "
+    "not record is recorded then; if this run had recorded it, the apply is refused as "
+    "already `applied`, with nothing left to do\n",
+    "rollback": "run the same rollback again to finish it: a restore this run made and did "
+    "not record is recorded then\n",
+}
+
+
 class Stopped(BaseException):
     """A stop signal arrived. Not an ``Exception``, so no handler that isolates
     one conversation's or one skill's failure can catch it and carry on."""
@@ -1399,6 +1412,14 @@ def cmd_apply(args: argparse.Namespace) -> int:
             "\n".join(
                 [
                     f"applied {result['candidate_id']} to {write['path']}",
+                    *(
+                        [
+                            "  finishes        an earlier run of this apply, which wrote the "
+                            "skill and did not record it"
+                        ]
+                        if result.get("finishes_an_earlier_run")
+                        else []
+                    ),
                     f"  previous sha256 {write['previous_sha256']}",
                     f"  new sha256      {write['new_sha256']}",
                     f"  backup          {write['backup_path']}",
@@ -2117,6 +2138,7 @@ def _main(argv: Sequence[str] | None, *, exiting: bool) -> int:
             _err(
                 f"stopped by {signal.Signals(exc.signum).name} before the command finished; "
                 "any model or source command it had started was ended with it\n"
+                + FINISH_BY_RUNNING_AGAIN.get(getattr(args, "command", ""), "")
             )
             return 128 + exc.signum
         finally:
