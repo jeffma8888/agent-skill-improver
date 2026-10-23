@@ -1090,7 +1090,18 @@ def cmd_daily(args: argparse.Namespace) -> int:
         # as blocked, nothing said so, and the next `doctor` reported 0
         # repaired. A drifted mode means something else touched the private
         # tree; the refusal must not swallow that signal.
-        runner = build_runner(config, state)
+        # A layout `run_daily` will refuse gets no scratch root when `dir` would
+        # not have refused it first: opening it would create `sandbox` beside
+        # the entry being refused, under a repair note that says the refusal
+        # wrote nothing else. Measured before: a fresh state directory whose
+        # `raw` was a file was left with a new `sandbox` directory by the run
+        # that then refused its layout. A root, an ancestor or a `sandbox` that
+        # is not a real directory is refused here in the same words as before.
+        scratch: StateStore | None = state
+        if state.layout_problems():
+            state.check_dir("sandbox")
+            scratch = None
+        runner = build_runner(config, scratch)
         unstartable = runner.program_problems()
         if unstartable:
             raise ConfigError(
