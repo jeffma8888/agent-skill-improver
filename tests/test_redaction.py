@@ -211,10 +211,11 @@ class MaskingTimeTests(unittest.TestCase):
         self.assertEqual(redact(text).text, self.HEADER + "-aaa." + PLACEHOLDER.format(label="jwt"))
 
     def test_a_token_after_a_word_character_and_a_dash_is_still_masked(self):
-        """The ``eyJ`` right after a word character is no start, since the
-        pattern needs a word boundary there; the one after the ``-`` is. A
-        start found without the boundary would skip to the end of the run and
-        past the token."""
+        """The ``eyJ`` right after an ASCII letter is no start (``_LEAD``); after
+        ``_`` or a non-ASCII letter it is one, and its match runs on through
+        the ``-`` to the token's end. Either way the token is masked once: a
+        start found where no shape may begin would skip to the end of the run
+        and past the token."""
         token = self.token()
         for before in ("a", "_", "\u00e9", "\u0663"):
             with self.subTest(before=before):
@@ -253,6 +254,10 @@ class MaskingTimeTests(unittest.TestCase):
             _j("tok", "en="),
             _j("s", "k-") + "q" * 20,
             _j("x", "oxb-") + "1" * 10,
+            "\\n",
+            "%2F",
+            "\x1b[1m",
+            "\u00e9",
         ]
         return ["".join(rng.choice(pieces) for _ in range(rng.randint(0, 14))) for _ in range(4000)]
 

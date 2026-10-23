@@ -39,29 +39,76 @@ class _Shape:
     run: re.Pattern[str] | None = None
 
 
+#: Where a shape may begin: not right after an ASCII letter or digit, unless
+#: that letter or digit ends an escape. Every shape below that began at ``\b``
+#: (all but the key block and the URL parameter) begins here instead. ``\b``
+#: needs a non-word character before a letter, so a credential glued to a word
+#: character went through whole: after ``_`` (``MY_TOKEN_`` before a token,
+#: ``DB_`` before an assignment), after a non-ASCII letter, and after the end
+#: of an escape -- ``\n``, ``\t``, ``\x1b`` or ``\u00e9`` in a ``repr`` or JSON
+#: text, ``%20`` in a URL, the ``m`` that ends a terminal colour code. Each
+#: escape is spelled in full (a lookbehind has one width per branch); the
+#: colour code is matched by its last two characters, a digit, ``;`` or ``[``
+#: and then ``m``, since its length varies, so an ``m`` after a digit counts
+#: whether or not the escape character came before it.
+_LEAD = (
+    r"(?:(?<![A-Za-z0-9])"
+    r"|(?<=\\[nrtbfv])"
+    r"|(?<=\\x[0-9A-Fa-f]{2})"
+    r"|(?<=\\u[0-9A-Fa-f]{4})"
+    r"|(?<=\\U[0-9A-Fa-f]{8})"
+    r"|(?<=%[0-9A-Fa-f]{2})"
+    r"|(?<=[0-9;\[]m))"
+)
+#: Where a vendor token may end: not right before an ASCII letter or digit.
+#: ``\b`` there needed a non-word character after the token, so one followed by
+#: a non-ASCII letter, or by ``_`` where its body cannot hold one, was left
+#: unmasked (the Slack shape, cut back to a ``-``, masked only part of it).
+_TAIL = r"(?![A-Za-z0-9])"
+
+
+def _lead(first: str) -> str:
+    """``_LEAD`` for a shape whose first character is one of ``first``.
+
+    The lookahead is there for speed alone. ``_LEAD`` tries seven branches,
+    and a search tries it at every position; with nothing cheaper first, 4 MiB
+    of prose took about 2.7 s to mask instead of 0.4 s (3.13). A character the
+    lookahead leaves out is a shape that never matches, so each shape's
+    tests give it a glued sample of every way it can begin.
+    """
+    return f"(?=[{first}])" + _LEAD
+
+
 #: Every shape ``tools/leakscan.py`` refuses in the repository is recognised
 #: here as well; ``tests/test_redaction.py`` holds the two lists together. A
 #: transcript is a far likelier place for a pasted credential than a fixture.
 _SHAPES: tuple[_Shape, ...] = (
-    _Shape("aws-access-key-id", re.compile(r"\b(?:A" + r"KIA|A" + r"SIA)[0-9A-Z]{16}\b")),
-    _Shape("github-token", re.compile(r"\bg" + r"h[pousr]_[A-Za-z0-9]{20,}\b")),
-    _Shape("github-fine-grained-token", re.compile(r"\bgithub_" + r"pat_[A-Za-z0-9_]{20,}\b")),
-    _Shape("slack-token", re.compile(r"\bx" + r"ox[baprs]-[A-Za-z0-9-]{10,}\b")),
-    _Shape("model-provider-key", re.compile(r"\bs" + r"k-[A-Za-z0-9_-]{20,}\b")),
-    _Shape("google-api-key", re.compile(r"\bA" + r"Iza[0-9A-Za-z_-]{30,}\b")),
+    _Shape(
+        "aws-access-key-id",
+        re.compile(_lead("A") + r"(?:A" + r"KIA|A" + r"SIA)[0-9A-Z]{16}" + _TAIL),
+    ),
+    _Shape("github-token", re.compile(_lead("g") + r"g" + r"h[pousr]_[A-Za-z0-9]{20,}" + _TAIL)),
+    _Shape(
+        "github-fine-grained-token",
+        re.compile(_lead("g") + r"github_" + r"pat_[A-Za-z0-9_]{20,}" + _TAIL),
+    ),
+    _Shape("slack-token", re.compile(_lead("x") + r"x" + r"ox[baprs]-[A-Za-z0-9-]{10,}" + _TAIL)),
+    _Shape("model-provider-key", re.compile(_lead("s") + r"s" + r"k-[A-Za-z0-9_-]{20,}" + _TAIL)),
+    _Shape("google-api-key", re.compile(_lead("A") + r"A" + r"Iza[0-9A-Za-z_-]{30,}" + _TAIL)),
     _Shape(
         "jwt",
-        re.compile(r"\be" + r"yJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
-        # A JWT segment may hold ``-``, and ``-`` is not a word character, so
-        # each ``-eyJ`` inside a run is a start of its own. Measured before:
+        re.compile(_lead("e") + r"e" + r"yJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
+        # A JWT segment may hold ``-`` and ``_``, and neither is a letter or a
+        # digit, so each ``-eyJ`` or ``_eyJ`` inside a run is a start of its
+        # own (``_LEAD``). Measured before, for ``-eyJ``:
         # searched with the pattern alone, every such start was tried and ran
         # to the end of the run, so text full of them took time in the square
         # of its length (64 KiB: about 0.7 s on 3.11, 1.1 s on 3.13; each
         # doubling, four times as long).
-        start=re.compile(r"\be" + r"yJ"),
+        start=re.compile(_lead("e") + r"e" + r"yJ"),
         run=re.compile(r"[A-Za-z0-9_-]*"),
     ),
-    _Shape("bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")),
+    _Shape("bearer-token", re.compile(r"(?i)" + _lead("b") + r"bearer\s+[A-Za-z0-9._~+/=-]{16,}")),
     _Shape(
         "private-key-block",
         # The END line is optional: excerpts are clipped to a character budget,
@@ -93,7 +140,9 @@ _SHAPES: tuple[_Shape, ...] = (
     _Shape(
         "aws-secret-assignment",
         re.compile(
-            r"(?i)(\b(?:"
+            r"(?i)("
+            + _lead("as")
+            + r"(?:"
             + _j("aws_secr", "et_access_key|secr", "et_access_key")
             + r")\b\s*[=:]\s*)[^\s&\[]+"
         ),
@@ -102,7 +151,9 @@ _SHAPES: tuple[_Shape, ...] = (
     _Shape(
         "secret-assignment",
         re.compile(
-            r"(?i)(\b(?:pass"
+            r"(?i)("
+            + _lead("psact")
+            + r"(?:pass"
             + r"word|pass"
             + r"wd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token"
             + r"|client[_-]?secret|private[_-]?token|token)\b\s*[=:]\s*)[^\s&\[]{6,}"

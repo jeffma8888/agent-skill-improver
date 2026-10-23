@@ -57,7 +57,10 @@ Consequences worth being explicit about:
    who most needs the boundary is the person most likely to switch it off to make
    a run work.
 2. **Credentials in your transcripts will be in the prompt** unless redaction
-   catches them. `redact_secrets = true` masks common shapes. It is a reduction
+   catches them. `redact_secrets = true` masks common shapes, including one
+   glued to an underscore, a non-ASCII letter or the end of an escape (`\n` in
+   JSON or a `repr`, `%20` in a URL, a terminal colour code); otherwise one
+   glued to an ASCII letter or digit is taken for part of a longer word. It is a reduction
    of risk and **not a guarantee**: a secret with an unusual shape, a credential
    split across lines, or a private value that simply looks like prose will pass
    through. Treat it as defence in depth, never as a control -- what keeps such a
