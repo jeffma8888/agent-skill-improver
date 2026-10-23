@@ -135,7 +135,12 @@ def _rules() -> tuple[Rule, ...]:
     # The one conversation title that was sampled from a real corpus while this
     # tool was being built. It reached fixtures, docs, config and a class name,
     # so it gets its own rule rather than relying on anyone remembering it.
-    sampled_title = _j("wo", "rk") + r"\s*[-_]?\s*" + _j("fl", "ow") + r"[\s_-]*" + _j("ag", "ent")
+    # The space around the optional dash or underscore has one way to be split:
+    # with ``\s*[-_]?\s*`` it had one for each place in it, and a long run of
+    # space after the first word took time in the square of the run.
+    sampled_title = (
+        _j("wo", "rk") + r"\s*(?:[-_]\s*)?" + _j("fl", "ow") + r"[\s_-]*" + _j("ag", "ent")
+    )
     # -- operator identity ----------------------------------------------
     local_user = _j("jin", "cm")
     real_first = _j("Jin", "chen")

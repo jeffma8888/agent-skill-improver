@@ -1,10 +1,11 @@
-"""The scanner's hostname and jwt rules, and line numbers, take time in proportion to text.
+"""The scanner's hostname, jwt and sampled-title rules, and line numbers, take linear time.
 
 Measured before: the hostname rule began with a run of host characters and no
 anchor, so every position inside a long run of letters, digits and dashes was
 a start of its own, each scanned to the end of the run; the jwt rule's first
 segment may hold ``-``, so each ``-eyJ`` inside a run was a start of its own;
-and each finding's line was counted from the start of the text. Each doubling
+the sampled-title rule split the space around its optional dash every way
+there is; and each finding's line was counted from the start of the text. Each doubling
 of such text took four times as long. A tracked file may be up to 2 MB, and
 the history patch is scanned as one text.
 """
@@ -27,6 +28,9 @@ def _j(*parts: str) -> str:
 RULES = {rule.id: rule for rule in leakscan.RULES}
 HOST_PART = _j(".", "co", "rp", ".")
 HEADER = _j("e", "yJ")
+WORK, FLOW, AGENT = _j("wo", "rk"), _j("fl", "ow"), _j("ag", "ent")
+#: The sampled-title rule's pattern as it was.
+OLD_TITLE = WORK + r"\s*[-_]?\s*" + FLOW + r"[\s_-]*" + AGENT
 #: The lookbehind the hostname rule starts with; without it, the rule as it was.
 RUN_START = "(?<![A-Za-z0-9-])"
 
@@ -61,6 +65,28 @@ class LeakScanTimeTests(unittest.TestCase):
         self.assertEqual(len(found), 80_000)
         self.assertEqual(found[0].location, "t:1")
         self.assertEqual(found[-1].location, "t:80000")
+
+    def test_a_long_run_of_space_after_the_sampled_titles_first_word_is_scanned_in_linear_time(
+        self,
+    ):
+        spaces = " " * 262_144  # 256 KiB
+        with deadline(5.0):
+            self.assertEqual(_scan(WORK + spaces + "x"), [])
+            found = _scan(WORK + spaces + "-" + spaces + FLOW + " " + AGENT, "sampled-thread-title")
+        self.assertEqual(len(found), 1)
+
+    def test_the_control_the_sampled_title_rule_finds_what_its_old_pattern_found(self):
+        rule = RULES["sampled-thread-title"]
+        old = re.compile(OLD_TITLE, rule.flags)
+        alphabet = [WORK, FLOW, AGENT, WORK.upper(), " ", "\t", "-", "_", "x", "\n", "\u00a0"]
+        rng = random.Random(144)
+        matched = 0
+        for _ in range(8000):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(1, 16)))
+            want = [m.span() for m in old.finditer(text)]
+            self.assertEqual([m.span() for m in leakscan._matches(rule, text)], want, text)
+            matched += bool(want)
+        self.assertGreater(matched, 50, "the generated texts must hold matches")
 
     def test_the_control_each_rule_finds_what_its_old_pattern_found(self):
         host = RULES["corp-hostname"]
