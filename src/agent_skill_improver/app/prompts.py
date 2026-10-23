@@ -39,7 +39,14 @@ from ..domain.validation import ReplayCase
 from ..jsonio import dumps
 
 FENCE_WORD = "UNTRUSTED-DATA"
-_FENCE_RE = re.compile(r"<{2,}\s*/?\s*(?:END-)?UNTRUSTED-DATA[^>]*>{0,3}", re.IGNORECASE)
+#: A forged delimiter: two or more ``<``, space, an optional ``/`` and space,
+#: ``END-`` for a closing one, the fence word, anything up to a ``>`` and up to
+#: three of those. Searched in time in proportion to the text: a run of ``<``
+#: is tried from its first one only, since what follows the run is never a
+#: ``<`` and a start inside the run fails whenever the first one did; and the
+#: space around the ``/`` has one way to be split, where ``\s*/?\s*`` had one
+#: for each place in it.
+_FENCE_RE = re.compile(r"(?<!<)<{2,}\s*(?:/\s*)?(?:END-)?UNTRUSTED-DATA[^>]*>{0,3}", re.IGNORECASE)
 NEUTRALIZED = "[neutralized-delimiter]"
 ELISION_MARKER = "[... {n} transcript block(s) elided by the local prompt budget ...]"
 
