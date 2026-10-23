@@ -26,6 +26,17 @@ class RunLock:
         self.owner = owner or f"pid={os.getpid()}"
         self._fd: int | None = None
 
+    @property
+    def _shown(self) -> str:
+        r"""The lock path as a refusal names it: on one line, a line break spelled.
+
+        The lock sits under ``[run].state_dir``, whose name may hold a line break
+        (a launchd job carries such a path exactly). Measured before (3.11 and
+        3.13): a directory at the lock path under a state directory ending
+        ``\nconfig error: forged`` made ``daily`` print its refusal as 3 lines.
+        """
+        return one_line_label(str(self.path))
+
     def __enter__(self) -> "RunLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # O_NONBLOCK guards the open itself: a regular file ignores it, and a
@@ -36,14 +47,14 @@ class RunLock:
         # an unreadable parent, and this is asked inside an error handler.
         if not nofollow and os.path.islink(self.path):
             raise SafetyRefusal(
-                f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
+                f"refusing to use {self._shown} as a run lock: the lock leaf is a symlink"
             )
         try:
             fd = os.open(str(self.path), flags | nofollow, 0o600)
         except OSError as exc:
             if os.path.islink(self.path):
                 raise SafetyRefusal(
-                    f"refusing to use {self.path} as a run lock: the lock leaf is a symlink"
+                    f"refusing to use {self._shown} as a run lock: the lock leaf is a symlink"
                 ) from exc
             # A directory at the path (``IsADirectoryError``) is the same refusal
             # as a fifo: not this tool's file, and the advice is to remove it. A
@@ -54,7 +65,7 @@ class RunLock:
             # the run ended with exit 70 and a traceback.
             foreign = exc.errno in (errno.EISDIR, errno.ENOTDIR, errno.ELOOP)
             raise SafetyRefusal(
-                f"refusing to use {self.path} as a run lock: it could not be opened ({exc})."
+                f"refusing to use {self._shown} as a run lock: it could not be opened ({exc})."
                 + (" Remove the entry at that path if you did not put it there." if foreign else "")
             ) from exc
         # Judged before anything is done to it: a fifo or a device at the lock
@@ -65,12 +76,12 @@ class RunLock:
         except OSError as exc:
             os.close(fd)
             raise SafetyRefusal(
-                f"refusing to use {self.path} as a run lock: cannot stat it ({exc})"
+                f"refusing to use {self._shown} as a run lock: cannot stat it ({exc})"
             ) from exc
         if not stat.S_ISREG(kind):
             os.close(fd)
             raise SafetyRefusal(
-                f"refusing to use {self.path} as a run lock: the lock leaf is not a regular "
+                f"refusing to use {self._shown} as a run lock: the lock leaf is not a regular "
                 "file. Remove the entry at that path if you did not put it there."
             )
         # The 0o600 above applies only when the file is CREATED, and it is
@@ -84,12 +95,12 @@ class RunLock:
         except OSError as exc:
             os.close(fd)
             raise SafetyRefusal(
-                f"refusing to use {self.path} as a run lock: cannot enforce mode 0600 ({exc})"
+                f"refusing to use {self._shown} as a run lock: cannot enforce mode 0600 ({exc})"
             ) from exc
         if actual_mode != 0o600:
             os.close(fd)
             raise SafetyRefusal(
-                f"refusing to use {self.path} as a run lock: mode is {oct(actual_mode)}, want 0600"
+                f"refusing to use {self._shown} as a run lock: mode is {oct(actual_mode)}, want 0600"
             )
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -102,7 +113,7 @@ class RunLock:
             # The holder is a run or a promotion; its owner line says which.
             # Spelled onto one line: it is read back from a file.
             raise LockHeld(
-                f"another asi process holds {self.path}"
+                f"another asi process holds {self._shown}"
                 + (f" ({one_line_label(held)})" if held else "")
                 + ". Overlapping runs would double-count records and race on the checkpoint, "
                 "and a promotion during a run would land in the tree the run is reading."

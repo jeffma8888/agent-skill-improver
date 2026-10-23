@@ -362,7 +362,8 @@ class StateStore:
             return path
         if path.is_dir() and not path.is_symlink():
             raise SafetyRefusal(
-                f"refusing to write the state record {path}: a directory sits at that path, "
+                f"refusing to write the state record {_shown(path)}: "
+                "a directory sits at that path, "
                 "which a write cannot replace; remove it if you did not put it there"
             )
         write()
@@ -433,7 +434,8 @@ class StateStore:
             return
         raise SafetyRefusal(
             "refusing to use the state directory: it holds private conversation content and "
-            f"{len(problems)} mandatory path(s) are not a real directory under {self.root}.\n"
+            f"{len(problems)} mandatory path(s) are not a real directory "
+            f"under {_shown(self.root)}.\n"
             + "\n".join(f"  - {p}" for p in problems)
             + "\n  A symlink is followed by mkdir, chmod and every later write, so a state "
             "directory that is a link would put verbatim transcripts outside the configured "
@@ -477,7 +479,7 @@ class StateStore:
             want = DIR_MODE if path.is_dir() else STATE_FILE_MODE
             if not _mode_ok(path, want):
                 rel = path.relative_to(self.root)
-                problems.append(f"{rel} is {_mode_of(path)}, want {oct(want)}")
+                problems.append(f"{_shown(rel)} is {_mode_of(path)}, want {oct(want)}")
         return problems
 
     def misplaced_directories(self) -> list[str]:
@@ -546,7 +548,8 @@ class StateStore:
             + "\n".join(f"  - {p}" for p in shown)
             + more
             + f"\n  Expected {oct(DIR_MODE)} on directories and {oct(STATE_FILE_MODE)} on files "
-            f"under {self.root}. A chmod that is accepted and does nothing (a filesystem with "
+            f"under {_shown(self.root)}. "
+            "A chmod that is accepted and does nothing (a filesystem with "
             "no POSIX modes, for instance) looks identical to a private tree unless the modes "
             "are re-read, which is why this is checked rather than assumed."
         )
@@ -561,7 +564,8 @@ class StateStore:
         reason = _ancestor_layout_reason(self.root)
         if reason:
             raise SafetyRefusal(
-                f"refusing to use {self.root} as the state directory: {reason}. Every state "
+                f"refusing to use {_shown(self.root)} as the state directory: {reason}. "
+                "Every state "
                 "directory must be reachable without following a symlink, because mkdir, "
                 "chmod and every later write would carry private conversation content "
                 "outside the configured state directory. Point [run].state_dir at the "
@@ -670,11 +674,12 @@ class StateStore:
         """
         path = self.candidate_path(candidate_id)
         if not path.is_file():
-            raise FileNotFoundError(f"no candidate {candidate_id!r} at {path}")
+            raise FileNotFoundError(f"no candidate {candidate_id!r} at {_shown(path)}")
         candidate = _candidate_from_file(path)
         if candidate.id != candidate_id:
             raise StateUnreadable(
-                f"refusing to use {path} as candidate {candidate_id!r}: the record it holds "
+                f"refusing to use {_shown(path)} as candidate {candidate_id!r}: "
+                "the record it holds "
                 f"declares id {candidate.id!r}. A candidate is reviewed and approved by id, so "
                 "a record that does not claim the id it was looked up by cannot be acted on."
             )
@@ -716,7 +721,7 @@ class StateStore:
                 unreadable.append(
                     UnreadableRecord(
                         path=path,
-                        reason=f"refusing to count the candidate record {path}: {misnamed}",
+                        reason=f"refusing to count the candidate record {_shown(path)}: {misnamed}",
                     )
                 )
                 continue
@@ -849,7 +854,8 @@ class StateStore:
                 if problem:
                     unreadable.append(
                         UnreadableRecord(
-                            path=path, reason=f"refusing to list the record {path}: {problem}"
+                            path=path,
+                            reason=f"refusing to list the record {_shown(path)}: {problem}",
                         )
                     )
                     continue
@@ -905,7 +911,7 @@ class StateStore:
         """
         path = self.lock_path()
         kind = _non_file_kind(path)
-        return f"the run lock path {path} {kind}" if kind else None
+        return f"the run lock path {_shown(path)} {kind}" if kind else None
 
     def day_artifact_problem(self, day: str) -> str | None:
         """Why a committed ``daily`` would refuse what sits where the day's receipt or checkpoint goes.
@@ -926,7 +932,7 @@ class StateStore:
     def artifact_path_problem(self, path: Path, what: str) -> str | None:
         """Why a committed ``daily`` would refuse to write ``what`` at ``path``, or None."""
         kind = _non_file_kind(path)
-        return f"{what} path {path} {kind}" if kind else None
+        return f"{what} path {_shown(path)} {kind}" if kind else None
 
     # -- checkpoints -----------------------------------------------------
     def checkpoint_path(self, day: str) -> Path:
@@ -1018,7 +1024,7 @@ class StateStore:
         problem = _receipt_shape_problem(raw)
         if problem:
             return UnreadableRecord(
-                path=path, reason=f"refusing to read the receipt {path}: {problem}"
+                path=path, reason=f"refusing to read the receipt {_shown(path)}: {problem}"
             )
         at = str(raw.get("finished_at") or raw.get("started_at") or "")
         skill_tree: dict[str, Any] = (
@@ -1139,7 +1145,7 @@ class StateStore:
         """
         if self.dry_run:
             raise SafetyRefusal(
-                f"refusing to move the receipt {run.path} through a store that withholds "
+                f"refusing to move the receipt {_shown(run.path)} through a store that withholds "
                 "writes (dry run)"
             )
         target = self.kept_blocked_receipt_path(run)
@@ -1149,8 +1155,8 @@ class StateStore:
             # Named, not a traceback: the move sits on the scheduled path, where
             # a 70 is a bug report and this is a condition of the tree.
             raise SafetyRefusal(
-                f"refusing to run: the blocked receipt {run.path} could not be kept at "
-                f"{target} ({_cannot_open(exc)}); nothing was written. Read it, then move "
+                f"refusing to run: the blocked receipt {_shown(run.path)} could not be kept at "
+                f"{_shown(target)} ({_cannot_open(exc)}); nothing was written. Read it, then move "
                 "it aside yourself to continue."
             ) from exc
         return target
@@ -1237,13 +1243,15 @@ def _read_state_json(path: Path) -> Any:
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     if not getattr(os, "O_NOFOLLOW", 0) and path.is_symlink():
-        raise StateUnreadable(f"refusing to read state artifact {path}: the leaf is a symlink")
+        raise StateUnreadable(
+            f"refusing to read state artifact {_shown(path)}: the leaf is a symlink"
+        )
     try:
         fd = os.open(path, flags)
     except OSError as exc:
         if path.is_symlink():
             raise StateUnreadable(
-                f"refusing to read state artifact {path}: the leaf is a symlink"
+                f"refusing to read state artifact {_shown(path)}: the leaf is a symlink"
             ) from exc
         raise
     try:
@@ -1254,7 +1262,7 @@ def _read_state_json(path: Path) -> Any:
     if not regular:
         os.close(fd)
         raise StateUnreadable(
-            f"refusing to read state artifact {path}: the leaf is not a regular file"
+            f"refusing to read state artifact {_shown(path)}: the leaf is not a regular file"
         )
     # Ownership of the descriptor passes to the file object exactly once: if
     # ``fdopen`` itself fails the raw descriptor is closed here, and from then
@@ -1324,7 +1332,7 @@ def _set_aside_shape_problem(raw: Any) -> str:
 
 def _checkpoint_shape_refusal(path: Path, key: str, what: str) -> StateUnreadable:
     return StateUnreadable(
-        f"refusing to use the checkpoint record {path}: field {key!r} {what}. A "
+        f"refusing to use the checkpoint record {_shown(path)}: field {key!r} {what}. A "
         "hand-edited state file is never guessed at; move it aside to start the day "
         "from a fresh checkpoint."
     )
@@ -1344,12 +1352,14 @@ def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
         raw = _read_state_json(path)
     except (OSError, ValueError) as exc:
         raise StateUnreadable(
-            f"refusing to use the {what} record {path}: it could not be read ({exc}). "
+            f"refusing to use the {what} record {_shown(path)}: it could not be read ({exc}). "
             "A truncated or hand-edited state file is never guessed at; move it aside "
             "to continue without it."
         ) from exc
     if not isinstance(raw, dict):
-        raise StateUnreadable(f"refusing to use the {what} record {path}: it is not a JSON object.")
+        raise StateUnreadable(
+            f"refusing to use the {what} record {_shown(path)}: it is not a JSON object."
+        )
     return raw
 
 
@@ -1382,12 +1392,12 @@ def _candidate_from_file(path: Path) -> Candidate:
         raw = _read_state_json(path)
     except (OSError, ValueError) as exc:
         raise StateUnreadable(
-            f"refusing to use the candidate record {path}: it could not be read ({exc}). "
+            f"refusing to use the candidate record {_shown(path)}: it could not be read ({exc}). "
             "A truncated or hand-edited record is never guessed at."
         ) from exc
     if not isinstance(raw, dict):
         raise StateUnreadable(
-            f"refusing to use the candidate record {path}: it is not a JSON object."
+            f"refusing to use the candidate record {_shown(path)}: it is not a JSON object."
         )
     try:
         return Candidate.from_dict(raw)
@@ -1396,9 +1406,23 @@ def _candidate_from_file(path: Path) -> Candidate:
         # can happen; it stays here so a field this list does not yet cover is
         # still one refusal rather than exit 70.
         raise StateUnreadable(
-            f"refusing to use the candidate record {path}: it does not have the shape of a "
+            f"refusing to use the candidate record {_shown(path)}: it does not have the shape of a "
             f"candidate ({type(exc).__name__}: {exc})."
         ) from exc
+
+
+def _shown(path: object) -> str:
+    r"""A path as a refusal names it: on one line, a line break spelled (``\n``).
+
+    The state directory is whatever ``[run].state_dir`` says, and a directory
+    name may hold a line break (a launchd job carries such a path exactly), so
+    every path under it may too. Printed raw, the text after the break stood at
+    column 0 of stderr as a line of its own. Measured before (3.11 and 3.13), a
+    state directory ending ``\nconfig error: forged``: one that could not be
+    created made a 2-line refusal in ``doctor`` and ``daily``, one with a
+    mandatory subdirectory replaced by a file made ``daily``'s refusal 3 lines.
+    """
+    return one_line_label(str(path))
 
 
 def _label(path: Path, root: Path) -> str:
@@ -1439,15 +1463,15 @@ def _ancestor_layout_reason(root: Path) -> str | None:
                 continue
             return None
         except OSError as exc:
-            return f"ancestor {current} cannot be inspected ({exc.strerror})"
+            return f"ancestor {_shown(current)} cannot be inspected ({exc.strerror})"
         if stat.S_ISLNK(entry.st_mode):
             try:
                 target = os.readlink(current)
             except OSError:  # pragma: no cover - readlink of a link we just saw
                 target = "<unreadable>"
-            return f"ancestor {current} is a symlink to {target!r}"
+            return f"ancestor {_shown(current)} is a symlink to {target!r}"
         if not stat.S_ISDIR(entry.st_mode):
-            return f"ancestor {current} exists and is not a directory"
+            return f"ancestor {_shown(current)} exists and is not a directory"
     return None
 
 
@@ -1506,8 +1530,10 @@ def _refuse_unless_real_dir(path: Path, root: Path) -> None:
     if reason is None:
         return
     raise SafetyRefusal(
-        f"refusing to use {path} as a state directory: {reason}. Every state directory must be "
-        f"a real directory under {root}, because mkdir, chmod and every later write follow a "
+        f"refusing to use {_shown(path)} as a state directory: {reason}. "
+        "Every state directory must be "
+        f"a real directory under {_shown(root)}, "
+        "because mkdir, chmod and every later write follow a "
         "symlink and would carry private conversation content outside the configured state "
         "directory."
     )
@@ -1522,7 +1548,8 @@ def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
     """
     if name in ("", ".", "..") or name != Path(name).name:
         raise SafetyRefusal(
-            f"refusing to create the state directory {name!r} under {parent}: a dynamically "
+            f"refusing to create the state directory {name!r} under {_shown(parent)}: "
+            "a dynamically "
             "named state directory must be a single path component, not a path"
         )
     path = parent / name
@@ -1531,8 +1558,9 @@ def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
     _chmod_to(path, DIR_MODE)
     if path.is_symlink() or not path.is_dir() or path.parent.resolve() != parent.resolve():
         raise SafetyRefusal(
-            f"refusing to use {path} as a state directory: it is not a real directory directly "
-            f"beneath {parent} after creation"
+            f"refusing to use {_shown(path)} as a state directory: "
+            "it is not a real directory directly "
+            f"beneath {_shown(parent)} after creation"
         )
     return path
 

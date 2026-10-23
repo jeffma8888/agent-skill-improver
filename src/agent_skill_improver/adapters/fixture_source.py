@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..jsonio import loads_untrusted
+from ..domain.candidate import one_line_label
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
 from ..errors import RecordDefect, SourceUnavailable
@@ -103,7 +104,9 @@ class FixtureConversationSource:
 
     def preflight(self) -> None:
         if not self.directory.is_dir():
-            raise SourceUnavailable(f"fixtures_dir {self.directory} is not a directory")
+            raise SourceUnavailable(
+                f"fixtures_dir {one_line_label(str(self.directory))} is not a directory"
+            )
         # Listing it is the question the run will ask; asked here so ``doctor``
         # and the daily preflight refuse before anything is spent.
         self._entries()
@@ -121,7 +124,8 @@ class FixtureConversationSource:
                 names = [entry.name for entry in it if entry.name.endswith(".json")]
         except OSError as exc:
             raise SourceUnavailable(
-                f"fixtures_dir {self.directory} cannot be listed ({exc.strerror or exc}); "
+                f"fixtures_dir {one_line_label(str(self.directory))} "
+                f"cannot be listed ({exc.strerror or exc}); "
                 "nothing in it can be discovered, so this is not an empty window"
             ) from exc
         return sorted(self.directory / name for name in names)
@@ -247,18 +251,20 @@ class FixtureConversationSource:
                 )
         if not passed_over:
             raise RecordDefect(
-                f"no fixture for thread {thread_id!r} in {self.directory}", record_id=thread_id
+                f"no fixture for thread {thread_id!r} in {one_line_label(str(self.directory))}",
+                record_id=thread_id,
             )
         # Measured before: an export discovered a moment ago and then made
         # unreadable (mode 000, truncated mid-write) was reported as "no
         # fixture", as if the thread had never been there. The directory holds
         # entries this scan could not take as a thread; one of them may be it.
-        shown = "; ".join(f"{entry} {reason}" for entry, reason in passed_over[:5])
+        shown = "; ".join(one_line_label(f"{entry} {reason}") for entry, reason in passed_over[:5])
         more = len(passed_over) - 5
         if more > 0:
             shown += f"; +{more} more"
         raise RecordDefect(
-            f"no readable fixture for thread {thread_id!r} in {self.directory}; "
+            f"no readable fixture for thread {thread_id!r} "
+            f"in {one_line_label(str(self.directory))}; "
             f"{len(passed_over)} entr{'y' if len(passed_over) == 1 else 'ies'} there did not "
             f"read as a thread and may be it: {shown}",
             record_id=thread_id,
