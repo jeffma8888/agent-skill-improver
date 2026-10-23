@@ -262,14 +262,26 @@ TOP_LEVEL_KEYS: frozenset[str] = frozenset(
 
 
 def _refuse_unknown_keys(table: Mapping[str, Any], accepted: frozenset[str], *, where: str) -> None:
-    """Refuse a key this tool would not read, naming the nearest key it would."""
+    """Refuse a key this tool would not read, naming the nearest key it would.
+
+    Each refused key is named as ``_named`` names a field: bare when it is
+    plain, short and nothing in it is masked, else quoted, masked and cut, as
+    the rubric loader quotes the keys it refuses; ``[source]``, which words its
+    own refusal, names them the same way. A quoted TOML key may hold almost
+    anything (a NUL is refused before this). Measured before (3.11 and 3.13),
+    here and in ``[source]``: a key holding a line break and then ``config
+    error: forged`` printed as two refusal lines in ``doctor``, a ``ghp_``
+    token used as a key was printed whole, and a 1,000,000-character key made
+    a 1 MB refusal.
+    """
     unknown = sorted(set(table) - accepted)
     if not unknown:
         return
     hints = []
     for key in unknown:
         close = difflib.get_close_matches(key, sorted(accepted), n=1, cutoff=0.6)
-        hints.append(f"{key} (did you mean {close[0]}?)" if close else key)
+        shown = _named(key)
+        hints.append(f"{shown} (did you mean {close[0]}?)" if close else shown)
     raise ConfigError(
         f"{where} has unknown key(s): {', '.join(hints)}. Accepted keys are "
         f"{', '.join(sorted(accepted))}. An unknown key is refused rather than ignored, "
@@ -831,7 +843,8 @@ def _load_source(table: Mapping[str, Any], *, base_dir: Path) -> SourceConfig:
     unknown = sorted(set(table) - SOURCE_KEYS)
     if unknown:
         raise ConfigError(
-            f"[source] has unknown key(s): {', '.join(unknown)}. Accepted keys are "
+            f"[source] has unknown key(s): {', '.join(_named(key) for key in unknown)}. "
+            "Accepted keys are "
             f"{', '.join(sorted(SOURCE_KEYS))}. This table is a closed schema on purpose: "
             "whether the model roles must run inside an OS no-egress sandbox is derived "
             "from [source].kind, and an unknown key is refused so a trust label cannot be "
