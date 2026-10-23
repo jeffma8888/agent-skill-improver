@@ -113,4 +113,5 @@ def build_skill_store(config: Config, *, writable: bool = False) -> FilesystemSk
         config.skill_roots,
         read_only=not writable,
         protected_paths=config.protected_paths,
+        protected_skill_ids=config.protected_skill_ids,
     )

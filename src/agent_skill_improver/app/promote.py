@@ -21,7 +21,9 @@ The interlocks, in the order they fire:
    base hash and the hash of the patch text *as it stands* -- so it stops matching
    if any of them changed;
 6. the target must be the canonical editable copy, never a mirror, never inside
-   this tool's own tree;
+   this tool's own tree, never reached through a link and never a skill listed
+   in ``[guard].protected_skill_ids``, judged before the backup directory is
+   made (``review`` asks the same questions before it shows a token);
 7. a verified backup must exist before the write, and the write is re-read and
    re-hashed afterwards, restoring the original if it did not land as intended.
 
@@ -248,6 +250,18 @@ def apply_candidate(
                 "internal error: apply was handed a read-only skill store; refusing to continue"
             )
 
+        # The target is judged as the write judges it (a link on its path, a
+        # file that is not the skill document, a protected path, a mirror or
+        # unrecognised copy, a skill listed in ``[guard].protected_skill_ids``)
+        # before the backup directory is made, so an apply refused for its target
+        # leaves nothing in ``backups/``. Measured before: an apply refused for a
+        # link on the skill's path was refused by the write, after the backup
+        # directory was made, and left that directory empty.
+        skill_store.assert_write_target(
+            Path(candidate.target.canonical_path),
+            action="write",
+            skill_id=candidate.target.skill_id,
+        )
         # The receipt is written last, since it records the write; its path is
         # judged first, before the backup directory and the skill write, since
         # an apply whose receipt cannot be written would still have changed the

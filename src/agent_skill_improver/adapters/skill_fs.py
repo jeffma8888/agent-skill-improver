@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from ..domain.redaction import named_path, quoted_value
 from ..domain.skills import (
     SKILL_FILENAME,
     UNREADABLE_ENTRY,
@@ -326,12 +327,14 @@ class FilesystemSkillStore:
         *,
         read_only: bool = True,
         protected_paths: Iterable[Path] = (),
+        protected_skill_ids: Iterable[str] = (),
         max_depth: int = DEFAULT_MAX_DEPTH,
         follow_symlinks: bool = False,
     ) -> None:
         self._roots = tuple(roots)
         self.read_only = read_only
         self._protected = tuple(Path(p).resolve() for p in protected_paths)
+        self._protected_skill_ids = frozenset(str(s) for s in protected_skill_ids)
         self._max_depth = max_depth
         self._follow_symlinks = follow_symlinks
         self._snapshot_cache: list[SkillSnapshot] | None = None
@@ -618,19 +621,8 @@ class FilesystemSkillStore:
                 "The daily driver always opens the store read-only; only `asi apply` "
                 "opens it writable."
             )
-        # Judged on the path as spelled, with lstat semantics, before anything
-        # resolves it: a link planted below the root between proposal and apply
-        # would otherwise be followed to a twin with the same text, and the
-        # hash check would pass while the write landed on the wrong skill.
-        self._assert_no_link_below_root(Path(path))
-        # Resolved once, so every later step (hash, backup, manifest, verify)
-        # describes the same file even when the caller spelled the path
-        # differently. Two spellings of one path is how a check and the write it
-        # guards end up looking at different things.
-        target = Path(path).resolve() if Path(path).exists() else Path(path)
-        self._assert_document(target)
-        self._assert_not_protected(target)
-        self._assert_canonical(target)
+        # Every judgement of the target, made where ``review`` makes it too.
+        target = self.assert_write_target(Path(path), action="write", skill_id=skill_id)
         if not target.exists():
             raise BaseHashMismatch(f"refusing to write {target}: file does not exist")
         # From here on the document is addressed through a handle on its own
@@ -1038,7 +1030,60 @@ class FilesystemSkillStore:
             )
         return manifest
 
-    def _assert_document(self, target: Path) -> None:
+    def assert_write_target(self, path: Path, *, action: str, skill_id: str = "") -> Path:
+        """Every judgement the write makes of its target before it opens it, in its order.
+
+        ``write_canonical`` makes them here, ``apply`` asks them before it makes
+        the backup directory, and ``review`` asks the same with
+        ``action="review"`` before it shows a token, so none of the three can
+        ask different questions. Measured before: a target spelled through a
+        symbolic link (a skill folder that is a link below its root, a folder
+        outside every root that links into one, or an alias of the root) made
+        ``review`` print a token and an apply command that ``apply`` then
+        refused, leaving an empty backup directory; and a skill listed in
+        ``[guard].protected_skill_ids`` after its candidate was validated was
+        reviewed and written, the list being read only when a proposal is
+        made. ``skill_id`` is the skill the caller's
+        record names. Returns the target as the write addresses it: resolved
+        when it exists.
+        """
+        replace = "replace" if action == "write" else action
+        write = "write" if action == "write" else action
+        # Judged on the path as spelled, with lstat semantics, before anything
+        # resolves it: a link planted below the root between proposal and apply
+        # would otherwise be followed to a twin with the same text, and the
+        # hash check would pass while the write landed on the wrong skill.
+        self._assert_no_link_below_root(Path(path), verb=replace)
+        # Resolved once, so every later step (hash, backup, manifest, verify)
+        # describes the same file even when the caller spelled the path
+        # differently. Two spellings of one path is how a check and the write it
+        # guards end up looking at different things.
+        target = Path(path).resolve() if Path(path).exists() else Path(path)
+        self._assert_document(target, verb=write)
+        self._assert_not_protected(target, verb=write)
+        group = self.assert_canonical_target(target, action=action)
+        self._assert_not_a_protected_skill(target, group, skill_id, verb=write)
+        return target
+
+    def _assert_not_a_protected_skill(
+        self, target: Path, group: SkillGroup | None, skill_id: str, *, verb: str
+    ) -> None:
+        """Refuse a skill listed in ``[guard].protected_skill_ids``.
+
+        The skill the inventory finds at the target and the one the caller's
+        record names are both judged, so a record naming another skill does not
+        carry a write into a listed one, nor the other way round.
+        """
+        for named in (group.skill_id if group is not None else "", skill_id):
+            if named and named in self._protected_skill_ids:
+                raise SelfMutationRefused(
+                    f"refusing to {verb} {named_path(target)}: skill {quoted_value(named)} is "
+                    "listed in [guard].protected_skill_ids, so it is never a proposal target "
+                    "and never applied. A candidate validated before the skill was listed, or "
+                    "a record edited to name it, is refused here; nothing was touched."
+                )
+
+    def _assert_document(self, target: Path, *, verb: str = "write") -> None:
         """Only the skill document is ever writable.
 
         A skill directory routinely contains hooks and launchers, so a write path
@@ -1047,22 +1092,22 @@ class FilesystemSkillStore:
         """
         if target.name != SKILL_FILENAME:
             raise NonDocumentWriteRefused(
-                f"refusing to write {target}: this tool only ever replaces {SKILL_FILENAME}. "
+                f"refusing to {verb} {target}: this tool only ever replaces {SKILL_FILENAME}. "
                 "Executable payloads in a skill directory (hooks, launchers, MCP wrappers) are "
                 "privileged code and are never edited by an automated proposal."
             )
 
-    def _assert_not_protected(self, target: Path) -> None:
+    def _assert_not_protected(self, target: Path, *, verb: str = "write") -> None:
         resolved = target.resolve()
         for guard in self._protected:
             if resolved == guard or guard in resolved.parents:
                 raise SelfMutationRefused(
-                    f"refusing to write {target}: it is inside a protected path ({guard}). "
+                    f"refusing to {verb} {target}: it is inside a protected path ({guard}). "
                     "This tool never edits its own source, config, or rubrics -- a loop that "
                     "can rewrite its own scoring criteria has no gate at all."
                 )
 
-    def _assert_no_link_below_root(self, spelled: Path) -> None:
+    def _assert_no_link_below_root(self, spelled: Path, *, verb: str = "replace") -> None:
         """Refuse a target reached through a symbolic link below its root.
 
         The root itself may legitimately be a link (a skills directory pointing
@@ -1082,7 +1127,7 @@ class FilesystemSkillStore:
                     cursor = cursor / part
                     if cursor.is_symlink():
                         raise LinkedTargetRefused(
-                            f"refusing to replace {spelled}: {cursor} is a symbolic link, so the "
+                            f"refusing to {verb} {spelled}: {cursor} is a symbolic link, so the "
                             f"replacement would land wherever it points rather than on the skill the "
                             f"candidate was reviewed against. Neither the link nor its target "
                             f"was touched."
@@ -1104,7 +1149,7 @@ class FilesystemSkillStore:
             root_resolved = Path(root.path).resolve()
             if resolved == root_resolved or root_resolved in resolved.parents:
                 raise LinkedTargetRefused(
-                    f"refusing to replace {spelled}: it is not spelled under any configured skill "
+                    f"refusing to {verb} {spelled}: it is not spelled under any configured skill "
                     f"root yet resolves to {resolved} inside root {root.id}, so it reaches the "
                     f"skill through a symbolic link. Spell the target as the root does. Nothing "
                     f"was touched."
@@ -1231,10 +1276,7 @@ class FilesystemSkillStore:
             os.close(fd)
         return b"".join(chunks), stat.S_IMODE(info.st_mode)
 
-    def _assert_canonical(self, target: Path) -> None:
-        self.assert_canonical_target(target, action="write")
-
-    def assert_canonical_target(self, target: Path, *, action: str) -> None:
+    def assert_canonical_target(self, target: Path, *, action: str) -> SkillGroup | None:
         """Refuse a mirror copy, and refuse anything we cannot identify at all.
 
         Resolution happens HERE because this is the adapter layer; the domain
@@ -1276,6 +1318,7 @@ class FilesystemSkillStore:
                 "root, so this tool cannot tell whether it is canonical. An unrecognised "
                 "target is refused rather than assumed safe."
             )
+        return group
 
     @staticmethod
     def _entries_named_like_a_document(

@@ -287,6 +287,8 @@ replacement. Constraints:
   text only.
 - a skill in `[guard].protected_skill_ids`, or one holding an executable payload,
   is refused as a target and the refusal is written to `state/refusals/`.
+  `review` and `apply` read the list again, so a skill listed after its
+  candidate was validated gets no token and is not written.
 - a skill whose document is not valid UTF-8 is quarantined (`UndecodableDocument`,
   a record defect, so the run goes on) rather than proposed against text read
   with replacement characters; the inventory still lists it, with the byte named.
@@ -353,6 +355,10 @@ The interlock is structural, not a flag:
   into a canonical one is refused too (it reached the root through a link above
   or outside it); the root itself may be a link. `rollback` runs the same walk.
   `_assert_document` then refuses any target whose filename is not `SKILL.md`.
+  These, the protected-path and canonical-copy checks and the refusal of a skill
+  in `[guard].protected_skill_ids` are made by one method, `assert_write_target`,
+  which `review` also asks before it shows a token and `apply` before it makes
+  the backup directory, so the three cannot ask different questions.
   The walk judges one instant, so the document is then addressed through a
   handle on its own directory, opened component by component below the root
   with `O_NOFOLLOW` (`_open_parent_pinned`): the hash read, the backup bytes,
