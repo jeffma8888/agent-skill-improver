@@ -38,11 +38,12 @@ from __future__ import annotations
 
 import argparse
 import re
+from bisect import bisect_left
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 
@@ -70,6 +71,13 @@ class Rule:
     positive: str
     negative: str
     flags: int = re.IGNORECASE
+    # For a pattern whose first run of characters can hold a later start of the
+    # same pattern: where a match can start, and the run that follows the
+    # start. A start with no match after it fails where that run ends, and so
+    # does every later start inside the run, so the scan resumes past the run
+    # (see ``_matches``). Both or neither.
+    start: str | None = None
+    run: str | None = None
 
     def compiled(self) -> re.Pattern[str]:
         return re.compile(self.pattern, self.flags)
@@ -200,7 +208,13 @@ def _rules() -> tuple[Rule, ...]:
         ),
         Rule(
             id="corp-hostname",
-            pattern=r"[A-Za-z0-9-]+" + re.escape(corp_host) + r"[A-Za-z0-9.-]+",
+            # Started only where a run of host characters starts. Without the
+            # lookbehind every position inside a long run was a start of its
+            # own, each scanned to the end of the run: 32 KiB of letters and
+            # dashes took 3 to 4 s, each doubling four times as long. A match
+            # always began at the start of its run anyway, since one that
+            # matches from inside a run matches from its start too.
+            pattern=r"(?<![A-Za-z0-9-])[A-Za-z0-9-]+" + re.escape(corp_host) + r"[A-Za-z0-9.-]+",
             why="an internal corporate hostname",
             remediation="remove the hostname",
             positive="box" + corp_host + "example.net",
@@ -359,6 +373,12 @@ def _rules() -> tuple[Rule, ...]:
             positive="e" + "yJ" + "a" * 12 + "." + "b" * 12 + ".sig",
             negative="e" + "yJshort.x.y",
             flags=0,
+            # A segment may hold ``-``, which is not a word character, so each
+            # ``-eyJ`` inside a run is a start of its own: searched with the
+            # pattern alone, 256 KiB of them took 12 to 17 s, each doubling four
+            # times as long. The redactor's jwt shape is searched the same way.
+            start=r"\be" + r"yJ",
+            run=r"[A-Za-z0-9_-]*",
         ),
         Rule(
             id="assigned-secret-literal",
@@ -439,20 +459,63 @@ def _excerpt(text: str, start: int, end: int) -> str:
     return ("..." if left > 0 else "") + raw + ("..." if right < len(text) else "")
 
 
-def _line_of(text: str, index: int) -> int:
-    return text.count("\n", 0, index) + 1
+def _line_breaks(text: str) -> list[int]:
+    """The offset of every line break in ``text``, in order."""
+    breaks: list[int] = []
+    at = text.find("\n")
+    while at != -1:
+        breaks.append(at)
+        at = text.find("\n", at + 1)
+    return breaks
+
+
+def _matches(rule: Rule, text: str) -> Iterator[re.Match[str]]:
+    """``rule``'s matches in ``text``: the ones ``finditer`` finds, in time linear in the text.
+
+    A rule without ``start`` is its pattern's ``finditer``. With it, each start
+    is matched in place; one with no match after it fails where the ``run``
+    after it ends (the run's characters are the only ones the first segment
+    takes, so no shorter segment can succeed), and a later start inside the
+    same run meets the same end with less before it, so it fails too and is
+    never tried. The scan resumes at the run's end. A match is never empty: it
+    begins with its start.
+    """
+    pattern = rule.compiled()
+    if rule.start is None or rule.run is None:
+        yield from pattern.finditer(text)
+        return
+    starts = re.compile(rule.start, rule.flags)
+    runs = re.compile(rule.run, rule.flags)
+    pos = 0
+    while (start := starts.search(text, pos)) is not None:
+        found = pattern.match(text, start.start())
+        if found is not None:
+            yield found
+            pos = found.end()
+            continue
+        run = runs.match(text, start.end())
+        pos = run.end() if run is not None else start.end()
 
 
 def scan_text(
     text: str, *, scope: str, location: str, rules: Sequence[Rule] = RULES
 ) -> list[Finding]:
-    """Report EVERY match of EVERY rule. Never returns early."""
+    """Report EVERY match of EVERY rule. Never returns early.
+
+    A finding's line is found by bisecting the offsets of the text's line
+    breaks, listed once, where counting them from the start for each finding
+    took time in the product of the findings and the text (40,000 findings in
+    1.5 MiB: about 10 s, each doubling four times as long).
+    """
     findings: list[Finding] = []
+    breaks: list[int] | None = None
     for rule in rules:
         if _allowed(location, rule.id) is not None:
             continue
-        for match in rule.compiled().finditer(text):
-            line = _line_of(text, match.start())
+        for match in _matches(rule, text):
+            if breaks is None:
+                breaks = _line_breaks(text)
+            line = bisect_left(breaks, match.start()) + 1
             findings.append(
                 Finding(
                     scope=scope,
@@ -660,6 +723,10 @@ def selftest() -> list[str]:
             problems.append(f"{rule.id}: FAILS TO FIRE on its own positive sample")
         if pattern.search(rule.negative):
             problems.append(f"{rule.id}: FIRES on its own negative sample (too broad)")
+        if (rule.start is None) != (rule.run is None):
+            problems.append(f"{rule.id}: names a start without a run, or a run without a start")
+        elif next(_matches(rule, rule.positive), None) is None:
+            problems.append(f"{rule.id}: its start and run skip its own positive sample")
     own = Path(__file__).read_text(encoding="utf-8")
     self_findings = scan_text(own, scope="tracked-content", location="tools/leakscan.py")
     if self_findings:
