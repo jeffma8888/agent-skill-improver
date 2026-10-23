@@ -96,7 +96,12 @@ _THREAD_LINE = re.compile(r"^\s*Thread:\s*(?P<id>[^\s(]+)")
 _HEADER_LINE = re.compile(
     r'^\s*(?P<number>\d+)\.\s+"(?P<title>.*)"\s*\((?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)'
 )
-_WORKSPACE_LINE = re.compile(r"^\s*Workspace:\s*(?P<path>.+?)\s*$")
+#: The path ends at its last character that is not space, so on one line, as
+#: ``splitlines`` gives it, the space after the path is tried once, where
+#: ``.+?\s*$`` tried it again from each place in it and took time in the square
+#: of the run. A line of nothing but space after the word still reads as its
+#: last space character, as it did.
+_WORKSPACE_LINE = re.compile(r"^\s*Workspace:\s*(?P<path>.*?\S|[^\S\n])\s*$")
 
 
 def render_argv(template: Sequence[str], values: dict[str, str]) -> list[str]:
