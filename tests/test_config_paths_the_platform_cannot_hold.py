@@ -125,7 +125,10 @@ class AConfigPathThePlatformCannotHoldTests(unittest.TestCase):
             with self.subTest(root=root_id[:8]):
                 self.with_extra_root(root_id, str(self.base / LONG_NAME))
                 message = self.refusal()
-                self.assertTrue(message.startswith("skill_root '"), message[:40])
+                # The id's shape is checked before its path, so each of these is
+                # refused as an id; what holds is that none reaches it raw.
+                self.assertTrue(message.startswith("[[skill_root]] #"), message[:40])
+                self.assertIn(" id '", message)
                 self.assertNotIn("i" * 200, message)
                 self.assertNotIn("R" * 20, message)
                 self.assertNotIn("\n", message)

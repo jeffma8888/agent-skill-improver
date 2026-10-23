@@ -999,6 +999,37 @@ def _load_gate(table: Mapping[str, Any]) -> GatePolicy:
     )
 
 
+#: What a ``[[skill_root]].id`` may be: the alphabet and length of a run day
+#: (``RUN_DAY_RE``), so it holds no line break, no space and no ``:``, which
+#: separates it from the file name in a ``root:name`` label (a payload file or
+#: an unlistable directory beside a skill) and the path in a snapshot digest key.
+_ROOT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def _refuse_unusable_root_id(rid: str, idx: int) -> None:
+    """Refuse a skill root id that could not be printed or stored as written.
+
+    The id is written into every candidate and receipt for a skill in that
+    root, labels the payload files and unlistable directories beside its
+    skills as ``root:name``, and is named in this module's refusals. Measured before
+    (3.11 and 3.13): an id holding a line break and then ``config error: forged`` made
+    a ``precedence`` or ``canonical`` refusal print as two lines; a ``ghp_``
+    token used as an id was printed whole by six refusals and by ``skills``,
+    and written into the receipt and the candidate of a committed ``daily``;
+    a 1,000,000-character id made each refusal about 1 MB; and ``can:onical``
+    loaded and labelled a payload file beside its skill ``can:onical:run.sh``
+    in ``skills --json``.
+    """
+    if _ROOT_ID.fullmatch(rid) and redact(rid).text == rid:
+        return
+    raise ConfigError(
+        f"[[skill_root]] #{idx} id {quoted_value(rid)} must be 1 to 64 letters, digits, "
+        "'.', '_' or '-', starting with a letter or digit, and must not look like a "
+        "credential: the id is written into every candidate and receipt for a skill in "
+        "that root and printed wherever the root's copies are listed."
+    )
+
+
 def _load_skill_roots(raw: Any, *, base_dir: Path) -> tuple[SkillRoot, ...]:
     if not isinstance(raw, list) or not raw:
         raise ConfigError("at least one [[skill_root]] is required")
@@ -1012,6 +1043,7 @@ def _load_skill_roots(raw: Any, *, base_dir: Path) -> tuple[SkillRoot, ...]:
         path = entry.get("path")
         if not isinstance(rid, str) or not rid.strip():
             raise ConfigError(f"[[skill_root]] #{idx} needs a non-empty id")
+        _refuse_unusable_root_id(rid, idx)
         if rid in seen:
             raise ConfigError(f"duplicate skill_root id {rid!r}")
         seen.add(rid)
