@@ -1286,7 +1286,21 @@ class FilesystemSkillStore:
                 copy_of_a_skill=False,
             )
         for candidate in entries:
-            is_link = candidate.is_symlink()
+            # A path the system will not take is passed over by its length, as a
+            # copy of the skill it would be: the listing that found it holds
+            # names only, and this ``lstat`` is the first call on the whole path.
+            # Any other refusal of it is raised as before.
+            try:
+                is_link = candidate.is_symlink()
+            except OSError as exc:
+                if exc.errno != errno.ENAMETOOLONG:
+                    raise
+                skip(
+                    candidate,
+                    f"a path of {len(os.fsencode(str(candidate)))} bytes, longer than this "
+                    f"system opens ({exc.strerror})",
+                )
+                continue
             if is_link and not candidate.exists():
                 skip(candidate, "a symlink whose target does not exist or cannot be reached")
                 continue
