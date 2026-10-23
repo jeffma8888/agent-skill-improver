@@ -43,6 +43,7 @@ from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
 from ..domain.integrity import verify_full_integrity
+from ..domain.redaction import named_path, quoted_value, quoted_values
 from ..domain.validation import ValidationRecord
 from ..errors import (
     AsiError,
@@ -101,7 +102,8 @@ def review_report(
     """
     if candidate.status != STATUS_VALIDATED:
         raise GateFailed(
-            f"refusing to review candidate {candidate.id}: status is {candidate.status!r}, not "
+            f"refusing to review candidate {candidate.id}: status is "
+            f"{quoted_value(candidate.status)}, not "
             f"{STATUS_VALIDATED!r}. Only a validated candidate may expose a review token or an "
             "apply command; a closed candidate (applied, rolled-back, gate-failed or blocked-run) "
             "never does, "
@@ -111,7 +113,8 @@ def review_report(
     live_sha = sha256_text(base_text)
     if live_sha != candidate.target.base_sha256:
         raise BaseHashMismatch(
-            f"refusing to review {candidate.id}: {candidate.target.canonical_path} now hashes "
+            f"refusing to review {candidate.id}: {named_path(candidate.target.canonical_path)} "
+            "now hashes "
             f"{short(live_sha)} but the candidate was written against "
             f"{short(candidate.target.base_sha256)}. The skill changed since the proposal was "
             "made, so the diff and the token would describe a file that no longer exists -- "
@@ -186,12 +189,21 @@ def apply_candidate(
         raise AutomationRefused("promotion refused: automation marker is set. " + APPLY_ENV_HINT)
     if candidate.status != STATUS_VALIDATED:
         raise GateFailed(
-            f"candidate {candidate.id} has status {candidate.status!r}; only a "
+            f"candidate {candidate.id} has status {quoted_value(candidate.status)}; only a "
             f"{STATUS_VALIDATED!r} candidate may be applied"
         )
+    # The record is checked against itself before anything in it is believed:
+    # a validated candidate whose stored gate did not pass is a record edited
+    # after its gate, and is named as tampered (as ``review`` names it) rather
+    # than refused with the reasons it carries. Measured before, with the gate
+    # read first: a stored reason holding a token and a line break was printed
+    # as two lines with the token, ten thousand of them made a refusal of a
+    # megabyte, and a reason that was not a string made ``apply`` fall with a
+    # traceback.
+    verify_full_integrity(candidate, rubrics=rubrics, action="apply")
     gate = (candidate.validation or {}).get("gate") or {}
     if not gate.get("passed"):
-        reasons = "; ".join(gate.get("reasons", [])) or "no gate decision recorded"
+        reasons = quoted_values(gate.get("reasons") or []) or "no gate decision recorded"
         raise GateFailed(f"candidate {candidate.id} did not pass the gate: {reasons}")
     # Everything below happens before the backup and before the write. The order
     # is deliberate: the record is checked against itself first, then against the
@@ -199,8 +211,8 @@ def apply_candidate(
     # record is named as tampered rather than reported as a token mismatch. Both
     # calls run the *combined* verifier: the candidate's own derived fields and
     # its persisted validation, recomputed from the validation's own outcomes,
-    # judgements and policy rather than trusted off the stored gate.
-    verify_full_integrity(candidate, rubrics=rubrics, action="apply")
+    # judgements and policy rather than trusted off the stored gate. The first
+    # of the two ran above, before the gate was read.
     # From the live read to the receipt, under the run lock ``daily`` holds: a
     # promotion while a run reads the tree would change what the run is
     # reading, and the run would record that as a skill tree mutation and
@@ -221,7 +233,8 @@ def apply_candidate(
                     candidate, earlier, approval, gate, state, clock, operator, finishing=True
                 )
             raise BaseHashMismatch(
-                f"refusing to apply {candidate.id}: {candidate.target.canonical_path} now hashes "
+                f"refusing to apply {candidate.id}: "
+                f"{named_path(candidate.target.canonical_path)} now hashes "
                 f"{short(live_sha)} but the candidate was written against "
                 f"{short(candidate.target.base_sha256)}. The skill changed since the proposal "
                 "was made -- re-run `asi daily --commit` to validate against the new base."
@@ -371,6 +384,18 @@ def _refuse_unwritable_receipt(state: StateStore, action: str, candidate: Candid
         )
 
 
+def _why_unreadable(exc: OSError) -> str:
+    """Why a read failed, without the path the error carries.
+
+    ``str(exc)`` of an ``OSError`` ends with the file name it was given, which
+    here is the record's canonical path, already named; it is shown by its
+    number and the system's words for it, or quoted when it has none.
+    """
+    if exc.errno is not None and exc.strerror:
+        return f"[Errno {exc.errno}] {exc.strerror}"
+    return quoted_value(str(exc))
+
+
 def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str = "apply") -> str:
     """Read the canonical file the candidate claims to patch.
 
@@ -380,12 +405,23 @@ def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str =
     refusing, so ``review`` does not report itself as ``apply``.
     """
     path = Path(candidate.target.canonical_path)
+    if "\x00" in str(path):
+        # No file name holds a NUL, and a read of one falls with a ``ValueError``
+        # rather than an ``OSError``: measured before, ``review`` and ``apply`` of
+        # a record whose path held one exited 70 with a traceback.
+        raise BaseHashMismatch(
+            f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} "
+            "holds a NUL character, which no file name can, so it cannot be read and the "
+            "recorded base hash and diff cannot be verified; re-run `asi daily --commit` to "
+            "propose against the configured tree."
+        )
     try:
         return str(skill_store.read_text(path))
     except OSError as exc:
         raise BaseHashMismatch(
-            f"refusing to {action} {candidate.id}: its canonical target {path} could not be read "
-            f"({exc}), so the recorded base hash and diff cannot be verified. If the skill root "
+            f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} could "
+            f"not be read ({_why_unreadable(exc)}), so the recorded base hash and diff cannot be "
+            "verified. If the skill root "
             "was moved or re-pointed, the candidate describes a file at its old path; re-run "
             "`asi daily --commit` to propose against the configured tree."
         ) from exc

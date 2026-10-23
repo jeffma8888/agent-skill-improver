@@ -279,6 +279,30 @@ def quoted_value(value: object, *, limit: int = QUOTED_VALUE_CHARS) -> str:
     return f"{text[:limit]}... [{len(text) - limit} more chars not quoted]"
 
 
+#: How long a path read from a record may be and still be named as written.
+NAMED_PATH_CHARS = 512
+
+#: A path that reads as one: letters, digits and ``_ . / ~ + -``, nothing to spell.
+_PLAIN_PATH = re.compile(r"[A-Za-z0-9_./~+-]+")
+
+
+def named_path(path: object) -> str:
+    """A path read from a stored record as a refusal names it.
+
+    Bare, as before, when it reads as a path (``_PLAIN_PATH``), is at most
+    ``NAMED_PATH_CHARS`` long and nothing in it is masked, the way the config
+    loader names a key; else ``quoted_value``, so a line break in it is spelled
+    on its line, a credential in it is masked and a long one is cut. A record's
+    canonical path is whatever was written to it: one holding a line break
+    printed the text after the break as a line of its own, and one of a
+    megabyte made a refusal of a megabyte.
+    """
+    text = str(path)
+    if len(text) <= NAMED_PATH_CHARS and _PLAIN_PATH.fullmatch(text) and redact(text).text == text:
+        return text
+    return quoted_value(text, limit=NAMED_PATH_CHARS)
+
+
 #: How many values a message lists before it says how many more there were.
 QUOTED_VALUES_SHOWN = 5
 
