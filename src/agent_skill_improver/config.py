@@ -67,6 +67,14 @@ SOURCE_KINDS = (SOURCE_CLI, SOURCE_FIXTURES)
 FAIRNESS_DIMENSIONS = ("class", "workspace", "date")
 
 
+#: Why a TOML document is refused when ``tomllib`` runs out of stack on it.
+#: The parser calls itself for each array or inline table nested in a value
+#: (two or three frames a level), so a few hundred raise ``RecursionError``,
+#: which is not a ``ValueError``. Measured before (3.11 and 3.13): ``doctor``
+#: and ``daily`` first fell with that error, exit 70, at 493 or 494 nested
+#: arrays and at 328 or 329 inline tables, in a config value or a rubric.
+TOML_TOO_DEEP = "arrays or inline tables are nested too deeply for the TOML parser to read"
+
 #: A ``$NAME`` or ``${...}`` that ``os.path.expandvars`` left in place: an unset
 #: variable, or a braced form it does not understand at all (``${NAME:-x}`` and
 #: the other shell modifiers), which it also keeps literally.
@@ -695,12 +703,17 @@ def load_config(path: str | Path, *, overrides: Mapping[str, Any] | None = None)
     config_path = _within_name_limits(Path(path).expanduser().resolve(), what="config file")
     if not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
+    # Read before the try, as a rubric is: only the parse can be too deep, and a
+    # RecursionError from anywhere else is not the document's to answer for.
+    text = _read_utf8_or_refuse(config_path, what="config file")
     try:
-        raw = tomllib.loads(_read_utf8_or_refuse(config_path, what="config file"))
+        raw = tomllib.loads(text)
     except ValueError as exc:
         # TOMLDecodeError is one; so is the plain ValueError ``int`` raises on
         # more digits than Python reads from text, which tomllib lets through.
         raise ConfigError(f"{config_path}: invalid TOML: {exc}") from exc
+    except RecursionError as exc:
+        raise ConfigError(f"{config_path}: invalid TOML: {TOML_TOO_DEEP}") from exc
     _refuse_unstorable_integers(raw, config_path)
     _refuse_nul(raw, config_path)
 
@@ -1155,6 +1168,8 @@ def _load_rubrics(
             parsed = tomllib.loads(text)
         except ValueError as exc:  # TOMLDecodeError, or an integer past the digit limit
             raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+        except RecursionError as exc:
+            raise ConfigError(f"{path}: invalid TOML: {TOML_TOO_DEEP}") from exc
         _refuse_unstorable_integers(parsed, path)
         try:
             rubric = Rubric.from_mapping(parsed, source_sha256=sha256_text(text))
