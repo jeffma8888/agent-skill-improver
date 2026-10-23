@@ -945,24 +945,36 @@ def _assert_every_skill_can_be_named(
     run_day: str, skill_ids: Sequence[str], max_candidates_per_run: int
 ) -> None:
     """Refuse, before anything is ingested, a day and skill tree whose candidate
-    ids would not fit.
+    ids would not fit; ``candidate_naming_problem`` says which and why."""
+    problem = candidate_naming_problem(run_day, skill_ids, max_candidates_per_run)
+    if problem:
+        raise ConfigError(f"{problem} No conversation was read or scored.")
+
+
+def candidate_naming_problem(
+    run_day: str, skill_ids: Sequence[str], max_candidates_per_run: int
+) -> str | None:
+    """Why some known skill's candidate id on ``run_day`` would not fit, or None.
 
     ``validate_run_day`` bounds the day's alphabet and length, and the skill id
     is a directory name with no length rule of its own, so the two together can
     still exceed the candidate id's 204 characters. The id is formed at the end,
     ``CAND-{day}-{seq}-{safe_name(skill)}``; this forms it here for every known
     skill, with the sequence number at the widest it can reach (two digits, or
-    the per-run candidate cap when that is wider), and refuses on the first one
-    that does not fit. The refusal names the cap, and how many digits fit, when
+    the per-run candidate cap when that is wider), and answers for the first one
+    that does not fit. The answer names the cap, and how many digits fit, when
     the id would fit with a two-digit sequence number, since only the cap's
     width breaks it then; it names the day and the skill otherwise, an id that
     fits only at one digit included, since no cap numbers below two. Stated limit: the sequence number also
     skips over ids a previous run of the same day already used, so a day re-run
     more than the cap allows can push it one digit wider than probed.
 
-    Measured before: a 171-digit ``[caps].max_candidates_per_run`` with a
-    date-sized day and a short skill was refused as a day or skill name too
-    long, and told to shorten them.
+    ``daily`` refuses the whole run on it before a conversation is read, and
+    ``doctor`` asks the same question for today's day, the one a run without
+    ``--day`` uses. Measured before: a 171-digit ``[caps].max_candidates_per_run``
+    with a date-sized day and a short skill was refused as a day or skill name
+    too long, and told to shorten them; and with that cap, or a 186-character
+    skill directory name, ``doctor`` said ready while ``daily`` exited 3.
     """
     seq_ceiling = max(99, max_candidates_per_run)
     for skill_id in sorted(skill_ids):
@@ -977,16 +989,17 @@ def _assert_every_skill_can_be_named(
                     for width in range(2, digits)
                     if _names_a_candidate(f"CAND-{run_day}-{'9' * width}-{name}")
                 )
-                raise ConfigError(
+                return (
                     f"[caps].max_candidates_per_run has {digits} digits, too many to number "
                     f"a candidate for skill {skill_id!r} on run day {run_day!r}: {exc}. Lower "
-                    f"the cap to at most {fits} digits. No conversation was read or scored."
-                ) from None
-            raise ConfigError(
+                    f"the cap to at most {fits} digits."
+                )
+            return (
                 f"run day {run_day!r} ({len(run_day)} characters) cannot name a candidate for "
                 f"skill {skill_id!r} ({len(skill_id)} characters): {exc}. Use a shorter --day "
-                f"or a shorter skill directory name. No conversation was read or scored."
-            ) from None
+                f"or a shorter skill directory name."
+            )
+    return None
 
 
 def _names_a_candidate(candidate_id: str) -> bool:

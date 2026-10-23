@@ -394,6 +394,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         _err(f"config error: {exc}\n")
         return RC_REFUSED
+    # One day for every check below that asks what today's run would do.
+    today = day_key(SystemClock().now())
     store = build_skill_store(config)
     missing = [r.id for r in store.missing_roots()]
     if missing:
@@ -408,6 +410,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"no skill document was discovered under the present root(s) {present}; `daily` "
             "will stand down with nothing to propose"
         )
+    else:
+        # The run forms every known skill's longest candidate id before it
+        # reads a conversation and refuses the whole run when one would not
+        # fit; the same question here, for the day a run without --day uses.
+        # Measured before: a 186-character skill directory name, or a 171-digit
+        # [caps].max_candidates_per_run, left this report at ready while that
+        # run exited 3. A longer --day is refused by the run alone.
+        from .app.daily import candidate_naming_problem
+
+        naming = candidate_naming_problem(
+            today, store.known_skill_ids(), config.caps.max_candidates_per_run
+        )
+        if naming:
+            problems.append(
+                f"today's run would be refused before any conversation is read: {naming}"
+            )
     for role in ("scorer", "improver", "judge"):
         if role not in config.model_roles:
             problems.append(f"no [model.{role}] command configured")
@@ -530,7 +548,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # past day (only `daily --day` for that day would). Measured before: with
     # today's checkpoint truncated, this report said ready.
     unreadable_checkpoints: list[dict[str, str]] = []
-    today = day_key(SystemClock().now())
     if state_present and not layout_problems and (config.state_dir / "checkpoints").is_dir():
         todays = state.checkpoint_path(today)
         for checkpoint in state.unreadable_checkpoints():
