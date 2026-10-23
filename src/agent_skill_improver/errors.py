@@ -19,7 +19,21 @@ class AsiError(Exception):
 
 
 class ConfigError(AsiError):
-    """Configuration or rubric definition is invalid."""
+    r"""Configuration or rubric definition is invalid.
+
+    Its message is one line: a line break inside it is spelled (``\n``,
+    ``\r``), not obeyed. Every refusal of this kind is written as one line,
+    but many name a value the config supplied (a skill root's path, the config
+    or rubric file's own path), and a path may hold a line break; printed raw,
+    the text after it stood at column 0 of stderr as a line of its own, and a
+    path ending ``\nconfig error: ...`` forged a refusal there. Spelling it
+    here covers every such site at once, wherever the message goes: stderr,
+    ``doctor``'s problem list or a receipt. Measured before: one refusal of two
+    nested roots whose paths each held a line break printed 3 lines.
+    """
+
+    def __init__(self, message: object = "") -> None:
+        super().__init__(str(message).replace("\r", "\\r").replace("\n", "\\n"))
 
 
 class RecordDefect(AsiError):
