@@ -9,7 +9,7 @@ into a terminal, and forwarding that to a model command is an avoidable leak.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 
@@ -277,6 +277,32 @@ def quoted_value(value: object, *, limit: int = QUOTED_VALUE_CHARS) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}... [{len(text) - limit} more chars not quoted]"
+
+
+#: How many values a message lists before it says how many more there were.
+QUOTED_VALUES_SHOWN = 5
+
+
+def quoted_values(
+    values: Iterable[object],
+    *,
+    shown: int = QUOTED_VALUES_SHOWN,
+    name: Callable[[object], str] = quoted_value,
+) -> str:
+    """Values a message lists, each as ``name`` names it, the first few only.
+
+    A refusal that lists keys or ids read from a record on disk quotes each one
+    (``quoted_value`` unless the caller names them another way that also
+    quotes what is not plain), so a key holding a credential is masked and one
+    holding a line break stays on its line, and names only the first ``shown``
+    with a count of the rest: a record holding ten thousand of them makes one
+    short line, not one as long as the record.
+    """
+    items = list(values)
+    parts = [name(item) for item in items[:shown]]
+    if len(items) > shown:
+        parts.append(f"and {len(items) - shown} more")
+    return ", ".join(parts)
 
 
 def kept_prose(value: object, *, limit: int | None = None) -> str:

@@ -39,6 +39,7 @@ from .candidate import (
     challenge_for,
     make_patch,
 )
+from .redaction import quoted_value, quoted_values
 from .rubric import Rubric
 from .skills import SKILL_FILENAME
 from .validation import CASE_TARGET, TargetCaseRef, ValidationRecord
@@ -62,6 +63,16 @@ def _is_sha256(value: str) -> bool:
     return len(value) == _SHA256_LEN and all(c in "0123456789abcdef" for c in value)
 
 
+def _recorded_digest(value: str) -> str:
+    """A hash read from the record as a refusal shows it.
+
+    Its 12-character prefix, as before, when it is a digest; quoted otherwise
+    (``quoted_value``), since a prefix of anything else is a raw slice of the
+    record: a line break first and 11 characters of a forged line after it.
+    """
+    return short(value) if _is_sha256(value) else quoted_value(value)
+
+
 def target_identity_problems(target: TargetRef) -> list[str]:
     """Every way the target no longer identifies one canonical skill document.
 
@@ -81,13 +92,14 @@ def target_identity_problems(target: TargetRef) -> list[str]:
     path = PurePath(target.canonical_path)
     if path.name != SKILL_FILENAME:
         problems.append(
-            f"target.canonical_path names {path.name!r}, but only {SKILL_FILENAME} is ever written"
+            f"target.canonical_path names {quoted_value(path.name)}, but only {SKILL_FILENAME} "
+            "is ever written"
         )
     parent = path.parent.name
     if target.skill_id.strip() and parent and parent != target.skill_id:
         problems.append(
-            f"target.skill_id is {target.skill_id!r} but target.canonical_path sits in "
-            f"{parent!r}: the record names two different skills"
+            f"target.skill_id is {quoted_value(target.skill_id)} but target.canonical_path "
+            f"sits in {quoted_value(parent)}: the record names two different skills"
         )
     if not _is_sha256(target.base_sha256):
         problems.append("target.base_sha256 is not a 64-character lowercase sha256 digest")
@@ -136,8 +148,9 @@ def derived_field_mismatches(candidate: Candidate, *, base_text: str | None = No
     recomputed = sha256_text(patch.new_text)
     if patch.new_text_sha256 != recomputed:
         problems.append(
-            f"patch.new_text_sha256 records {short(patch.new_text_sha256)} but new_text hashes "
-            f"{short(recomputed)}: the reviewed text and its recorded hash disagree"
+            f"patch.new_text_sha256 records {_recorded_digest(patch.new_text_sha256)} but "
+            f"new_text hashes {short(recomputed)}: the reviewed text and its recorded hash "
+            "disagree"
         )
     expected_challenge = challenge_for(candidate.id, candidate.target.base_sha256, recomputed)
     if candidate.approval_challenge != expected_challenge:
@@ -152,8 +165,8 @@ def derived_field_mismatches(candidate: Candidate, *, base_text: str | None = No
     live = sha256_text(base_text)
     if candidate.target.base_sha256 != live:
         problems.append(
-            f"target.base_sha256 records {short(candidate.target.base_sha256)} but the live base "
-            f"text hashes {short(live)}"
+            f"target.base_sha256 records {_recorded_digest(candidate.target.base_sha256)} but "
+            f"the live base text hashes {short(live)}"
         )
         return problems
     expected_patch = make_patch(
@@ -240,7 +253,7 @@ def validation_mismatches(
     problems: list[str] = []
     if record.candidate_id != candidate.id:
         problems.append(
-            f"validation.candidate_id is {record.candidate_id!r} but this is candidate "
+            f"validation.candidate_id is {quoted_value(record.candidate_id)} but this is candidate "
             f"{candidate.id!r}: the validation record describes a different candidate"
         )
     if record.base_sha256 != candidate.target.base_sha256:
@@ -273,9 +286,15 @@ def validation_mismatches(
         omitted = sorted(r.key for r in claimed_refs - bound_refs)
         added = sorted(r.key for r in bound_refs - claimed_refs)
         if omitted:
-            detail.append(f"claimed by the candidate but not bound by the validation: {omitted}")
+            detail.append(
+                "claimed by the candidate but not bound by the validation: "
+                f"[{quoted_values(omitted)}]"
+            )
         if added:
-            detail.append(f"bound by the validation but not claimed by the candidate: {added}")
+            detail.append(
+                "bound by the validation but not claimed by the candidate: "
+                f"[{quoted_values(added)}]"
+            )
         problems.append(
             "validation.target_refs is not exactly this candidate's own rubric_failures as "
             "(rubric_id, conversation_id, criterion_id) triples: "
@@ -287,7 +306,8 @@ def validation_mismatches(
     invented = sorted(r.key for r in replayed_refs - claimed_refs)
     if invented:
         problems.append(
-            f"validation.outcomes has target case(s) {invented} that are not among this "
+            f"validation.outcomes has target case(s) [{quoted_values(invented)}] that are not "
+            "among this "
             "candidate's own rubric_failures: a target outcome must be about a failure this "
             "candidate actually claims to fix, named by rubric as well as by conversation and "
             "criterion, not an invented, unrelated or re-attributed case"
@@ -297,7 +317,7 @@ def validation_mismatches(
         if unreplayed:
             problems.append(
                 f"status is {candidate.status!r}, which asserts the gate passed, but claimed "
-                f"target case(s) {unreplayed} have no persisted replay outcome: a "
+                f"target case(s) [{quoted_values(unreplayed)}] have no persisted replay outcome: a "
                 "promotion-eligible candidate must carry a measured target replay for every "
                 "failure it claims to fix, and a partial replay is not the evidence the status "
                 "advertises"
@@ -307,7 +327,8 @@ def validation_mismatches(
         bound_version = bound_versions.get(ref.rubric_id)
         if bound_version is not None and bound_version != ref.rubric_version:
             problems.append(
-                f"rubric_failures names {ref.rubric_id!r} at version {ref.rubric_version} but "
+                f"rubric_failures names {quoted_value(ref.rubric_id)} at version "
+                f"{quoted_value(ref.rubric_version)} but "
                 f"validation.rubrics binds that rubric at version {bound_version}: the failure "
                 "was measured by a different version of the examiner than the gate was"
             )
@@ -319,18 +340,21 @@ def validation_mismatches(
             live = rubrics.get(binding.rubric_id)
             if live is None:
                 problems.append(
-                    f"validation.rubrics references {binding.rubric_id!r}, which is not among "
+                    f"validation.rubrics references {quoted_value(binding.rubric_id)}, which is "
+                    "not among "
                     "the currently configured rubrics"
                 )
                 continue
             if live.version != binding.version:
                 problems.append(
-                    f"validation.rubrics[{binding.rubric_id!r}].version is {binding.version} but "
+                    f"validation.rubrics[{quoted_value(binding.rubric_id)}].version is "
+                    f"{binding.version} but "
                     f"the currently configured rubric is version {live.version}"
                 )
             if live.source_sha256 != binding.source_sha256:
                 problems.append(
-                    f"validation.rubrics[{binding.rubric_id!r}].source_sha256 does not match the "
+                    f"validation.rubrics[{quoted_value(binding.rubric_id)}].source_sha256 does "
+                    "not match the "
                     "currently configured rubric's source: the criteria that decided this gate "
                     "are not the criteria configured now"
                 )
@@ -342,12 +366,19 @@ def validation_mismatches(
                 continue
             if live_rubric.criterion(outcome.case.criterion_id) is None:
                 problems.append(
-                    f"validation.outcomes case {outcome.case.key!r} says it was scored by "
-                    f"{outcome.rubric_id!r}, but that rubric has no criterion "
-                    f"{outcome.case.criterion_id!r}: the outcome names an examiner that cannot "
+                    f"validation.outcomes case {quoted_value(outcome.case.key)} says it was "
+                    f"scored by {quoted_value(outcome.rubric_id)}, but that rubric has no "
+                    f"criterion {quoted_value(outcome.case.criterion_id)}: the outcome names an "
+                    "examiner that cannot "
                     "have produced it"
                 )
     return problems
+
+
+#: How many problems a tampered-record refusal lists before it counts the rest.
+#: Each is one line, its quoted values bounded; a record edited to differ in ten
+#: thousand places is refused in a screenful, with the full count in its first line.
+PROBLEMS_SHOWN = 20
 
 
 def verify_full_integrity(
@@ -368,10 +399,13 @@ def verify_full_integrity(
     problems += validation_mismatches(candidate, rubrics=rubrics)
     if not problems:
         return
+    listed = [f"  - {p}" for p in problems[:PROBLEMS_SHOWN]]
+    if len(problems) > PROBLEMS_SHOWN:
+        listed.append(f"  - and {len(problems) - PROBLEMS_SHOWN} more not shown")
     raise CandidateTampered(
         f"refusing to {action} candidate {candidate.id}: {len(problems)} derived field(s) do not "
         "match a fresh recomputation, so the record has changed since it was written.\n"
-        + "\n".join(f"  - {p}" for p in problems)
+        + "\n".join(listed)
         + "\n  An approval token is derived from the candidate's content, so a record edited "
         "after review must never be authorised by the token printed before it. Delete this "
         "candidate and re-run `asi daily --commit` to propose and validate the change again; "

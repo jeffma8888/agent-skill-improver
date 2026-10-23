@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_JUDGEMENT, SCHEMA_VALIDATION
-from .redaction import kept_prose, quoted_value
+from .redaction import kept_prose, quoted_value, quoted_values
 from .rubric import Verdict
 from .scoring import MAX_RATIONALE_CHARS
 
@@ -411,7 +412,8 @@ def _expect_exact_keys(raw: Mapping[str, Any], expected: frozenset, *, label: st
     if missing:
         raise ValueError(f"{label} is missing key(s): {', '.join(sorted(missing))}")
     if unknown:
-        raise ValueError(f"{label} carries unknown key(s): {', '.join(sorted(unknown))}")
+        shown = quoted_values(sorted(unknown), name=_named_key)
+        raise ValueError(f"{label} carries unknown key(s): {shown}")
 
 
 def _expect_str(raw: Mapping[str, Any], key: str, *, label: str) -> str:
@@ -483,7 +485,8 @@ def _expect_sha256(raw: Mapping[str, Any], key: str, *, label: str) -> str:
     value = _expect_str(raw, key, label=label)
     if not _is_sha256_hex(value):
         raise ValueError(
-            f"{label}.{key} must be a 64-character lowercase sha256 hex digest, got {value!r}"
+            f"{label}.{key} must be a 64-character lowercase sha256 hex digest, "
+            f"got {quoted_value(value)}"
         )
     return value
 
@@ -498,11 +501,15 @@ def _parse_case(raw: Any, *, label: str) -> ReplayCase:
     criterion_id = _expect_str(raw, "criterion_id", label=label)
     kind = _expect_str(raw, "kind", label=label)
     if kind not in (CASE_TARGET, CASE_HOLDOUT):
-        raise ValueError(f"{label}.kind must be {CASE_TARGET!r} or {CASE_HOLDOUT!r}, got {kind!r}")
+        raise ValueError(
+            f"{label}.kind must be {CASE_TARGET!r} or {CASE_HOLDOUT!r}, got {quoted_value(kind)}"
+        )
     case = ReplayCase(conversation_id=conversation_id, criterion_id=criterion_id, kind=kind)
     key = _expect_str(raw, "key", label=label)
     if key != case.key:
-        raise ValueError(f"{label}.key is {key!r} but recomputes to {case.key!r}")
+        raise ValueError(
+            f"{label}.key is {quoted_value(key)} but recomputes to {quoted_value(case.key)}"
+        )
     return case
 
 
@@ -552,7 +559,7 @@ def _parse_judgement(raw: Any, *, index: int, seed: str) -> Judgement:
     _expect_exact_keys(raw, _JUDGEMENT_KEYS, label=label)
     schema = _expect_str(raw, "schema", label=label)
     if schema != SCHEMA_JUDGEMENT:
-        raise ValueError(f"{label}.schema must be {SCHEMA_JUDGEMENT!r}, got {schema!r}")
+        raise ValueError(f"{label}.schema must be {SCHEMA_JUDGEMENT!r}, got {quoted_value(schema)}")
     case = _parse_case(raw["case"], label=f"{label}.case")
     if case.kind != CASE_TARGET:
         raise ValueError(
@@ -562,7 +569,8 @@ def _parse_judgement(raw: Any, *, index: int, seed: str) -> Judgement:
     preferred_label = _expect_str(raw, "preferred_label", label=label)
     if preferred_label not in ("A", "B", "tie"):
         raise ValueError(
-            f"{label}.preferred_label must be 'A', 'B' or 'tie', got {preferred_label!r}"
+            f"{label}.preferred_label must be 'A', 'B' or 'tie', "
+            f"got {quoted_value(preferred_label)}"
         )
     preferred_arm = _expect_str(raw, "preferred_arm", label=label)
     # Kept masked and clipped on the way in (parse_judgement); the same on the
@@ -575,8 +583,9 @@ def _parse_judgement(raw: Any, *, index: int, seed: str) -> Judgement:
         expected_arm = arms[preferred_label]
     if preferred_arm != expected_arm:
         raise ValueError(
-            f"{label}.preferred_arm is {preferred_arm!r} but the blind mapping for seed "
-            f"{seed!r} and case {case.key!r} says label {preferred_label!r} is arm "
+            f"{label}.preferred_arm is {quoted_value(preferred_arm)} but the blind mapping "
+            f"for seed {quoted_value(seed)} and case {quoted_value(case.key)} says label "
+            f"{preferred_label!r} is arm "
             f"{expected_arm!r}: the arm was unblinded to a different answer than it was assigned"
         )
     return Judgement(
@@ -600,7 +609,7 @@ _POLICY_KEYS = frozenset(
 def _expect_nonneg_int(raw: Mapping[str, Any], key: str, *, label: str) -> int:
     value = _expect_int(raw, key, label=label)
     if value < 0:
-        raise ValueError(f"{label}.{key} must be >= 0, got {value}")
+        raise ValueError(f"{label}.{key} must be >= 0, got {quoted_value(value)}")
     return value
 
 
@@ -631,6 +640,35 @@ def parse_gate_policy(raw: Any, *, label: str = "gate.policy") -> GatePolicy:
 _GATE_KEYS = frozenset({"passed", "reasons", "metrics", "policy"})
 
 
+#: A key that reads as a field name, shown as ``path.key``; any other is quoted.
+_PLAIN_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+def _plain_key(key: object) -> str | None:
+    """``key`` when it reads as a field name and quoting would leave it as it is.
+
+    A key read from the record on disk may hold anything: a line break that
+    would start a forged line of the refusal, a credential, a megabyte. One
+    that a field name could be is named bare, as before, the way the config
+    loader names a plain key; ``None`` for any other, which is quoted.
+    """
+    if isinstance(key, str) and _PLAIN_KEY.fullmatch(key) and quoted_value(key) == repr(key):
+        return key
+    return None
+
+
+def _named_key(key: object) -> str:
+    """A key a refusal lists: bare when it is plain (``_plain_key``), else quoted."""
+    plain = _plain_key(key)
+    return quoted_value(key) if plain is None else plain
+
+
+def _key_path(path: str, key: object) -> str:
+    """``path.key`` for a plain key (``_plain_key``), ``path[<quoted key>]`` otherwise."""
+    plain = _plain_key(key)
+    return f"{path}[{quoted_value(key)}]" if plain is None else f"{path}.{plain}"
+
+
 def _strict_equal(a: Any, b: Any, *, path: str) -> list[str]:
     """Deep equality that also refuses a type mismatch a loose ``==`` would miss.
 
@@ -639,15 +677,18 @@ def _strict_equal(a: Any, b: Any, *, path: str) -> list[str]:
     tamper this function exists to catch.
     """
     if type(a) is not type(b):
-        return [f"{path}: type {type(a).__name__} != {type(b).__name__} ({a!r} vs {b!r})"]
+        return [
+            f"{path}: type {type(a).__name__} != {type(b).__name__} "
+            f"({quoted_value(a)} vs {quoted_value(b)})"
+        ]
     if isinstance(a, dict):
         problems = []
         keys = set(a) | set(b)
         for key in sorted(keys):
             if key not in a or key not in b:
-                problems.append(f"{path}.{key}: present in one side only")
+                problems.append(f"{_key_path(path, key)}: present in one side only")
                 continue
-            problems.extend(_strict_equal(a[key], b[key], path=f"{path}.{key}"))
+            problems.extend(_strict_equal(a[key], b[key], path=_key_path(path, key)))
         return problems
     if isinstance(a, list):
         if len(a) != len(b):
@@ -657,7 +698,7 @@ def _strict_equal(a: Any, b: Any, *, path: str) -> list[str]:
             problems.extend(_strict_equal(x, y, path=f"{path}[{i}]"))
         return problems
     if a != b:
-        return [f"{path}: {a!r} != {b!r}"]
+        return [f"{path}: {quoted_value(a)} != {quoted_value(b)}"]
     return []
 
 
@@ -684,7 +725,7 @@ class RubricBinding:
         _expect_exact_keys(raw, _RUBRIC_BINDING_KEYS, label=label)
         version = _expect_int(raw, "version", label=label)
         if version < 1:
-            raise ValueError(f"{label}.version must be >= 1, got {version}")
+            raise ValueError(f"{label}.version must be >= 1, got {quoted_value(version)}")
         return RubricBinding(
             rubric_id=_expect_nonempty_str(raw, "rubric_id", label=label),
             version=version,
@@ -755,7 +796,9 @@ class ValidationRecord:
         _expect_exact_keys(raw, _RECORD_KEYS, label="validation")
         schema = _expect_str(raw, "schema", label="validation")
         if schema != SCHEMA_VALIDATION:
-            raise ValueError(f"validation.schema must be {SCHEMA_VALIDATION!r}, got {schema!r}")
+            raise ValueError(
+                f"validation.schema must be {SCHEMA_VALIDATION!r}, got {quoted_value(schema)}"
+            )
         gate_raw = _expect_mapping(raw["gate"], label="validation.gate")
         _expect_exact_keys(gate_raw, _GATE_KEYS, label="validation.gate")
         policy = parse_gate_policy(gate_raw["policy"], label="validation.gate.policy")
@@ -780,7 +823,8 @@ class ValidationRecord:
         for binding in rubrics:
             if binding.rubric_id in seen_rubric_ids:
                 raise ValueError(
-                    f"validation.rubrics has a duplicate rubric_id {binding.rubric_id!r}"
+                    "validation.rubrics has a duplicate rubric_id "
+                    f"{quoted_value(binding.rubric_id)}"
                 )
             seen_rubric_ids.add(binding.rubric_id)
 
@@ -794,7 +838,9 @@ class ValidationRecord:
         claimed_ref_keys: set[str] = set()
         for ref in target_refs:
             if ref.key in claimed_ref_keys:
-                raise ValueError(f"validation.target_refs has a duplicate ref {ref.key!r}")
+                raise ValueError(
+                    f"validation.target_refs has a duplicate ref {quoted_value(ref.key)}"
+                )
             claimed_ref_keys.add(ref.key)
 
         outcomes_raw = raw["outcomes"]
@@ -808,18 +854,21 @@ class ValidationRecord:
             # same criterion id, and collapsing them would let one rubric's
             # outcome silently stand in for another's.
             if outcome.ref.key in seen_outcome_refs:
-                raise ValueError(f"validation.outcomes has a duplicate case {outcome.ref.key!r}")
+                raise ValueError(
+                    f"validation.outcomes has a duplicate case {quoted_value(outcome.ref.key)}"
+                )
             seen_outcome_refs.add(outcome.ref.key)
             first_kind = kind_of_case.setdefault(outcome.case.key, outcome.case.kind)
             if first_kind != outcome.case.kind:
                 raise ValueError(
-                    f"validation.outcomes records case {outcome.case.key!r} as both "
+                    f"validation.outcomes records case {quoted_value(outcome.case.key)} as both "
                     f"{first_kind!r} and {outcome.case.kind!r}: one case cannot be both the "
                     "failure under repair and untouched control evidence"
                 )
             if outcome.case.kind == CASE_TARGET and outcome.ref.key not in claimed_ref_keys:
                 raise ValueError(
-                    f"validation.outcomes has a target case {outcome.ref.key!r} that is not among "
+                    f"validation.outcomes has a target case {quoted_value(outcome.ref.key)} that "
+                    "is not among "
                     "validation.target_refs: a target outcome must be evidence about a failure "
                     "this record claims to fix, named by rubric as well as by conversation and "
                     "criterion"
@@ -836,9 +885,9 @@ class ValidationRecord:
             extra = sorted(seen_rubric_ids - required_rubric_ids)
             detail = []
             if missing:
-                detail.append(f"missing binding(s) for {missing}")
+                detail.append(f"missing binding(s) for [{quoted_values(missing)}]")
             if extra:
-                detail.append(f"unused binding(s) for {extra}")
+                detail.append(f"unused binding(s) for [{quoted_values(extra)}]")
             raise ValueError(
                 "validation.rubrics does not exactly match the rubric ids the outcomes claim to "
                 "have been scored against: " + "; ".join(detail)
@@ -855,12 +904,13 @@ class ValidationRecord:
         for judgement in judgements:
             if judgement.case.key in seen_judgement_keys:
                 raise ValueError(
-                    f"validation.judgements has a duplicate case {judgement.case.key!r}"
+                    f"validation.judgements has a duplicate case {quoted_value(judgement.case.key)}"
                 )
             seen_judgement_keys.add(judgement.case.key)
             if judgement.case.key not in target_outcome_keys:
                 raise ValueError(
-                    f"validation.judgements references case {judgement.case.key!r}, which is not "
+                    f"validation.judgements references case {quoted_value(judgement.case.key)}, "
+                    "which is not "
                     "among this record's own target outcomes: a judgement must be about a case "
                     "that was actually replayed as a target, not an absent or invented one"
                 )
@@ -870,7 +920,8 @@ class ValidationRecord:
         if evidence_model_calls != expected_calls:
             distinct_scored_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
             raise ValueError(
-                f"validation.evidence_model_calls is {evidence_model_calls} but this record's own "
+                f"validation.evidence_model_calls is {quoted_value(evidence_model_calls)} but "
+                "this record's own "
                 f"evidence derives exactly {expected_calls}: {len(outcomes)} outcome(s) across "
                 f"{len(distinct_scored_pairs)} distinct (conversation, rubric) pair(s) at a "
                 f"baseline and a candidate call each, plus {len(judgements)} judgement(s). This "
