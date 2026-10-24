@@ -37,7 +37,7 @@ from __future__ import annotations
 import os
 import shlex
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from pathlib import Path
 
@@ -136,7 +136,9 @@ def review_report(
         "canonical_path": candidate.target.canonical_path,
         "base_sha256": candidate.target.base_sha256,
         "patch_sha256": candidate.patch.new_text_sha256,
-        "mirror_paths": list(candidate.target.mirror_paths),
+        # No ``mirror_paths`` from the record: neither the token nor the
+        # integrity check binds the list it carries, so ``cmd_review`` adds the
+        # live inventory's, from the store, once it has judged the target.
         "hypothesis": candidate.hypothesis,
         "intended_change": candidate.intended_change,
         "risks": list(candidate.risks),
@@ -232,7 +234,15 @@ def apply_candidate(
                 approval.verify(expected_token=candidate.required_approval_token)
                 _refuse_unwritable_receipt(state, "apply", candidate)
                 return _record_apply(
-                    candidate, earlier, approval, gate, state, clock, operator, finishing=True
+                    candidate,
+                    earlier,
+                    approval,
+                    gate,
+                    state,
+                    clock,
+                    operator,
+                    mirror_paths=skill_store.mirror_paths_of(Path(candidate.target.canonical_path)),
+                    finishing=True,
                 )
             raise BaseHashMismatch(
                 f"refusing to apply {candidate.id}: "
@@ -262,6 +272,10 @@ def apply_candidate(
             action="write",
             skill_id=candidate.target.skill_id,
         )
+        # The copies the receipt records as not written are the live
+        # inventory's, not the list the record carries, which neither the token
+        # nor the integrity check binds.
+        mirror_paths = skill_store.mirror_paths_of(Path(candidate.target.canonical_path))
         # The receipt is written last, since it records the write; its path is
         # judged first, before the backup directory and the skill write, since
         # an apply whose receipt cannot be written would still have changed the
@@ -279,7 +293,9 @@ def apply_candidate(
             skill_id=candidate.target.skill_id,
             actor=f"human:{operator or 'unspecified'}",
         )
-        return _record_apply(candidate, receipt, approval, gate, state, clock, operator)
+        return _record_apply(
+            candidate, receipt, approval, gate, state, clock, operator, mirror_paths=mirror_paths
+        )
 
 
 def _record_apply(
@@ -291,6 +307,7 @@ def _record_apply(
     clock: Clock,
     operator: str,
     *,
+    mirror_paths: Sequence[str],
     finishing: bool = False,
 ) -> dict[str, Any]:
     applied = Candidate(
@@ -323,7 +340,7 @@ def _record_apply(
         "approval": approval.to_dict(),
         "write": receipt.to_dict(),
         "gate": gate,
-        "mirror_paths_not_written": list(candidate.target.mirror_paths),
+        "mirror_paths_not_written": list(mirror_paths),
     }
     if finishing:
         out["finishes_an_earlier_run"] = True

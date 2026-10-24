@@ -60,7 +60,7 @@ from .domain.isolation import (
 from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
-from .domain.redaction import quoted_value, redact
+from .domain.redaction import named_path, quoted_value, redact
 from .app.state import DIR_MODE, OPEN_STATUSES, SET_ASIDE_KINDS, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
@@ -1355,6 +1355,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     store.assert_write_target(
         Path(candidate.target.canonical_path), action="review", skill_id=candidate.target.skill_id
     )
+    # The mirror copies `apply` does not write, as the live inventory holds
+    # them: the record's own list is bound by neither the token nor the
+    # integrity check, and was printed as written. Each is a path on disk, so
+    # it is named as a refusal names one (`named_path`): bare when it reads
+    # as a path, else quoted, masked and cut.
+    report["mirror_paths"] = list(store.mirror_paths_of(Path(candidate.target.canonical_path)))
     if args.json:
         _say_json(report)
         return 0
@@ -1404,7 +1410,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     out += ["", "ROLLBACK", *quoted(report["rollback"]), ""]
     if report["mirror_paths"]:
         out.append("MIRROR COPIES (not written by apply):")
-        out += [one_line(f"  - {p}") for p in report["mirror_paths"]]
+        out += [one_line(f"  - {named_path(p)}") for p in report["mirror_paths"]]
         out.append("")
     out += ["EVIDENCE (rubric failures this claims to fix)"]
     for failure in report["rubric_failures"]:

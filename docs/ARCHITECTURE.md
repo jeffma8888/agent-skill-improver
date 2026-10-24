@@ -359,6 +359,10 @@ The interlock is structural, not a flag:
   in `[guard].protected_skill_ids` are made by one method, `assert_write_target`,
   which `review` also asks before it shows a token and `apply` before it makes
   the backup directory, so the three cannot ask different questions.
+  The mirror copies `review` lists and the apply receipt records as not
+  written come from the same store (`mirror_paths_of`), as the tree holds
+  them, never from the list the candidate record carries, which neither the
+  token nor the integrity check binds.
   The walk judges one instant, so the document is then addressed through a
   handle on its own directory, opened component by component below the root
   with `O_NOFOLLOW` (`_open_parent_pinned`): the hash read, the backup bytes,

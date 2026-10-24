@@ -1065,6 +1065,26 @@ class FilesystemSkillStore:
         self._assert_not_a_protected_skill(target, group, skill_id, verb=write)
         return target
 
+    def mirror_paths_of(self, path: Path) -> tuple[str, ...]:
+        """The mirror copies the live inventory holds of the skill whose canonical copy is ``path``.
+
+        ``review`` lists these as the copies ``apply`` does not write, and
+        ``apply`` records them in its receipt as not written, in place of the
+        list the candidate record carries, which neither the approval token nor
+        the integrity check binds. Measured before: a record's list edited after
+        validation was printed by ``review`` as written (a token in a path
+        whole, a path of a megabyte, ten thousand paths), an emptied list hid
+        the mirror the tree holds, and ``apply`` recorded the edited list in its
+        receipt. Empty when ``path`` is not the canonical copy of a skill, which
+        ``review`` and a first run of ``apply`` have refused by then; the run
+        that finishes an earlier apply judges no target, and asks this before it
+        records the write.
+        """
+        kind, group = classify_target(self.groups(refresh=True), Path(path).resolve())
+        if kind != "canonical" or group is None:
+            return ()
+        return tuple(str(m.path) for m in group.mirrors)
+
     def _assert_not_a_protected_skill(
         self, target: Path, group: SkillGroup | None, skill_id: str, *, verb: str
     ) -> None:

@@ -323,7 +323,7 @@ class Candidate:
             root_id=str(target_raw["root_id"]),
             canonical_path=str(target_raw["canonical_path"]),
             base_sha256=str(target_raw["base_sha256"]),
-            mirror_paths=tuple(str(p) for p in target_raw.get("mirror_paths", [])),
+            mirror_paths=_strings(target_raw.get("mirror_paths", []), "target.mirror_paths"),
         )
         failures = tuple(
             RubricFailureRef(
@@ -355,7 +355,7 @@ class Candidate:
             created_at=str(raw["created_at"]),
             hypothesis=str(raw.get("hypothesis", "")),
             intended_change=str(raw.get("intended_change", "")),
-            risks=tuple(str(x) for x in raw.get("risks", [])),
+            risks=_strings(raw.get("risks", []), "risks"),
             rollback=str(raw.get("rollback", "")),
             target=target,
             rubric_failures=failures,
@@ -365,7 +365,7 @@ class Candidate:
             status=str(raw.get("status", STATUS_PROPOSED)),
             improver_command_id=str(raw.get("improver_command_id", "")),
             validation=validation,
-            notes=tuple(str(x) for x in raw.get("notes", [])),
+            notes=_strings(raw.get("notes", []), "notes"),
         )
 
 
@@ -392,6 +392,25 @@ def _objects(value: Any, what: str) -> list[Mapping[str, Any]]:
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
         raise ValueError(f"{what} must be an array, got {type(value).__name__}")
     return [_object(item, f"{what}[{index}]") for index, item in enumerate(value)]
+
+
+def _strings(value: Any, what: str) -> tuple[str, ...]:
+    """``value`` as the array of strings the record's shape says ``what`` is.
+
+    ``target.mirror_paths``, ``risks`` and ``notes`` used to be read with
+    ``str()`` of each item of whatever the field held, so an edited record
+    whose field was one string was read a character at a time (a path of eight
+    characters became eight mirror paths of one character each) and one whose
+    items were objects or numbers was read as their ``str``. Neither is a
+    record this tool wrote, so the loader refuses both, the field named and an
+    item by its position; the type is named, never the value.
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{what} must be an array of strings, got {type(value).__name__}")
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"{what}[{index}] must be a string, got {type(item).__name__}")
+    return tuple(value)
 
 
 MIN_HYPOTHESIS_CHARS = 40
