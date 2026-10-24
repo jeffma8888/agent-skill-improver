@@ -1472,31 +1472,38 @@ def cmd_apply(args: argparse.Namespace) -> int:
         operator=args.operator or os.environ.get("USER", ""),
         rubrics=rubrics,
     )
-    if args.json:
-        _say_json(result)
-    else:
-        write = result["write"]
-        _say(
-            "\n".join(
-                [
-                    f"applied {result['candidate_id']} to {write['path']}",
-                    *(
-                        [
-                            "  finishes        an earlier run of this apply, which wrote the "
-                            "skill and did not record it"
-                        ]
-                        if result.get("finishes_an_earlier_run")
-                        else []
-                    ),
-                    f"  previous sha256 {write['previous_sha256']}",
-                    f"  new sha256      {write['new_sha256']}",
-                    f"  backup          {write['backup_path']}",
-                    "  rollback        " + shlex.join(["asi", "rollback", result["candidate_id"]]),
-                    f"  (or manually)   {write['rollback_command']}",
-                ]
-            )
-            + "\n"
+    write = result["write"]
+    rollback = shlex.join(["asi", "rollback", result["candidate_id"]])
+    # Each line through ``_emit``, as a listing prints, so a path is kept to its
+    # line and spelled as ``review`` spells it. Measured before: a skill
+    # directory named with a line break made the line after the break, and the
+    # rest of the manual command, start lines of their own. The manual command
+    # is shown only when it reads as itself on the line: a spelled break or
+    # control character would make it name another path, and ``asi rollback``
+    # restores the same backup and checks what it restores.
+    manual = write["rollback_command"]
+    if escape_for_terminal(one_line(manual)) != manual:
+        manual = (
+            "not shown: a path in it holds a line break or a control character, which "
+            f"this line can only spell; `{rollback}` restores the same backup"
         )
+    lines = [
+        f"applied {result['candidate_id']} to {write['path']}",
+        *(
+            [
+                "  finishes        an earlier run of this apply, which wrote the "
+                "skill and did not record it"
+            ]
+            if result.get("finishes_an_earlier_run")
+            else []
+        ),
+        f"  previous sha256 {write['previous_sha256']}",
+        f"  new sha256      {write['new_sha256']}",
+        f"  backup          {write['backup_path']}",
+        f"  rollback        {rollback}",
+        f"  (or manually)   {manual}",
+    ]
+    _emit(result, as_json=args.json, lines=lines)
     return 0
 
 
