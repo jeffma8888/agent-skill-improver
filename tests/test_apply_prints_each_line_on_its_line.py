@@ -160,8 +160,14 @@ class ApplyPrintsEachLineOnItsLineTests(unittest.TestCase):
     def test_a_backslash_or_a_letter_outside_ascii_keeps_its_manual_command(self):
         # None is spelled on the line, so the command reads as itself: a
         # backslash and an "n" are two characters a path can hold, and a letter
-        # outside ASCII or a no-break space is printed as itself.
-        for directory in ("tdd\\nx", "my skill \u00fc-\u65e5\u672c", "my\u00a0skill"):
+        # outside ASCII, a no-break space or a zero-width space is printed as
+        # itself.
+        for directory in (
+            "tdd\\nx",
+            "my skill \u00fc-\u65e5\u672c",
+            "my\u00a0skill",
+            "my\u200bskill",
+        ):
             with self.subTest(directory=directory), TemporaryDirectory() as d:
                 run = _applied(Path(d).resolve(), directory)
                 lines = run["stdout"].splitlines()
@@ -205,14 +211,17 @@ class ApplyPrintsEachLineOnItsLineTests(unittest.TestCase):
         )
 
     def test_a_control_character_in_the_path_hides_the_manual_command(self):
-        # Each one ``escape_for_terminal`` spells, from the C0 set and outside
-        # it: a bidi override, a line separator, DEL and a C1 control.
+        # One of each kind ``escape_for_terminal`` spells, from the C0 set and
+        # outside it: a bidi override, a line separator, DEL, a C1 control, the
+        # BOM and a tag character.
         for character, spelled in (
             ("\x1b", "\\x1b"),
             ("\u202e", "\\u202e"),
             ("\u2028", "\\u2028"),
             ("\x7f", "\\x7f"),
             ("\x85", "\\x85"),
+            ("\ufeff", "\\ufeff"),
+            ("\U000e0041", "\\U000e0041"),
         ):
             with self.subTest(spelled=spelled), TemporaryDirectory() as d:
                 run = _applied(Path(d).resolve(), f"tdd{character}[2K")
