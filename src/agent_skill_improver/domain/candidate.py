@@ -308,14 +308,14 @@ class Candidate:
     @staticmethod
     def from_dict(raw: Mapping[str, Any]) -> "Candidate":
         if raw.get("schema") != SCHEMA_CANDIDATE:
-            raise ValueError(f"unexpected candidate schema {raw.get('schema')!r}")
+            raise ValueError(f"unexpected candidate schema {quoted_value(raw.get('schema'))}")
         patch_raw = _object(raw["patch"], "patch")
         patch = Patch(
             new_text=str(patch_raw.get("new_text", "")),
             new_text_sha256=str(patch_raw["new_text_sha256"]),
             unified_diff=str(patch_raw.get("unified_diff", "")),
-            added_lines=int(patch_raw.get("added_lines", 0)),
-            removed_lines=int(patch_raw.get("removed_lines", 0)),
+            added_lines=_integer(patch_raw.get("added_lines", 0), "patch.added_lines"),
+            removed_lines=_integer(patch_raw.get("removed_lines", 0), "patch.removed_lines"),
         )
         target_raw = _object(raw["target"], "target")
         target = TargetRef(
@@ -329,21 +329,23 @@ class Candidate:
             RubricFailureRef(
                 failure_case_id=str(f["failure_case_id"]),
                 rubric_id=str(f["rubric_id"]),
-                rubric_version=int(f.get("rubric_version", 1)),
+                rubric_version=_integer(
+                    f.get("rubric_version", 1), f"rubric_failures[{index}].rubric_version"
+                ),
                 criterion_id=str(f["criterion_id"]),
                 conversation_id=str(f["conversation_id"]),
                 evidence=tuple(EvidenceRef.from_dict(e) for e in f.get("evidence", [])),
             )
-            for f in _objects(raw.get("rubric_failures", []), "rubric_failures")
+            for index, f in enumerate(_objects(raw.get("rubric_failures", []), "rubric_failures"))
         )
         sources = tuple(
             SourceRef(
                 thread_id=str(s["thread_id"]),
                 element_id=str(s["element_id"]),
-                position=int(s["position"]),
+                position=_integer(s["position"], f"sources[{index}].position"),
                 role=str(s.get("role", "")),
             )
-            for s in _objects(raw.get("sources", []), "sources")
+            for index, s in enumerate(_objects(raw.get("sources", []), "sources"))
         )
         validation = raw.get("validation")
         if validation is not None:
@@ -392,6 +394,22 @@ def _objects(value: Any, what: str) -> list[Mapping[str, Any]]:
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
         raise ValueError(f"{what} must be an array, got {type(value).__name__}")
     return [_object(item, f"{what}[{index}]") for index, item in enumerate(value)]
+
+
+def _integer(value: Any, what: str) -> int:
+    """``value`` read with ``int()``, as before, refused by name and type, never by value.
+
+    ``patch.added_lines``, ``patch.removed_lines``, a rubric failure's
+    ``rubric_version`` and a source's ``position`` were read with ``int()``,
+    whose refusal quotes the text it could not read: measured before, a field
+    holding a ``ghp_`` token was printed whole by ``review``, ``apply``,
+    ``candidates`` and ``doctor``, text and JSON. What ``int()`` accepted it
+    still accepts.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} must be an integer, got {type(value).__name__}") from None
 
 
 def _strings(value: Any, what: str) -> tuple[str, ...]:
