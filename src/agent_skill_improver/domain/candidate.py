@@ -352,13 +352,21 @@ class Candidate:
             validation = dict(_object(validation, "validation"))
             if validation.get("gate") is not None:
                 _object(validation["gate"], "validation.gate")
+        # The improver's prose is masked when its proposal is parsed
+        # (``parse_proposal``); it, and the notes, are masked again here, as the
+        # judgement reader masks its rationale, so a record edited on disk cannot
+        # make ``review`` print a credential in them, nor a later write of the
+        # record keep one. ``str()`` reads what it read before. Masking prose the
+        # tool masked when it wrote it leaves it as written, except that two
+        # masks a URL parameter's shape joins read back as one; a note this tool
+        # wrote reads back changed only where it holds a credential's shape.
         return Candidate(
             id=str(raw["id"]),
             created_at=str(raw["created_at"]),
-            hypothesis=str(raw.get("hypothesis", "")),
-            intended_change=str(raw.get("intended_change", "")),
-            risks=_strings(raw.get("risks", []), "risks"),
-            rollback=str(raw.get("rollback", "")),
+            hypothesis=kept_prose(str(raw.get("hypothesis", ""))),
+            intended_change=kept_prose(str(raw.get("intended_change", ""))),
+            risks=tuple(kept_prose(r) for r in _strings(raw.get("risks", []), "risks")),
+            rollback=kept_prose(str(raw.get("rollback", ""))),
             target=target,
             rubric_failures=failures,
             sources=sources,
@@ -367,7 +375,7 @@ class Candidate:
             status=str(raw.get("status", STATUS_PROPOSED)),
             improver_command_id=str(raw.get("improver_command_id", "")),
             validation=validation,
-            notes=_strings(raw.get("notes", []), "notes"),
+            notes=tuple(kept_prose(n) for n in _strings(raw.get("notes", []), "notes")),
         )
 
 
