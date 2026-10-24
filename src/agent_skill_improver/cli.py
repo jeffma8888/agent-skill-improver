@@ -303,6 +303,19 @@ def escape_for_terminal(text: str) -> str:
     return "".join(out)
 
 
+def reads_as_itself(text: str) -> bool:
+    """Whether ``text`` reaches the terminal as written when ``_emit`` prints it:
+    no line break that ``one_line`` spells and no character that
+    ``escape_for_terminal`` spells.
+
+    A command printed for a person to copy must be that command. When a path
+    in it holds such a character, the line shows the spelling, and the copied
+    command would name another path. Built from the printer's own two steps,
+    so it cannot drift from what the printer spells.
+    """
+    return escape_for_terminal(one_line(text)) == text
+
+
 def escape_json_for_terminal(text: str) -> str:
     """JSON text with every character a terminal would obey written as the JSON
     escape it is, so the same bytes are safe to read and unchanged to parse.
@@ -1482,7 +1495,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     # control character would make it name another path, and ``asi rollback``
     # restores the same backup and checks what it restores.
     manual = write["rollback_command"]
-    if escape_for_terminal(one_line(manual)) != manual:
+    if not reads_as_itself(manual):
         manual = (
             "not shown: a path in it holds a line break or a control character, which "
             f"this line can only spell; `{rollback}` restores the same backup"

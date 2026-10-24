@@ -12,18 +12,30 @@ the same through the backup path, in the ``backup`` line and the manual command.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shlex
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from agent_skill_improver import cli
 from agent_skill_improver.domain.candidate import make_patch
 from tests.support import build_env, run_cli
 
 FORGED = "config error: forged"
 SEED = "apply-prints-each-line"
+#: The code points the printer spells: the 65 of category Cc but the tab (64,
+#: the line feed and carriage return among them), the line and paragraph
+#: separators (2), the nine bidi controls, the BOM and the 97 assigned tag
+#: characters (107, category Cf), the 2,048 surrogates and the 31 unassigned
+#: code points of the tag block. Cc and Cs are fixed by Unicode's stability
+#: policy and the rest are listed by the printer, so the sum holds across the
+#: Unicode versions Python ships.
+SPELLED_CODE_POINTS = 64 + 2 + 107 + 2048 + 31
 NOT_SHOWN = (
     "  (or manually)   not shown: a path in it holds a line break or a control character, "
     "which this line can only spell; `asi rollback {cid}` restores the same backup"
@@ -211,9 +223,11 @@ class ApplyPrintsEachLineOnItsLineTests(unittest.TestCase):
         )
 
     def test_a_control_character_in_the_path_hides_the_manual_command(self):
-        # One of each kind ``escape_for_terminal`` spells, from the C0 set and
-        # outside it: a bidi override, a line separator, DEL, a C1 control, the
-        # BOM and a tag character.
+        # A character of most kinds ``escape_for_terminal`` spells, from the C0
+        # set and outside it: a bidi override, a line separator, DEL, a C1
+        # control, the BOM and a tag character. A lone surrogate is the kind
+        # left out: no path on APFS can hold one. The check is held to the
+        # printer for every code point, surrogates included, below.
         for character, spelled in (
             ("\x1b", "\\x1b"),
             ("\u202e", "\\u202e"),
@@ -242,6 +256,41 @@ class ApplyPrintsEachLineOnItsLineTests(unittest.TestCase):
             payload["write"]["rollback_command"],
             shlex.join(["cp", str(run["backup"]), str(run["target"])]),
         )
+
+
+class TheCheckIsHeldToThePrinterTests(unittest.TestCase):
+    """``reads_as_itself`` against what ``_emit`` prints, one code point at a time."""
+
+    def test_a_text_reads_as_itself_exactly_when_the_printer_prints_it_as_written(self):
+        texts = [f"a{chr(code)}b" for code in range(sys.maxunicode + 1)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._emit(None, as_json=False, lines=texts)
+        printed = out.getvalue().split("\n")
+        self.assertEqual(printed.pop(), "")
+        self.assertEqual(len(printed), len(texts))
+        disagree = [
+            f"U+{ord(text[1]):04X}"
+            for text, line in zip(texts, printed)
+            if cli.reads_as_itself(text) != (line == text)
+        ]
+        self.assertEqual(disagree, [])
+        spelled = sum(line != text for text, line in zip(texts, printed))
+        self.assertEqual(spelled, SPELLED_CODE_POINTS)
+
+    def test_each_kind_the_printer_spells_is_refused_and_each_it_keeps_is_not(self):
+        refused = (
+            "\n\r\x00\x1b\x7f\x80\x85\x9f\u202a\u202d\u202e\u2066\u2069"
+            "\u2028\u2029\ufeff\U000e0000\U000e0001\U000e0041\U000e007f\ud800\udfff"
+        )
+        kept = " \t\\'\"$`\u00a0\u00ad\u200b\u200d\u00fc\u65e5\U0001f600\U000e0080"
+        for character in refused:
+            with self.subTest(refused=f"U+{ord(character):04X}"):
+                self.assertFalse(cli.reads_as_itself(f"cp a{character}b c"))
+        for character in kept:
+            with self.subTest(kept=f"U+{ord(character):04X}"):
+                self.assertTrue(cli.reads_as_itself(f"cp a{character}b c"))
+        self.assertTrue(cli.reads_as_itself(""))
 
 
 if __name__ == "__main__":
