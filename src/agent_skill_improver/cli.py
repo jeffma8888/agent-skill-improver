@@ -60,7 +60,14 @@ from .domain.isolation import (
 from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
-from .domain.redaction import named_path, quoted_value, redact
+from .domain.redaction import (
+    LISTED_PATH_CHARS,
+    LISTED_SKILL_ID_CHARS,
+    listed_value,
+    named_path,
+    quoted_value,
+    redact,
+)
 from .app.state import DIR_MODE, OPEN_STATUSES, SET_ASIDE_KINDS, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
 
@@ -1200,30 +1207,37 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     # after an apply, `candidates` printed `0 candidate(s)` and the record the
     # operator had just promoted read as vanished; `--all` was the only clue.
     closed_not_listed = len(scan.readable) - len(items)
+    # No integrity check has read these records, so the text fields are shown
+    # as ``listed_value`` shows them, in the text and the JSON alike: masked,
+    # and cut past what a real one can be. Measured before: a record edited to
+    # hold a ``ghp_`` token in its skill id, path, status or creation time
+    # printed it whole, and one holding a megabyte there made a listing of a
+    # megabyte. A real value is listed as before.
+    rows = [
+        {
+            "id": c.id,
+            "status": listed_value(c.status),
+            "skill_id": listed_value(c.target.skill_id, limit=LISTED_SKILL_ID_CHARS),
+            "canonical_path": listed_value(c.target.canonical_path, limit=LISTED_PATH_CHARS),
+            "gate_passed": bool(((c.validation or {}).get("gate") or {}).get("passed")),
+            "added_lines": c.patch.added_lines,
+            "removed_lines": c.patch.removed_lines,
+            "created_at": listed_value(c.created_at),
+        }
+        for c in items
+    ]
     payload = {
         "listing": "all" if args.all else "open",
         "closed_not_listed": closed_not_listed,
         "unreadable": [u.to_dict() for u in scan.unreadable],
-        "candidates": [
-            {
-                "id": c.id,
-                "status": c.status,
-                "skill_id": c.target.skill_id,
-                "canonical_path": c.target.canonical_path,
-                "gate_passed": bool(((c.validation or {}).get("gate") or {}).get("passed")),
-                "added_lines": c.patch.added_lines,
-                "removed_lines": c.patch.removed_lines,
-                "created_at": c.created_at,
-            }
-            for c in items
-        ],
+        "candidates": rows,
     }
     lines = [
-        f"{c.id}  {c.status:<12} {c.target.skill_id:<28} "
-        f"gate={'pass' if ((c.validation or {}).get('gate') or {}).get('passed') else 'fail'}"
+        f"{row['id']}  {row['status']:<12} {row['skill_id']:<28} "
+        f"gate={'pass' if row['gate_passed'] else 'fail'}"
         f"{' (closed)' if c.status != STATUS_VALIDATED else ''} "
-        f"+{c.patch.added_lines}/-{c.patch.removed_lines}"
-        for c in items
+        f"+{row['added_lines']}/-{row['removed_lines']}"
+        for c, row in zip(items, rows)
     ]
     # A record that did not read is listed by name: dropping it made a corrupt
     # queue look like an empty one (see ``UnreadableRecord``).

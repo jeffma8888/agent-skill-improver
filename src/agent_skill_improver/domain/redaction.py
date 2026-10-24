@@ -303,6 +303,38 @@ def named_path(path: object) -> str:
     return quoted_value(text, limit=NAMED_PATH_CHARS)
 
 
+#: How long a stored record's skill id may be and still be listed whole. A
+#: skill id is a directory name, which is at most 255 bytes on APFS and ext4,
+#: so a cut past 255 characters never shortens a real one.
+LISTED_SKILL_ID_CHARS = 255
+
+#: How long a stored record's canonical path may be and still be listed whole:
+#: ``PATH_MAX``, the longest path a system call takes by name, is 1,024 bytes on
+#: macOS and 4,096 on Linux, so a cut past 4,096 characters leaves any such path
+#: whole.
+LISTED_PATH_CHARS = 4096
+
+
+def listed_value(value: object, *, limit: int = QUOTED_VALUE_CHARS) -> str:
+    """A value read from a stored record as a listing shows it: masked, then cut.
+
+    ``candidates`` lists records that no integrity check has read, so what it
+    shows of one is whatever was last written to it: a record edited to hold a
+    credential in its skill id, path, status or creation time printed it whole,
+    and one holding a megabyte made a listing of a megabyte. Unlike
+    ``quoted_value`` this adds no quotes, so a value that holds no credential
+    shape and is at most ``limit`` long lists exactly as it did; the listing
+    keeps it on its line (``one_line`` in the text, the encoder in JSON).
+    Masking runs before the cut, so a key the cut would split is masked whole,
+    and the cut says how much it left out. The limit and the count are in
+    characters: a name of at most 255 bytes is at most 255 characters.
+    """
+    text = redact(str(value)).text
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... [{len(text) - limit} more chars not shown]"
+
+
 #: How many values a message lists before it says how many more there were.
 QUOTED_VALUES_SHOWN = 5
 
