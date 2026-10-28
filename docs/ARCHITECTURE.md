@@ -287,10 +287,13 @@ replacement. Constraints:
   itself and the read-only flag protected the very directory the write landed in.
   Stated limit: a case variant of a root that does not exist yet is compared by
   text only.
-- a skill in `[guard].protected_skill_ids`, or one holding an executable payload,
-  is refused as a target and the refusal is written to `state/refusals/`.
-  `review` and `apply` read the list again, so a skill listed after its
-  candidate was validated gets no token and is not written.
+- a skill in `[guard].protected_skill_ids` is refused as a target and the
+  refusal is written to `state/refusals/`. `review` and `apply` read the list
+  again, so a skill listed after its candidate was validated gets no token and
+  is not written. A skill holding an executable payload is not refused: it is
+  proposed against, and when the payload sits beside its canonical copy its
+  candidate carries the `ELEVATED REVIEW RISK` note below; list it in
+  `protected_skill_ids` to keep it from being a target.
 - a skill whose document is not valid UTF-8 is quarantined (`UndecodableDocument`,
   a record defect, so the run goes on) rather than proposed against text read
   with replacement characters; the inventory still lists it, with the byte named.
