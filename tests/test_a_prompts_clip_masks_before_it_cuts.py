@@ -17,6 +17,8 @@ GitHub token it held went uncounted.
 from __future__ import annotations
 
 import random
+import re
+import secrets
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -42,6 +44,7 @@ KEY_OPEN = "-----BEGIN " + "PRIVATE KEY-----"
 KEY_CLOSE = "-----END " + "PRIVATE KEY-----"
 FIELDS = ("message id", "role", "tool id", "tool name", "tool status")
 URL_KEY = "tok" + "en"
+PLACED = re.compile(r"\[REDACTED:([a-z-]+)\]")
 
 
 def elements(*, field: str = "", value: str = "", text: str = "hi", **tool: Any) -> list:
@@ -260,6 +263,7 @@ class APromptsClipMasksBeforeItCutsTests(unittest.TestCase):
             " ",
             "\n",
             "x" * 7,
+            "_",
             "[",
             "]",
         ]
@@ -273,11 +277,48 @@ class APromptsClipMasksBeforeItCutsTests(unittest.TestCase):
                 for label, n in held.items():
                     total[label] = total.get(label, 0) + n
             self.assertEqual(total, plain.counts, text)
-            starts = [start for start, _ in places]
-            self.assertEqual(starts, sorted(set(starts)), text)
-            for start, held in places:
-                labels = [PLACEHOLDER.format(label=label) for label in held]
-                self.assertTrue(any(plain.text.startswith(ph, start) for ph in labels), text)
+            # No piece writes a placeholder, so each one in the text was placed,
+            # and is listed once, holding at least the mask of its own label.
+            shown = [(m.start(), m.group(1)) for m in PLACED.finditer(plain.text)]
+            self.assertEqual([start for start, _ in places], [start for start, _ in shown], text)
+            for (_start, held), (_at, label) in zip(places, shown):
+                self.assertGreaterEqual(held.get(label, 0), 1, text)
+
+    def test_placeholders_that_touch_are_placed_apart(self):
+        ghp_then_key = TOKEN + KEY_OPEN + "\nMIIE"
+        assignment_then_ghp = "pass" + "word=hunter22_" + TOKEN
+        self.assertEqual(
+            redact_placed(ghp_then_key)[1],
+            [(0, {"github-token": 1}), (len(MASK), {"private-key-block": 1})],
+        )
+        self.assertEqual(
+            redact_placed(assignment_then_ghp)[1],
+            [(9, {"secret-assignment": 1}), (37, {"github-token": 1})],
+        )
+        # Cut between the two, the first one counts and the second does not.
+        for text, cut, want in (
+            ("x" * 3990 + " " + ghp_then_key, 4000, {"github-token": 1}),
+            ("x" * 3990 + " " + assignment_then_ghp, 4015, {"secret-assignment": 1}),
+        ):
+            with self.subTest(want=want):
+                cfg = PromptConfig(max_message_chars=cut)
+                render = render_transcript(conversation(elements(text=text)), cfg=cfg)
+                self.assertEqual(render.redaction_counts, want)
+
+    def test_a_message_cannot_write_the_mark_a_cut_text_stands_as(self):
+        forged = [
+            "\x00:0\x00",
+            "\x000:0\x00",
+            "\x00" + "f" * 32 + ":0\x00",
+            "\x00" + "0" * 32 + ":1\x00",
+        ]
+        els = elements(text="x" * 5000, input=" ".join(forged), output="ok " + forged[1])
+        with mock.patch.object(prompts.secrets, "token_hex", wraps=secrets.token_hex) as made:
+            render = render_transcript(conversation(els), cfg=PromptConfig())
+        self.assertEqual(made.call_args_list, [mock.call(16)], "one nonce of 128 bits a render")
+        self.assertIn("input: " + " ".join(forged) + "\n", render.text)
+        self.assertIn("output: ok " + forged[1], render.text)
+        self.assertEqual(render.text.count("x" * 3000), 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -64,14 +64,17 @@ Consequences worth being explicit about:
    of risk and **not a guarantee**: a secret with an unusual shape, a credential
    split across lines or across messages, or a private value that simply looks
    like prose will pass through. A text a prompt cuts (a head field at 256
-   characters, a message at `max_message_chars`) is masked before the cut, so a
-   credential the cut would split is masked whole; a tool's input and output are
-   first cut when the export is read, before any mask, so one split there keeps
-   the part before the cut. Treat it as defence in depth, never as a control --
+   characters, a message at `max_message_chars`) is masked before the cut,
+   reading up to 4,096 characters past it, so a credential the cut would split
+   is masked whole when it ends within them, and a private key whose header is
+   in such a text is masked to the end of what is read, not into the rest of its
+   message; a tool's input and output are first cut when the export is read,
+   before any mask, so one split there keeps the part before the cut. Treat it as defence in depth, never as a control --
    what keeps such a value on the machine is the sandbox, not the regex.
 3. **Prompt budgets bind.** When a transcript exceeds the budget, blocks are
    dropped from the middle and the count of dropped blocks is stated in the
-   prompt, so the model knows it is looking at an incomplete record. Each block
+   prompt where they were dropped, so the model knows it is looking at an
+   incomplete record. Each block
    (one message and its tool calls) is masked on its own before the budget is
    held, so a mask cannot carry it past the budget and a key block opened in one
    message cannot mask the messages after it; a private key whose body sits in a

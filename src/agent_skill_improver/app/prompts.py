@@ -306,7 +306,10 @@ def render_transcript(
     if sum(len(b) + 2 for b in blocks) > budget:
         blocks = _share(blocks, budget)
     if elided:
-        blocks.insert(len(blocks) // 2, ELISION_MARKER.format(n=elided))
+        # Where the blocks were dropped: after the first (m + 1) // 2 of the m
+        # kept (``_kept_indices``). At m // 2, an odd m put the note a block
+        # early, so the block after it read as the first one past the gap.
+        blocks.insert((len(blocks) + 1) // 2, ELISION_MARKER.format(n=elided))
 
     text = "\n\n".join(blocks)
     return TranscriptRender(
