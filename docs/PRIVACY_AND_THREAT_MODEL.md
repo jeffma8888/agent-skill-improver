@@ -62,12 +62,22 @@ Consequences worth being explicit about:
    JSON or a `repr`, `%20` in a URL, a terminal colour code); otherwise one
    glued to an ASCII letter or digit is taken for part of a longer word. It is a reduction
    of risk and **not a guarantee**: a secret with an unusual shape, a credential
-   split across lines, or a private value that simply looks like prose will pass
-   through. Treat it as defence in depth, never as a control -- what keeps such a
-   value on the machine is the sandbox, not the regex.
+   split across lines or across messages, or a private value that simply looks
+   like prose will pass through. Treat it as defence in depth, never as a
+   control -- what keeps such a value on the machine is the sandbox, not the
+   regex.
 3. **Prompt budgets bind.** When a transcript exceeds the budget, blocks are
    dropped from the middle and the count of dropped blocks is stated in the
-   prompt, so the model knows it is looking at an incomplete record.
+   prompt, so the model knows it is looking at an incomplete record. Each block
+   (one message and its tool calls) is masked on its own before the budget is
+   held, so a mask cannot carry it past the budget and a key block opened in one
+   message cannot mask the messages after it; a private key whose body sits in a
+   message of its own is therefore not masked. The first and the last block are
+   never dropped, so when they alone exceed it they share it, each clip stating
+   what it removed, and a head line shows at most 256 characters of an element's
+   id, a message's role or a tool's name or status. The list of elements a
+   scorer may cite is not held to the budget: it names every element, a dropped
+   one too.
 
 ## The lethal trifecta, and the leg this repository removes
 

@@ -138,6 +138,8 @@ max_open_candidates_per_skill = 1
 # Budget per model call. When the budget binds, transcript blocks are dropped
 # from the MIDDLE and the number dropped is stated in the prompt -- head
 # truncation would systematically grade only the opening of a conversation.
+# The first and the last block are never dropped: when they alone exceed the
+# budget they share it, each clipped with a note of what it lost.
 max_transcript_chars = 24000
 max_message_chars = 4000
 # Also the longest skill document the improver is asked to rewrite: a document

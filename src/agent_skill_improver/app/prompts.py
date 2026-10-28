@@ -112,6 +112,52 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit] + f" ...[clipped {len(text) - limit} chars]"
 
 
+#: The most of an element's id, a message's role, or a tool's name or status
+#: that a head line or the citable list shows. Each is the export's own text,
+#: and none had a bound: measured, a tool named with 2 MiB of text put 2.1
+#: million characters into a transcript budgeted at 24,000.
+MAX_HEAD_FIELD_CHARS = 256
+
+
+def _field(text: str) -> str:
+    return _clip(text, MAX_HEAD_FIELD_CHARS)
+
+
+def _kept_indices(sizes: Sequence[int], budget: int) -> list[int]:
+    """The blocks that fit ``budget`` once the middle ones are dropped.
+
+    The first ``(m + 1) // 2`` and the last ``m // 2`` for the largest ``m`` whose
+    sizes fit, or two when none does: the ones that dropping the middle block
+    until the rest fit always kept. Found in one pass over running sums, where
+    that loop summed what was left after every drop (measured: 40,000 short
+    messages took 15 s to render, four times as long per doubling).
+    """
+    total = len(sizes)
+    head = [0]
+    for size in sizes:
+        head.append(head[-1] + size)
+    tail = [0]
+    for size in reversed(sizes):
+        tail.append(tail[-1] + size)
+    kept = total
+    while kept > 2 and head[(kept + 1) // 2] + tail[kept // 2] > budget:
+        kept -= 1
+    return list(range((kept + 1) // 2)) + list(range(total - kept // 2, total))
+
+
+def _share(blocks: list[str], budget: int) -> list[str]:
+    """Clip blocks that together exceed ``budget``, the smallest kept whole first."""
+    room = budget - 2 * len(blocks)
+    out = list(blocks)
+    left = len(blocks)
+    for index in sorted(range(len(blocks)), key=lambda i: len(blocks[i])):
+        share = max(room // left, 1)
+        out[index] = _clip(blocks[index], share)
+        room -= min(len(blocks[index]), share)
+        left -= 1
+    return out
+
+
 def render_transcript(
     conversation: NormalizedConversation,
     *,
@@ -123,7 +169,10 @@ def render_transcript(
     When the budget binds, blocks are dropped from the *middle* and the number
     dropped is stated in the text. The opening messages carry the request and the
     closing ones carry the outcome and any user correction, which are exactly the
-    parts a rubric asks about.
+    parts a rubric asks about. The first and the last are never dropped, so when
+    they alone exceed the budget they share it, each clip stating what it removed:
+    measured before, one reply with 500 tool calls put 1.46 million characters
+    into a transcript budgeted at 24,000.
     """
     keep = set(only_positions) if only_positions is not None else None
     blocks: list[str] = []
@@ -131,34 +180,44 @@ def render_transcript(
         if keep is not None and message.position not in keep:
             continue
         head = (
-            f"[message element_id={message.element_id} position={message.position} "
-            f"role={message.role}]"
+            f"[message element_id={_field(message.element_id)} position={message.position} "
+            f"role={_field(message.role)}]"
         )
         body = _clip(message.text, cfg.max_message_chars)
         parts = [head, body if body.strip() else "(no text)"]
         for tool in message.tool_events:
             parts.append(
-                f"[tool element_id={tool.element_id} position={tool.position} "
-                f"name={tool.name} status={tool.status}]"
+                f"[tool element_id={_field(tool.element_id)} position={tool.position} "
+                f"name={_field(tool.name)} status={_field(tool.status)}]"
             )
             parts.append(f"input: {_clip(tool.input_text, min(cfg.max_message_chars, 1200))}")
             parts.append(f"output: {_clip(tool.output_excerpt, cfg.max_message_chars)}")
         blocks.append("\n".join(parts))
 
     total = len(blocks)
-    elided = 0
-    while blocks and sum(len(b) + 2 for b in blocks) > cfg.max_transcript_chars and len(blocks) > 2:
-        blocks.pop(len(blocks) // 2)
-        elided += 1
+    budget = cfg.max_transcript_chars
+    blocks = [blocks[i] for i in _kept_indices([len(b) + 2 for b in blocks], budget)]
+    counts: dict[str, int] = {}
+    if cfg.redact_secrets:
+        # Each kept block is masked before the budget is held to what is kept: a
+        # mask can be longer than what it hides (measured: twelve messages of
+        # assignments came to 54,194 characters once masked, 2.26 times the
+        # budget), and a key block opened in one message and closed in a later
+        # one masked every message between. So a key whose body sits in a
+        # message of its own is not masked, as the threat model says.
+        results = [redact(b) for b in blocks]
+        results = [results[i] for i in _kept_indices([len(r.text) + 2 for r in results], budget)]
+        blocks = [r.text for r in results]
+        for result in results:
+            for label, n in result.counts.items():
+                counts[label] = counts.get(label, 0) + n
+    elided = total - len(blocks)
+    if sum(len(b) + 2 for b in blocks) > budget:
+        blocks = _share(blocks, budget)
     if elided:
         blocks.insert(len(blocks) // 2, ELISION_MARKER.format(n=elided))
 
     text = "\n\n".join(blocks)
-    counts: dict[str, int] = {}
-    if cfg.redact_secrets:
-        result = redact(text)
-        text = result.text
-        counts = dict(result.counts)
     return TranscriptRender(
         text=text,
         blocks_total=total,
@@ -274,7 +333,7 @@ def scorer_user_prompt(
     # no ``>`` then ran to the next ``>``, so either took the list's own quotes
     # and brackets with it, and a list that does not parse leaves nothing to cite.
     listed = [
-        {**element, "element_id": _listed_value(element["element_id"], cfg)}
+        {**element, "element_id": _listed_value(_field(element["element_id"]), cfg)}
         for element in citable_elements(conversation)
     ]
     citable = dumps(listed).rstrip("\n")
