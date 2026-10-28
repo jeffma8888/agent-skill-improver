@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_SCORECARD
 from .conversation import EvidenceRef, NormalizedConversation
-from .redaction import kept_prose, quoted_value
+from .redaction import kept_prose, listed_value, quoted_value
 from .rubric import Rubric, Verdict
 
 MAX_RATIONALE_CHARS = 2000
@@ -107,6 +107,17 @@ class ScoreCard:
         }
 
 
+#: How many ignored ``criteria`` entries a scorecard notes one by one, and how
+#: many distinct unknown criterion ids it records. The scorer decides how many
+#: entries its reply holds, bounded only by the role's ``max_output_bytes``, and
+#: each one it got wrong was a note of its own and each unknown id was recorded
+#: whole. Measured before: 200,000 entries that were not objects made each
+#: scorecard 9.9 MB with 200,000 notes, 50,000 invented ids one of 5.2 MB, one
+#: 500,000-character id one of 502 KB, and a credential sent as an id was
+#: recorded whole while its note masked it.
+MAX_IGNORED_SHOWN = 20
+
+
 def parse_scorecard(
     payload: Any,
     *,
@@ -139,25 +150,46 @@ def parse_scorecard(
 
     known = set(rubric.criterion_ids)
     seen: dict[str, CriterionScore] = {}
-    extraneous: list[str] = []
+    extraneous: set[str] = set()
     notes: list[str] = []
+    ignored = 0
+
+    def ignore(note: str) -> None:
+        nonlocal ignored
+        ignored += 1
+        if ignored <= MAX_IGNORED_SHOWN:
+            notes.append(note)
 
     for idx, item in enumerate(raw_items):
         if not isinstance(item, Mapping):
-            notes.append(f"criteria[{idx}] is not an object; ignored")
+            ignore(f"criteria[{idx}] is not an object; ignored")
             continue
         cid = item.get("criterion_id")
         if not isinstance(cid, str) or not cid.strip():
-            notes.append(f"criteria[{idx}] has no criterion_id; ignored")
+            ignore(f"criteria[{idx}] has no criterion_id; ignored")
             continue
         if cid not in known:
-            extraneous.append(cid)
-            notes.append(f"criterion {quoted_value(cid)} is not in rubric {rubric.id}; ignored")
+            # Recorded as a listing shows a record's value: masked, then cut.
+            extraneous.add(listed_value(cid))
+            ignore(f"criterion {quoted_value(cid)} is not in rubric {rubric.id}; ignored")
             continue
         if cid in seen:
-            notes.append(f"criterion {quoted_value(cid)} scored more than once; first verdict kept")
+            ignore(f"criterion {quoted_value(cid)} scored more than once; first verdict kept")
             continue
         seen[cid] = _build_score(item, rubric=rubric, conversation=conversation, notes=notes)
+
+    if ignored > MAX_IGNORED_SHOWN:
+        notes.append(
+            f"{ignored - MAX_IGNORED_SHOWN} more criteria entries ignored; only the first "
+            f"{MAX_IGNORED_SHOWN} are noted"
+        )
+    recorded = sorted(extraneous)
+    if len(recorded) > MAX_IGNORED_SHOWN:
+        notes.append(
+            f"{len(recorded) - MAX_IGNORED_SHOWN} more unknown criterion ids not recorded; "
+            f"only the first {MAX_IGNORED_SHOWN} in sorted order are"
+        )
+        recorded = recorded[:MAX_IGNORED_SHOWN]
 
     # Criteria the model never mentioned are INSUFFICIENT, never PASS.
     for cid in rubric.criterion_ids:
@@ -178,7 +210,7 @@ def parse_scorecard(
         rubric_sha256=rubric.source_sha256,
         scores=ordered,
         scorer_command_id=scorer_command_id,
-        extraneous_criterion_ids=tuple(sorted(set(extraneous))),
+        extraneous_criterion_ids=tuple(recorded),
         notes=tuple(notes),
     )
 

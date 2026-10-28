@@ -247,6 +247,8 @@ Then the answer is distrusted, in this order:
 - unparseable output → `MalformedModelOutput`, that record quarantined
 - a scorecard for the wrong conversation id → refused (guards a crossed or cached answer)
 - a criterion the rubric does not define → recorded as `extraneous`, not silently dropped
+  (masked and cut as a listing shows a record's value; the first 20 distinct ids, a note
+  counting the rest), and each entry ignored is noted, the first 20 one by one
 - a criterion the model did not mention → `INSUFFICIENT`, never `PASS`; silence is not a pass
 - a `PASS` or `FAIL` whose evidence reference does not resolve, or resolves to a
   different position than claimed → downgraded to `INSUFFICIENT` with
