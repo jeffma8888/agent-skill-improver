@@ -60,6 +60,7 @@ from .domain.isolation import (
 from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
 from .adapters.skill_fs import root_presence
+from .domain.discovery import MAX_THREAD_ID_LENGTH
 from .domain.redaction import (
     LISTED_PATH_CHARS,
     LISTED_SKILL_ID_CHARS,
@@ -1280,6 +1281,28 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+#: How long a set-aside record's id may be and still be listed whole. The id
+#: is a conversation's, held to ``MAX_THREAD_ID_LENGTH`` (256) where it is
+#: discovered, or a skill's, a directory name of at most 255 bytes, so a cut
+#: past 256 characters never shortens a real one.
+LISTED_RECORD_ID_CHARS = MAX_THREAD_ID_LENGTH
+
+#: How long a set-aside record's stage may be and still be listed whole. The
+#: tool writes a stage word (``ingest``, ``propose``) or ``score:`` and a rubric
+#: id, either followed by ``:defer-exhausted`` once deferral is exhausted. A
+#: rubric id is whatever its file says, with no bound of its own, so this one
+#: is a choice: the longest stage the test suite writes is 106 characters.
+LISTED_STAGE_CHARS = 4096
+
+#: How long a set-aside record's reason may be and still be listed whole. A
+#: reason is the tool's own words around the values it quotes (each cut at 120
+#: characters, ``QUOTED_VALUE_CHARS``), a child's output tail (cut at 500,
+#: ``QUOTED_TAIL_CHARS``) and the paths it names, which have no bound of their
+#: own, so this one is a choice too: the longest reason the test suite writes
+#: is 464 characters. The record's file keeps a longer one whole.
+LISTED_REASON_CHARS = 4096
+
+
 def cmd_set_aside(args: argparse.Namespace) -> int:
     """List what runs set aside: quarantined, refused and deferred records.
 
@@ -1296,19 +1319,40 @@ def cmd_set_aside(args: argparse.Namespace) -> int:
     items = [r for r in scan.readable if r.kind in wanted]
     not_listed = len(scan.readable) - len(items)
     counts = {k: sum(1 for r in scan.readable if r.kind == k) for k in kinds}
+    # No integrity check has read these records either, so their text fields
+    # are shown as ``cmd_candidates`` shows a candidate's, in the text and the
+    # JSON alike: masked, then cut (an id or a time past what a real one can
+    # be, a stage or a reason past 4,096 characters), and the JSON's path too.
+    # Measured before: a record edited to hold a ``ghp_`` token in its id,
+    # stage, reason or time printed it whole, and one holding a mebibyte there
+    # made a listing of a mebibyte. A record the tool wrote, holding no
+    # credential shape and no reason past the cut, is listed as before.
+    rows = [
+        {
+            **r.to_dict(),
+            "record_id": listed_value(r.record_id, limit=LISTED_RECORD_ID_CHARS),
+            "stage": listed_value(r.stage, limit=LISTED_STAGE_CHARS),
+            "reason": listed_value(r.reason, limit=LISTED_REASON_CHARS),
+            "at": listed_value(r.at),
+            # The file name keeps the first 96 characters of the id it is
+            # keyed on (``keyed_name``), so the path is masked with the id.
+            "path": listed_value(r.path, limit=LISTED_PATH_CHARS),
+        }
+        for r in items
+    ]
     payload = {
         "listing": args.kind or "all",
         "not_listed": not_listed,
         "counts": counts,
         "unreadable": [u.to_dict() for u in scan.unreadable],
-        "records": [r.to_dict() for r in items],
+        "records": rows,
     }
     lines = []
-    for r in items:
+    for r, row in zip(items, rows):
         attempts = f" (attempt {r.attempts})" if r.kind == "deferred" and r.attempts else ""
         lines.append(
-            f"{r.at or '?':<20} {r.kind:<11} {r.record_id!r} at {r.stage}{attempts}: "
-            f"{r.reason or 'no reason recorded'}"
+            f"{row['at'] or '?':<20} {r.kind:<11} {row['record_id']!r} at {row['stage']}"
+            f"{attempts}: {row['reason'] or 'no reason recorded'}"
         )
     for record in scan.unreadable:
         lines.append(f"UNREADABLE  {record.path.name}  {record.reason}")

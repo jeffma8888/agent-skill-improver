@@ -5,8 +5,8 @@ the last ``m // 2`` of the blocks when ``m`` fit its budget, and says how many i
 dropped in a note among the blocks kept. Measured before (3.11 and 3.13): the
 note went in after the first ``m // 2``, so for every odd ``m`` it stood a block
 early and the block after it, the last of the opening ones, read as the first
-past the gap: 109 of 218 renders of 20 messages over budgets of 900 to 8,999
-characters, every one that kept an odd number.
+past the gap: 109 of 218 renders of 20 messages over budgets from 900 to 8,966
+characters in steps of 37, every one that kept an odd number.
 """
 
 from __future__ import annotations
@@ -65,6 +65,26 @@ class TheNoteOfTheBlocksDroppedStandsWhereTheyWereDroppedTests(unittest.TestCase
         )
         self.assertEqual((render.blocks_total, render.blocks_elided), (9, 6))
         self.assertEqual(around_the_note(render.text, 6), ([0, 2], [19]))
+
+    def test_the_note_stands_at_the_gap_when_masking_drops_more(self):
+        # Every third message is assignments, which grow once masked: all twelve
+        # fit the budget as written and seven once masked, so only the second
+        # pick, on the masked lengths, drops any.
+        els: list = []
+        for i in range(12):
+            text = ("tok" + "en=abcdef ") * 150 if i % 3 == 0 else "w" * 1950
+            els += [
+                {"id": f"m{i}", "position": 2 * i, "kind": "message", "role": "user"},
+                {"id": f"x{i}", "position": 2 * i + 1, "kind": "text", "parentId": f"m{i}"}
+                | {"content": text},
+            ]
+        conv = normalize_export({"thread": {"id": "thr"}, "elements": els})
+        self.assertEqual(
+            render_transcript(conv, cfg=PromptConfig(redact_secrets=False)).blocks_elided, 0
+        )
+        render = render_transcript(conv, cfg=PromptConfig())
+        self.assertEqual(render.blocks_elided, 5)
+        self.assertEqual(around_the_note(render.text, 5), ([0, 1, 2, 3], [9, 10, 11]))
 
     def test_the_control_two_blocks_kept_have_the_note_between_them(self):
         render = render_transcript(conversation(), cfg=PromptConfig(max_transcript_chars=900))

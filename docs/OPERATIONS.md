@@ -384,6 +384,11 @@ refused or deferred, newest first, each with its stage and reason (a deferral
 also shows its attempt count). The `daily` summary names only that run's; this
 reads them all back. A file under those directories that does not read as a
 record is listed as unreadable, by name and with the reason, never dropped.
+What it shows of a record's id, stage, reason and time, in the text and in
+`--json`, is masked, and so is the file path `--json` gives; an id past 256
+characters and a time past 120, longer than the tool writes, are cut, and so
+are a stage and a reason past 4,096, the cut saying how much it left out. The
+record's file keeps every field whole.
 
 `review` prints the failing cases with their evidence, the diff, the validation
 result (fixes, regressions, holdouts, judge preference) with the cases behind
@@ -525,7 +530,8 @@ proposal or validation keeps deferring (a model that times out on that one
 skill); a completed propose-and-validate resets that streak too. A persistent
 miss is not transient; read the reason rather than waiting for the retry to work.
 The quarantine *file name* flattens `:` to `_`, so match on the `stage` field
-inside the JSON, not on the name; `asi set-aside` prints the stage as recorded.
+inside the JSON, not on the name; `asi set-aside` prints the stage as recorded
+(masked, and cut past 4,096 characters).
 
 **A skill tree mutation was detected.** The run is `blocked` and exits 5. Do not
 re-run. Find out what wrote to the tree. The candidate evidence gathered during

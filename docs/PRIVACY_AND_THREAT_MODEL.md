@@ -67,9 +67,11 @@ Consequences worth being explicit about:
    characters, a message at `max_message_chars`) is masked before the cut,
    reading up to 4,096 characters past it, so a credential the cut would split
    is masked whole when it ends within them, and a private key whose header is
-   in such a text is masked to the end of what is read, not into the rest of its
-   message; a tool's input and output are first cut when the export is read,
-   before any mask, so one split there keeps the part before the cut. Treat it as defence in depth, never as a control --
+   in such a text is masked to its end line when that is within what is read,
+   else to the end of what is read, never into the rest of its message; a
+   tool's input and output are first cut when the export is read, before any
+   mask, so one split there keeps the part before the cut. Treat it as defence
+   in depth, never as a control --
    what keeps such a value on the machine is the sandbox, not the regex.
 3. **Prompt budgets bind.** When a transcript exceeds the budget, blocks are
    dropped from the middle and the count of dropped blocks is stated in the
