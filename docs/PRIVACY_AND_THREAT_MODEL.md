@@ -68,9 +68,12 @@ Consequences worth being explicit about:
    reading up to 4,096 characters past it, so a credential the cut would split
    is masked whole when it ends within them, and a private key whose header is
    in such a text is masked to its end line when that is within what is read,
-   else to the end of what is read, never into the rest of its message; a
-   tool's input and output are first cut when the export is read, before any
-   mask, so one split there keeps the part before the cut. Treat it as defence
+   else to the end of what is read, never into the rest of its message. A
+   tool's input and output are first cut when the export is read (at 800 and
+   2,000 characters), and that cut moves back to where a credential it would
+   split begins, so the excerpt keeps none of it, when the credential ends
+   within 4,096 characters past the cut; one ending further on, or of a shape
+   the masks do not know, keeps the part before the cut. Treat it as defence
    in depth, never as a control --
    what keeps such a value on the machine is the sandbox, not the regex.
 3. **Prompt budgets bind.** When a transcript exceeds the budget, blocks are

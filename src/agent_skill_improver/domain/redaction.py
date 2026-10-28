@@ -214,6 +214,9 @@ _SHAPES: tuple[_Shape, ...] = (
 
 PLACEHOLDER = "[REDACTED:{label}]"
 
+#: Each placeholder ``redact`` writes, one for each shape.
+PLACEHOLDERS: frozenset[str] = frozenset(PLACEHOLDER.format(label=shape.label) for shape in _SHAPES)
+
 #: Shapes that are a credential on their own evidence: a vendor prefix plus a
 #: long random body, or a key block. Assignment and URL shapes are excluded
 #: here because ``password: <your-password>`` in a skill's prose is common and
@@ -259,6 +262,24 @@ def _matches(shape: _Shape, text: str) -> Iterator[re.Match[str]]:
             continue
         run = shape.run.match(text, start.end())
         pos = run.end() if run is not None else start.end()
+
+
+def credential_starts(text: str) -> list[int]:
+    """Where a credential the shapes know may begin in ``text``, ascending.
+
+    Each shape is matched on ``text`` as written, not on what the shapes
+    before it left as ``redact`` matches it, so these are places for a cut to
+    try rather than what ``redact`` masks: where each match begins and, for a
+    shape that keeps the name it follows (an assignment, a URL parameter),
+    where that name ends.
+    """
+    starts: set[int] = set()
+    for shape in _SHAPES:
+        for found in _matches(shape, text):
+            starts.add(found.start())
+            if shape.keep_prefix:
+                starts.add(found.end(1))
+    return sorted(starts)
 
 
 def credential_labels(text: str) -> tuple[str, ...]:

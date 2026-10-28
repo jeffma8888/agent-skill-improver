@@ -44,6 +44,7 @@ from ..domain.conversation import (
     NormalizedConversation,
     ToolEvent,
 )
+from ..domain.redaction import PLACEHOLDERS, credential_starts, redact
 from ..errors import RecordDefect
 from ..jsonio import loads_untrusted
 
@@ -53,6 +54,10 @@ MAX_EXPORT_BYTES = 32 * 1024 * 1024
 
 DEFAULT_OUTPUT_EXCERPT_CHARS = 2000
 DEFAULT_INPUT_EXCERPT_CHARS = 800
+
+#: How far past an excerpt's cut ``_clip`` reads to see a credential whole, as
+#: far as a prompt's cut reads past its own (``MASK_PAST_CUT`` in ``app/prompts.py``).
+CLIP_READS_PAST = 4096
 
 
 def normalize_export(
@@ -208,9 +213,52 @@ def _compact_json(value: Any) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
+    """A tool's input or output cut at ``limit``, or before a credential the cut would split.
+
+    The excerpt is kept as written, and the prompt masks it later; but a
+    credential cut to a prefix is one the shapes no longer know, so the cut is
+    moved back to where it begins (``_cut_outside_credentials``) and the count
+    says how much was left out. Measured before (3.11 and 3.13): of the 645 cut
+    points inside one credential of each shape ``redact`` knows, 332 in a tool's
+    output and 332 in its input showed more of it raw in the scorer's transcript
+    than the credential whole shows, up to 35 of the 36 characters after an npm
+    token's ``npm_``.
+    """
     if limit <= 0 or len(text) <= limit:
         return text
-    return text[:limit] + f" ...[clipped {len(text) - limit} chars]"
+    cut = _cut_outside_credentials(text, limit)
+    return text[:cut] + f" ...[clipped {len(text) - cut} chars]"
+
+
+def _cut_outside_credentials(text: str, limit: int) -> int:
+    """Where to cut ``text``, at most ``limit``, so the excerpt shows no part of a credential raw.
+
+    The cut is judged against the text read ``CLIP_READS_PAST`` beyond it,
+    masked: its head, masked, must begin that, but for one placeholder it may
+    end in. A credential the cut splits is a mask in the one and a raw prefix
+    in the other, which fails. One the cut itself makes (36 characters after
+    ``npm_`` cut from a longer name), or one the head masks as another shape,
+    is a placeholder at the head's end: it hides characters rather than shows
+    any, and what the head shows before it the text shows too. A window the
+    mask finds nothing in is cut at ``limit``, in the one pass a text with no
+    credential costs. Otherwise the cut is ``limit`` if it shows none raw, else
+    the latest place below it where a credential may begin
+    (``credential_starts``) at which it shows none, so the excerpt keeps no
+    part of the one it would split; else nothing, an empty head showing none.
+    """
+    window = text[: limit + CLIP_READS_PAST]
+    masked = redact(window)
+    if not masked.counts:
+        return limit
+    tried = (limit, *reversed([at for at in credential_starts(window) if at < limit]), 0)
+    return next(cut for cut in tried if _shows_none_raw(text[:cut], masked.text))
+
+
+def _shows_none_raw(head: str, masked: str) -> bool:
+    """Whether ``head``, masked, begins ``masked`` but for one placeholder it may end in."""
+    shown = redact(head).text
+    made = next((mark for mark in PLACEHOLDERS if shown.endswith(mark)), "")
+    return masked.startswith(shown[: len(shown) - len(made)])
 
 
 def _as_int(value: Any, default: int) -> int:
