@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..hashing import tree_digest
+from .redaction import named_path
 
 SKILL_FILENAME = "SKILL.md"
 
@@ -315,7 +316,7 @@ def resolve_groups(
             # there, and saying so now saves the operator a second round.
             also = [s for s in ordered if s.root_id == root_id]
             if also:
-                listed = ", ".join(str(s.path) for s in also)
+                listed = ", ".join(named_path(s.path) for s in also)
                 reason += (
                     f"; that root also holds {len(also)} readable document(s) claiming this "
                     f"skill ({listed}), which is an ambiguity once the passed-over copy reads"
@@ -378,7 +379,7 @@ def resolve_groups(
             for root_id in [canonical.root_id, *tied_roots]:
                 copies_here = [s for s in tied if s.root_id == root_id]
                 if len(copies_here) > 1:
-                    listed = ", ".join(str(s.path) for s in copies_here)
+                    listed = ", ".join(named_path(s.path) for s in copies_here)
                     reason += (
                         f"; root {root_id!r} also holds {len(copies_here)} copies of this skill "
                         f"({listed}), an ambiguity of its own once the tie is settled"
@@ -387,7 +388,7 @@ def resolve_groups(
             continue
         same_root = tuple(s for s in ordered if s.root_id == canonical.root_id)
         if len(same_root) > 1:
-            listed = ", ".join(str(s.path) for s in same_root)
+            listed = ", ".join(named_path(s.path) for s in same_root)
             groups.append(
                 SkillGroup(
                     skill_id,

@@ -529,7 +529,7 @@ class FilesystemSkillStore:
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         if not nofollow and target.is_symlink():
             raise LinkedTargetRefused(
-                f"refusing to read {target}: the document is a symbolic link, which the write "
+                f"refusing to read {named_path(target)}: the document is a symbolic link, which the write "
                 f"path would refuse to replace, so nothing may be shown or approved against it."
             )
         flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
@@ -538,7 +538,7 @@ class FilesystemSkillStore:
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise LinkedTargetRefused(
-                    f"refusing to read {target}: the document is a symbolic link, which the "
+                    f"refusing to read {named_path(target)}: the document is a symbolic link, which the "
                     f"write path would refuse to replace, so nothing may be shown or approved "
                     f"against it."
                 ) from exc
@@ -546,7 +546,7 @@ class FilesystemSkillStore:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise BaseHashMismatch(
-                    f"refusing to read {target}: the document is not a regular file, so there "
+                    f"refusing to read {named_path(target)}: the document is not a regular file, so there "
                     f"is no base text to show or to verify against. Nothing was touched."
                 )
             chunks: list[bytes] = []
@@ -561,7 +561,7 @@ class FilesystemSkillStore:
             text = b"".join(chunks).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise UndecodableDocument(
-                f"skill document {target} is not valid UTF-8 at byte {exc.start} ({exc.reason}); "
+                f"skill document {named_path(target)} is not valid UTF-8 at byte {exc.start} ({exc.reason}); "
                 f"nothing is proposed, shown or applied against text this tool cannot read "
                 f"exactly. The file is left as it is: fix the encoding and the next pass will "
                 f"handle it.",
@@ -583,7 +583,7 @@ class FilesystemSkillStore:
             text = data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise UndecodableDocument(
-                f"skill document {target} is not valid UTF-8 at byte {exc.start} ({exc.reason}); "
+                f"skill document {named_path(target)} is not valid UTF-8 at byte {exc.start} ({exc.reason}); "
                 "nothing is written over text this tool cannot read exactly. The file is left "
                 "as it is: fix the encoding and run the command again.",
                 record_id=target.parent.name,
@@ -617,14 +617,14 @@ class FilesystemSkillStore:
         """The single method in this package that modifies a skill file."""
         if self.read_only:
             raise ReadOnlyViolation(
-                f"refusing to write {path}: this skill store is read-only. "
+                f"refusing to write {named_path(path)}: this skill store is read-only. "
                 "The daily driver always opens the store read-only; only `asi apply` "
                 "opens it writable."
             )
         # Every judgement of the target, made where ``review`` makes it too.
         target = self.assert_write_target(Path(path), action="write", skill_id=skill_id)
         if not target.exists():
-            raise BaseHashMismatch(f"refusing to write {target}: file does not exist")
+            raise BaseHashMismatch(f"refusing to write {named_path(target)}: file does not exist")
         # From here on the document is addressed through a handle on its own
         # directory, taken with O_NOFOLLOW at every component below the root, so
         # the hash that is checked, the bytes that are backed up, the write and
@@ -636,7 +636,7 @@ class FilesystemSkillStore:
             current = self._document_sha256(data, target)
             if current != expected_sha256:
                 raise BaseHashMismatch(
-                    f"refusing to write {target}: on-disk sha256 is {current[:12]} but the "
+                    f"refusing to write {named_path(target)}: on-disk sha256 is {current[:12]} but the "
                     f"candidate was written against {expected_sha256[:12]}. The skill changed "
                     "since the proposal was made -- re-run validation against the new base."
                 )
@@ -666,7 +666,7 @@ class FilesystemSkillStore:
             backup_sha = sha256_file(backup_path)
             if backup_sha != current:
                 raise BaseHashMismatch(
-                    f"backup verification failed for {target}: copy hashes {backup_sha[:12]} "
+                    f"backup verification failed for {named_path(target)}: copy hashes {backup_sha[:12]} "
                     f"but source hashes {current[:12]}; refusing to proceed"
                 )
             new_sha = sha256_text(text)
@@ -703,9 +703,9 @@ class FilesystemSkillStore:
                 # with a raw PermissionError on the temp file, exit 70.
                 _remove_manifest(manifest_path)
                 raise SkillWriteFailed(
-                    f"refusing to apply: {target} could not be written "
+                    f"refusing to apply: {named_path(target)} could not be written "
                     f"({exc.strerror or exc}). The skill is unchanged; the copy taken "
-                    f"before the write is at {backup_path}."
+                    f"before the write is at {named_path(backup_path)}."
                 ) from exc
             written_sha, found = self._read_back(parent_fd, leaf, target)
             if written_sha != new_sha:
@@ -720,14 +720,14 @@ class FilesystemSkillStore:
                     _write_pinned(parent_fd, leaf, data, mode=written_mode)
                 except OSError as exc:
                     raise BaseHashMismatch(
-                        f"post-write verification failed for {target} (expected "
+                        f"post-write verification failed for {named_path(target)} (expected "
                         f"{new_sha[:12]}, found {found}), and the original could not be put "
                         f"back ({exc.strerror or exc}). The copy taken before the write is at "
-                        f"{backup_path}: restore it by hand once the name can be written."
+                        f"{named_path(backup_path)}: restore it by hand once the name can be written."
                     ) from exc
                 _remove_manifest(manifest_path)
                 raise BaseHashMismatch(
-                    f"post-write verification failed for {target} "
+                    f"post-write verification failed for {named_path(target)} "
                     f"(expected {new_sha[:12]}, found {found}); original restored"
                 )
         finally:
@@ -806,7 +806,9 @@ class FilesystemSkillStore:
         expected = manifest["previous_sha256"]
         applied = manifest["new_sha256"]
         if self.read_only:
-            raise ReadOnlyViolation(f"refusing to roll back {target}: store is read-only")
+            raise ReadOnlyViolation(
+                f"refusing to roll back {named_path(target)}: store is read-only"
+            )
         # The manifest's paths are text anyone with the state tree can edit, so
         # judging them can fail in the platform's hands as well as ours. A NUL
         # byte or a name past the filesystem's limit raised ValueError or
@@ -821,7 +823,7 @@ class FilesystemSkillStore:
         except (OSError, ValueError, RuntimeError) as exc:
             reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
             raise BackupUnusable(
-                f"refusing to roll back: what backup manifest {manifest_path} names could not "
+                f"refusing to roll back: what backup manifest {named_path(manifest_path)} names could not "
                 f"be checked ({reason}). No file was touched."
             ) from exc
         try:
@@ -851,8 +853,8 @@ class FilesystemSkillStore:
         self._assert_not_protected(target)
         if backup.is_symlink() or not backup.is_file():
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} is missing, a symbolic "
-                f"link or not a regular file. {target} is unchanged."
+                f"refusing to roll back {named_path(target)}: backup {named_path(backup)} is missing, a symbolic "
+                f"link or not a regular file. {named_path(target)} is unchanged."
             )
         # Apply writes the backup and its manifest into one directory under the
         # state tree. Measured before: a manifest naming a backup anywhere else
@@ -860,15 +862,15 @@ class FilesystemSkillStore:
         # was read and written into the skill.
         if backup.parent.resolve() != manifest_path.parent.resolve():
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} is not in the directory of "
-                f"its manifest {manifest_path}, where apply writes it, so it is not the copy "
-                f"this apply took. {target} is unchanged."
+                f"refusing to roll back {named_path(target)}: backup {named_path(backup)} is not in the directory of "
+                f"its manifest {named_path(manifest_path)}, where apply writes it, so it is not the copy "
+                f"this apply took. {named_path(target)} is unchanged."
             )
         data = _read_regular_file(backup)
         if data is None:
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} is not a regular file. "
-                f"{target} is unchanged."
+                f"refusing to roll back {named_path(target)}: backup {named_path(backup)} is not a regular file. "
+                f"{named_path(target)} is unchanged."
             )
         # Apply backs up only a document it read as UTF-8, so a backup that is
         # not is not that copy. Measured before: read with its bad bytes
@@ -879,17 +881,17 @@ class FilesystemSkillStore:
             text = data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} is not valid UTF-8 at byte "
+                f"refusing to roll back {named_path(target)}: backup {named_path(backup)} is not valid UTF-8 at byte "
                 f"{exc.start} ({exc.reason}), and apply backs up only a document it read as "
-                f"UTF-8, so it is not the copy this apply took. {target} is unchanged."
+                f"UTF-8, so it is not the copy this apply took. {named_path(target)} is unchanged."
             ) from exc
         stored = sha256_text(text)
         if stored != expected:
             raise BackupUnusable(
-                f"refusing to roll back {target}: backup {backup} hashes {stored[:12]} but the "
+                f"refusing to roll back {named_path(target)}: backup {named_path(backup)} hashes {stored[:12]} but the "
                 f"manifest records {expected[:12]}. The backup is not the text this apply "
                 f"replaced, so restoring it would overwrite the live skill with unverified "
-                f"content. {target} is unchanged."
+                f"content. {named_path(target)} is unchanged."
             )
         # The manifest recorded a resolved regular file. A symlink now sitting at
         # that path is not that file, and a copy through it would write wherever
@@ -897,7 +899,7 @@ class FilesystemSkillStore:
         # because hashing follows the link and would report the decoy's bytes.
         if target.is_symlink():
             raise BackupUnusable(
-                f"refusing to roll back {target}: the recorded target is now a symbolic link, "
+                f"refusing to roll back {named_path(target)}: the recorded target is now a symbolic link, "
                 f"not the regular file this apply wrote. Neither the link nor what it points "
                 f"to was touched."
             )
@@ -913,7 +915,7 @@ class FilesystemSkillStore:
         self.assert_canonical_target(target, action="roll back")
         if not target.is_file():
             raise BaseHashMismatch(
-                f"refusing to roll back {target}: the recorded target is not a regular file "
+                f"refusing to roll back {named_path(target)}: the recorded target is not a regular file "
                 f"any more, so nothing here can be verified as the text this apply wrote."
             )
         parent_fd, leaf = self._open_parent_pinned(target, verb="roll back")
@@ -946,10 +948,10 @@ class FilesystemSkillStore:
             }
         if live != applied:
             raise BaseHashMismatch(
-                f"refusing to roll back {target}: the live file hashes {live[:12]}, but this "
+                f"refusing to roll back {named_path(target)}: the live file hashes {live[:12]}, but this "
                 f"apply wrote {applied[:12]}. The skill was edited after the apply, so the "
                 f"backup would overwrite work this candidate never touched. Restore by hand "
-                f"from {backup} if that is what you want. {target} is unchanged."
+                f"from {named_path(backup)} if that is what you want. {named_path(target)} is unchanged."
             )
         # The backup was tightened to 0600 when it was taken, so restoring its
         # bytes must carry the skill's recorded mode or the skill ends up
@@ -963,8 +965,8 @@ class FilesystemSkillStore:
             # Measured before: a skill directory at 0555 made rollback fall
             # with a raw PermissionError on the temp file, exit 70.
             raise SkillWriteFailed(
-                f"refusing to roll back: {target} could not be written ({exc.strerror or exc}). "
-                f"It still holds the text this apply wrote, and the backup {backup} is "
+                f"refusing to roll back: {named_path(target)} could not be written ({exc.strerror or exc}). "
+                f"It still holds the text this apply wrote, and the backup {named_path(backup)} is "
                 "unchanged."
             ) from exc
         restored, found = self._read_back(parent_fd, leaf, target)
@@ -972,7 +974,7 @@ class FilesystemSkillStore:
             # The backup has been written over the skill by now, so a refusal
             # saying nothing was touched would be false: say what is there.
             raise BaseHashMismatch(
-                f"rollback verification failed: {target} was rewritten from {backup}, but "
+                f"rollback verification failed: {named_path(target)} was rewritten from {named_path(backup)}, but "
                 f"reading it back found {found}, not {expected[:12]}. Compare the two by hand."
             )
         self._snapshot_cache = None
@@ -999,19 +1001,19 @@ class FilesystemSkillStore:
         # fifo would hold the process until something wrote to it.
         if path.is_symlink() or not path.is_file():
             raise BackupUnusable(
-                f"refusing to roll back: backup manifest {path} is not a regular file "
+                f"refusing to roll back: backup manifest {named_path(path)} is not a regular file "
                 "(a symlink, a fifo or a missing entry is never read). No file was touched."
             )
         try:
             manifest = read_json(path)
         except (OSError, ValueError) as exc:
             raise BackupUnusable(
-                f"refusing to roll back: backup manifest {path} could not be read ({exc}). "
+                f"refusing to roll back: backup manifest {named_path(path)} could not be read ({exc}). "
                 "No file was touched."
             ) from exc
         if not isinstance(manifest, dict):
             raise BackupUnusable(
-                f"refusing to roll back: backup manifest {path} is not a JSON object. "
+                f"refusing to roll back: backup manifest {named_path(path)} is not a JSON object. "
                 "No file was touched."
             )
         # Each is text in a manifest this tool wrote. A number or an object
@@ -1024,7 +1026,7 @@ class FilesystemSkillStore:
         ]
         if missing:
             raise BackupUnusable(
-                f"refusing to roll back: backup manifest {path} is missing "
+                f"refusing to roll back: backup manifest {named_path(path)} is missing "
                 f"{', '.join(missing)}, or holds something other than text there. "
                 "No file was touched."
             )
@@ -1112,7 +1114,7 @@ class FilesystemSkillStore:
         """
         if target.name != SKILL_FILENAME:
             raise NonDocumentWriteRefused(
-                f"refusing to {verb} {target}: this tool only ever replaces {SKILL_FILENAME}. "
+                f"refusing to {verb} {named_path(target)}: this tool only ever replaces {SKILL_FILENAME}. "
                 "Executable payloads in a skill directory (hooks, launchers, MCP wrappers) are "
                 "privileged code and are never edited by an automated proposal."
             )
@@ -1122,7 +1124,7 @@ class FilesystemSkillStore:
         for guard in self._protected:
             if resolved == guard or guard in resolved.parents:
                 raise SelfMutationRefused(
-                    f"refusing to {verb} {target}: it is inside a protected path ({guard}). "
+                    f"refusing to {verb} {named_path(target)}: it is inside a protected path ({named_path(guard)}). "
                     "This tool never edits its own source, config, or rubrics -- a loop that "
                     "can rewrite its own scoring criteria has no gate at all."
                 )
@@ -1147,7 +1149,7 @@ class FilesystemSkillStore:
                     cursor = cursor / part
                     if cursor.is_symlink():
                         raise LinkedTargetRefused(
-                            f"refusing to {verb} {spelled}: {cursor} is a symbolic link, so the "
+                            f"refusing to {verb} {named_path(spelled)}: {named_path(cursor)} is a symbolic link, so the "
                             f"replacement would land wherever it points rather than on the skill the "
                             f"candidate was reviewed against. Neither the link nor its target "
                             f"was touched."
@@ -1169,8 +1171,8 @@ class FilesystemSkillStore:
             root_resolved = Path(root.path).resolve()
             if resolved == root_resolved or root_resolved in resolved.parents:
                 raise LinkedTargetRefused(
-                    f"refusing to {verb} {spelled}: it is not spelled under any configured skill "
-                    f"root yet resolves to {resolved} inside root {root.id}, so it reaches the "
+                    f"refusing to {verb} {named_path(spelled)}: it is not spelled under any configured skill "
+                    f"root yet resolves to {named_path(resolved)} inside root {root.id}, so it reaches the "
                     f"skill through a symbolic link. Spell the target as the root does. Nothing "
                     f"was touched."
                 )
@@ -1188,7 +1190,7 @@ class FilesystemSkillStore:
         """
         if not PINNED_IO_SUPPORTED:
             raise LinkedTargetRefused(
-                f"refusing to {verb} {spelled}: this platform cannot address a file through "
+                f"refusing to {verb} {named_path(spelled)}: this platform cannot address a file through "
                 f"a directory handle, so the write could not be pinned to the directory that "
                 f"was checked. Nothing was touched."
             )
@@ -1201,7 +1203,7 @@ class FilesystemSkillStore:
                     continue
                 if not below.parts:
                     raise NonDocumentWriteRefused(
-                        f"refusing to {verb} {spelled}: it is the skill root {root.id} itself, "
+                        f"refusing to {verb} {named_path(spelled)}: it is the skill root {root.id} itself, "
                         f"not a document in it. Nothing was touched."
                     )
                 fd = os.open(str(root_form), os.O_RDONLY | os.O_DIRECTORY)
@@ -1214,12 +1216,12 @@ class FilesystemSkillStore:
                         except OSError as exc:
                             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                                 raise LinkedTargetRefused(
-                                    f"refusing to {verb} {spelled}: {root_form / part} is a "
+                                    f"refusing to {verb} {named_path(spelled)}: {named_path(root_form / part)} is a "
                                     f"symbolic link or not a directory on the way to the "
                                     f"document, judged on the open handle. Nothing was touched."
                                 ) from exc
                             raise BaseHashMismatch(
-                                f"refusing to {verb} {spelled}: {root_form / part} could not be "
+                                f"refusing to {verb} {named_path(spelled)}: {named_path(root_form / part)} could not be "
                                 f"opened ({exc.strerror}). Nothing was touched."
                             ) from exc
                         os.close(fd)
@@ -1229,7 +1231,7 @@ class FilesystemSkillStore:
                     raise
                 return fd, below.parts[-1]
         raise LinkedTargetRefused(
-            f"refusing to {verb} {spelled}: it lies under no configured skill root, so there "
+            f"refusing to {verb} {named_path(spelled)}: it lies under no configured skill root, so there "
             f"is no directory handle to pin it to. Nothing was touched."
         )
 
@@ -1272,18 +1274,18 @@ class FilesystemSkillStore:
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise LinkedTargetRefused(
-                    f"refusing to {verb} {target}: the document is a symbolic link, judged on "
+                    f"refusing to {verb} {named_path(target)}: the document is a symbolic link, judged on "
                     f"the open handle. Neither the link nor its target was touched."
                 ) from exc
             raise BaseHashMismatch(
-                f"refusing to {verb} {target}: the document could not be opened "
+                f"refusing to {verb} {named_path(target)}: the document could not be opened "
                 f"({exc.strerror}). Nothing was touched."
             ) from exc
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise BaseHashMismatch(
-                    f"refusing to {verb} {target}: the document is not a regular file. "
+                    f"refusing to {verb} {named_path(target)}: the document is not a regular file. "
                     f"Nothing was touched."
                 )
             chunks: list[bytes] = []
@@ -1322,19 +1324,19 @@ class FilesystemSkillStore:
             # mirror, but calling it one, of an unknown source, misdescribes
             # it: the resolver's own reason says what is unsettled.
             raise MirrorEditRefused(
-                f"refusing to {action} {target}: skill {group.skill_id!r} has no canonical copy "
+                f"refusing to {action} {named_path(target)}: skill {quoted_value(group.skill_id)} has no canonical copy "
                 f"({group.canonical_reason}); that must be settled before anything is written."
             )
         if kind == "mirror":
             canonical = group.canonical.path if group and group.canonical else "<unknown>"
             raise MirrorEditRefused(
-                f"refusing to {action} {target}: it is a mirror copy. The canonical source is "
-                f"{canonical}. Editing a mirror either gets overwritten by the next sync or "
+                f"refusing to {action} {named_path(target)}: it is a mirror copy. The canonical source is "
+                f"{named_path(canonical)}. Editing a mirror either gets overwritten by the next sync or "
                 "never reaches the agent that loads the canonical file."
             )
         if kind == "unknown":
             raise MirrorEditRefused(
-                f"refusing to {action} {target}: it is not a skill document in any configured "
+                f"refusing to {action} {named_path(target)}: it is not a skill document in any configured "
                 "root, so this tool cannot tell whether it is canonical. An unrecognised "
                 "target is refused rather than assumed safe."
             )
