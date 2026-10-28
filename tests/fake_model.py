@@ -49,7 +49,9 @@ SEEDED_FAILURES = {
 
 def _citable(user: str) -> list[dict]:
     match = re.search(
-        r"## CITABLE ELEMENTS \(trusted, derived locally\)\n```json\n(.*?)\n```", user, re.S
+        r"## CITABLE ELEMENTS [^\n]*\n<<<UNTRUSTED-DATA citable-elements \S+>>>\n```json\n(.*?)\n```",
+        user,
+        re.S,
     )
     if not match:
         return []
