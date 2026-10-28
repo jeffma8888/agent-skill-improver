@@ -53,6 +53,9 @@ SHAPED = (
     _j("xox", "b-", "123456789012-abcdefghijkl"),
     _j("sk-", "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6"),
     _j("AI", "za", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"),
+    _j("sk_", "live_", "Ab3dEf6hIj9kLm2nOp5qRs8t"),
+    _j("npm_", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8"),
+    _j("hf_", "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh"),
     _j("ey", "JhbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", ".", "c2lnbmF0dXJlc2ln"),
     _j("Authorization: Bear", "er\n", "abcdefghijklmnop0123456789"),
     _j(

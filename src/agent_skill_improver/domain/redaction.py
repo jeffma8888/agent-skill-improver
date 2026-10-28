@@ -100,16 +100,19 @@ _URL_VALUE = (
 )
 
 
-def _lead(first: str) -> str:
-    """``_LEAD`` for a shape whose first character is one of ``first``.
+def _lead(first: str, then: str = "") -> str:
+    """``_LEAD`` for a shape whose first character is one of ``first``, then ``then``.
 
     The lookahead is there for speed alone. ``_LEAD`` tries seven branches,
     and a search tries it at every position; with nothing cheaper first, 4 MiB
     of prose took about 2.7 s to mask instead of 0.4 s (3.13). A character the
     lookahead leaves out is a shape that never matches, so each shape's
-    tests give it a glued sample of every way it can begin.
+    tests give it a glued sample of every way it can begin. ``then`` is what
+    follows that character in every match, for a shape whose first character
+    is a common letter: with ``r`` and ``s`` alone, the Stripe shape tried
+    ``_LEAD`` at every ``r`` and ``s`` in the text.
     """
-    return f"(?=[{first}])" + _LEAD
+    return f"(?=[{first}]{then})" + _LEAD
 
 
 #: Every shape ``tools/leakscan.py`` refuses in the repository is recognised
@@ -128,6 +131,23 @@ _SHAPES: tuple[_Shape, ...] = (
     _Shape("slack-token", re.compile(_lead("x") + r"x" + r"ox[baprs]-[A-Za-z0-9-]{10,}" + _TAIL)),
     _Shape("model-provider-key", re.compile(_lead("s") + r"s" + r"k-[A-Za-z0-9_-]{20,}" + _TAIL)),
     _Shape("google-api-key", re.compile(_lead("A") + r"A" + r"Iza[0-9A-Za-z_-]{30,}" + _TAIL)),
+    # Stripe's secret and restricted keys begin ``sk_`` or ``rk_`` and then the
+    # mode, ``live_`` or ``test_`` (or ``prod_``, which the gitleaks rule also
+    # takes); its publishable keys (``pk_``) are meant to be shown and are left
+    # alone. At least 20 letters and digits follow, the floor the GitHub and
+    # model-provider shapes use, and no ceiling: the gitleaks rule stops at 99,
+    # and with a ceiling ``_TAIL`` would leave a longer key unmasked.
+    _Shape(
+        "stripe-secret-key",
+        re.compile(
+            _lead("rs", "k_") + r"(?:s|r)" + r"k_(?:live|test|prod)_[A-Za-z0-9]{20,}" + _TAIL
+        ),
+    ),
+    # An npm access token is ``npm_`` and 36 letters and digits, the last six a
+    # checksum; a Hugging Face token is ``hf_`` and 34 letters. Each is exactly
+    # that long, so a longer run after either prefix is a name, not a token.
+    _Shape("npm-token", re.compile(_lead("n", "pm_") + r"n" + r"pm_[A-Za-z0-9]{36}" + _TAIL)),
+    _Shape("huggingface-token", re.compile(_lead("h", "f_") + r"h" + r"f_[A-Za-z]{34}" + _TAIL)),
     _Shape(
         "jwt",
         re.compile(_lead("e") + r"e" + r"yJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
@@ -206,6 +226,9 @@ HIGH_CONFIDENCE_LABELS: frozenset[str] = frozenset(
         "slack-token",
         "model-provider-key",
         "google-api-key",
+        "stripe-secret-key",
+        "npm-token",
+        "huggingface-token",
         "jwt",
         "bearer-token",
         "private-key-block",
