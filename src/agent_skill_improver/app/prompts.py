@@ -42,14 +42,24 @@ from ..domain.validation import ReplayCase
 from ..jsonio import dumps
 
 FENCE_WORD = "UNTRUSTED-DATA"
-#: A forged delimiter: two or more ``<``, space, an optional ``/`` and space,
-#: ``END-`` for a closing one, the fence word, anything up to a ``>`` and up to
-#: three of those. Searched in time in proportion to the text: a run of ``<``
-#: is tried from its first one only, since what follows the run is never a
-#: ``<`` and a start inside the run fails whenever the first one did; and the
-#: space around the ``/`` has one way to be split, where ``\s*/?\s*`` had one
-#: for each place in it.
-_FENCE_RE = re.compile(r"(?<!<)<{2,}\s*(?:/\s*)?(?:END-)?UNTRUSTED-DATA[^>]*>{0,3}", re.IGNORECASE)
+#: Space, and the zero-width characters a reader cannot see, which ``\s`` does
+#: not match: a zero-width space, non-joiner and joiner, a word joiner and a
+#: byte-order mark.
+_GAP = r"[\s\u200b-\u200d\u2060\ufeff]*"
+#: A forged delimiter's own syntax: two or more ``<``, a gap, an optional ``/``
+#: and gap, ``END-`` for a closing one, the fence word and up to three ``>``.
+#: Only that is replaced. What follows the word, a label, a nonce or anything
+#: else, is the content's own text and stays, so a delimiter left open hides
+#: nothing after it. Measured before: the pattern ran on to the next ``>``
+#: anywhere, across lines, so ``<<UNTRUSTED-DATA`` with no ``>`` in a message
+#: hid the agent's reply, its tool call and the next turn from the scorer.
+#: Searched in time in proportion to the text: a run of ``<`` is tried from its
+#: first one only, since what follows the run is never a ``<`` and a start
+#: inside the run fails whenever the first one did; and the gap around the
+#: ``/`` has one way to be split, where ``\s*/?\s*`` had one for each place.
+_FENCE_RE = re.compile(
+    r"(?<!<)<{2,}" + _GAP + r"(?:/" + _GAP + r")?(?:END-)?UNTRUSTED-DATA>{0,3}", re.IGNORECASE
+)
 NEUTRALIZED = "[neutralized-delimiter]"
 ELISION_MARKER = "[... {n} transcript block(s) elided by the local prompt budget ...]"
 
@@ -191,9 +201,10 @@ def _listed_value(value: str, cfg: PromptConfig) -> str:
     """One untrusted string as a fenced JSON list shows it, before the list is encoded.
 
     Masked when the transcript is, and any forged delimiter in it neutralized,
-    so neither the mask nor the marker can reach past the value into the JSON:
-    an assignment shape such as ``password=`` runs to the next space, and an
-    opening delimiter with no ``>`` runs to the next ``>``.
+    so the mask cannot reach past the value into the JSON: an assignment shape
+    such as ``password=`` runs to the next space, quotes and all. (A forged
+    delimiter is replaced by its own characters only, but it once ran to the
+    next ``>``, and neutralizing before encoding keeps the list safe either way.)
     """
     shown = redact(value).text if cfg.redact_secrets else value
     return _FENCE_RE.sub(NEUTRALIZED, shown)
@@ -259,9 +270,9 @@ def scorer_user_prompt(
     # delimiter and an instruction, or with a ``ghp_`` token, reached the scorer
     # raw there, the token whole though the transcript masked it. Each id is
     # masked and neutralized before the list is encoded, never the encoded text:
-    # a ``password=`` shape runs to the next space and an opening delimiter with
-    # no ``>`` runs to the next ``>``, so either took the list's own quotes and
-    # brackets with it, and a list that does not parse leaves nothing to cite.
+    # a ``password=`` shape runs to the next space, and an opening delimiter with
+    # no ``>`` then ran to the next ``>``, so either took the list's own quotes
+    # and brackets with it, and a list that does not parse leaves nothing to cite.
     listed = [
         {**element, "element_id": _listed_value(element["element_id"], cfg)}
         for element in citable_elements(conversation)
