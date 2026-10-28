@@ -6,7 +6,9 @@ Every prompt in this package is assembled from two kinds of material:
   contract;
 * **untrusted**, which is content captured from somewhere else -- a past
   conversation (the element ids a scorer may cite among it: they are the
-  export's own text), a skill file, or a model-authored replacement skill text.
+  export's own text), a skill file, or a model-authored replacement skill text,
+  and a model's own words about any of these: the scorer's rationale, which the
+  improver reads, and the improver's hypothesis, which the judge reads.
 
 Untrusted material only ever appears inside a delimited envelope carrying a
 run-specific nonce, and any attempt inside that material to open or close such an
@@ -185,14 +187,21 @@ _UNTRUSTED_RULE = (
 )
 
 
-def _listed_id(element_id: str, cfg: PromptConfig) -> str:
-    """An element id as the citable list shows it, before the list is encoded.
+def _listed_value(value: str, cfg: PromptConfig) -> str:
+    """One untrusted string as a fenced JSON list shows it, before the list is encoded.
 
     Masked when the transcript is, and any forged delimiter in it neutralized,
-    so neither the mask nor the marker can reach past the id into the JSON.
+    so neither the mask nor the marker can reach past the value into the JSON:
+    an assignment shape such as ``password=`` runs to the next space, and an
+    opening delimiter with no ``>`` runs to the next ``>``.
     """
-    shown = redact(element_id).text if cfg.redact_secrets else element_id
+    shown = redact(value).text if cfg.redact_secrets else value
     return _FENCE_RE.sub(NEUTRALIZED, shown)
+
+
+def _masked(text: str, cfg: PromptConfig) -> str:
+    """Untrusted prose, masked when the transcript is; the fence neutralizes it."""
+    return redact(text).text if cfg.redact_secrets else text
 
 
 def scorer_system_prompt() -> str:
@@ -254,7 +263,7 @@ def scorer_user_prompt(
     # no ``>`` runs to the next ``>``, so either took the list's own quotes and
     # brackets with it, and a list that does not parse leaves nothing to cite.
     listed = [
-        {**element, "element_id": _listed_id(element["element_id"], cfg)}
+        {**element, "element_id": _listed_value(element["element_id"], cfg)}
         for element in citable_elements(conversation)
     ]
     citable = dumps(listed).rstrip("\n")
@@ -349,15 +358,23 @@ def improver_user_prompt(
     cfg: PromptConfig,
     seed: str,
 ) -> str:
+    # The rationale is the scorer's own words about an untrusted transcript, and
+    # the case id, the conversation id and each cited element id are the
+    # export's text. Measured before: the list sat outside every fence under a
+    # heading calling it trusted, so a forged delimiter and an instruction in any
+    # of them reached the improver there. Each is masked and neutralized before
+    # the list is encoded (``_listed_value``), and the list is fenced.
     failures = [
         {
-            "failure_case_id": c.id,
+            "failure_case_id": _listed_value(c.id, cfg),
             "rubric_id": c.rubric_id,
             "criterion_id": c.criterion_id,
             "criterion_title": c.criterion_title,
-            "conversation_id": c.conversation_id,
-            "rationale": c.rationale,
-            "evidence": [e.to_dict() for e in c.evidence],
+            "conversation_id": _listed_value(c.conversation_id, cfg),
+            "rationale": _listed_value(c.rationale, cfg),
+            "evidence": [
+                {**e.to_dict(), "element_id": _listed_value(e.element_id, cfg)} for e in c.evidence
+            ],
             "attribution_basis": [a.basis for a in c.attributions],
         }
         for c in cases
@@ -369,8 +386,13 @@ def improver_user_prompt(
         "recur. The file is at " + skill_path + "."
     )
     sections.append(
-        "## RUBRIC FAILURES TO ADDRESS (trusted, derived locally from scored conversations)\n"
-        "```json\n" + dumps(failures).rstrip("\n") + "\n```"
+        "## RUBRIC FAILURES TO ADDRESS (untrusted data: the scorer's rationale and the "
+        "export's ids)\n"
+        + wrap_untrusted(
+            "```json\n" + dumps(failures).rstrip("\n") + "\n```",
+            label="failures",
+            nonce=nonce_for(seed, f"failures:{skill_id}"),
+        )
     )
     sections.append(
         f"## CURRENT SKILL TEXT (untrusted data)\nskill_id: {skill_id}\n"
@@ -388,9 +410,10 @@ def improver_user_prompt(
         positions = [e.position for e in case.evidence]
         render = render_transcript(conversation, cfg=cfg, only_positions=positions)
         if render.text.strip():
-            excerpts.append(
-                f"[conversation {case.conversation_id} / case {case.id}]\n{render.text}"
-            )
+            # The excerpt's text is masked as the transcript is; its head names
+            # the export's thread id twice, so it is masked the same way.
+            head = _masked(f"[conversation {case.conversation_id} / case {case.id}]", cfg)
+            excerpts.append(f"{head}\n{render.text}")
     if excerpts:
         sections.append(
             "## CITED CONVERSATION EXCERPTS (untrusted data)\n"
@@ -451,8 +474,20 @@ def judge_user_prompt(
         "## TASK\nDecide which skill version better prevents the observed failure.",
         "## CRITERION (trusted)\n"
         f"criterion_id: {case.criterion_id}\nquestion: {criterion_question}",
-        "## OBSERVED FAILURE (trusted, derived locally)\n"
-        f"conversation_id: {case.conversation_id}\nrationale: {failure_rationale}",
+        # The rationale is the proposal's own hypothesis (the improver's words,
+        # the role being judged) and the conversation id is the export's text.
+        # Measured before: both sat outside every fence under a heading calling
+        # them trusted, so the improver could write into the judge's
+        # instructions. Now they are fenced, and masked as the transcript is.
+        "## OBSERVED FAILURE (untrusted data: the conversation's id and the "
+        "proposal's own hypothesis)\n"
+        + wrap_untrusted(
+            _masked(
+                f"conversation_id: {case.conversation_id}\nrationale: {failure_rationale}", cfg
+            ),
+            label="observed-failure",
+            nonce=nonce_for(seed, f"observed:{case.key}"),
+        ),
     ]
     for label in sorted(texts_by_label):
         sections.append(
