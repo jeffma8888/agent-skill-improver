@@ -123,13 +123,24 @@ def render_argv(template: Sequence[str], values: dict[str, str]) -> list[str]:
     {query}``) goes with the empty value too; write such flags elsewhere in
     the template. ``--`` (end of options), a bare ``-`` and a negative number
     are literals that never introduce a value and are kept.
+
+    Each placeholder is filled once, in one pass over the template argument,
+    so a value is sent as written even when it holds a placeholder's name.
+    Measured before (3.11 and 3.13, the same on both): the values were filled
+    one after another, so a value naming a placeholder filled later had that
+    one's value put in its place. Of 52 cases (a window, a query or a
+    workspace naming another placeholder, alone or in other text, with that
+    other value set or empty, for the default templates and one with the
+    query inline), 28 sent other text than the value, and 6 dropped an
+    argument: a window naming an empty query or workspace rendered empty and
+    went with ``--after``, so discovery ran with no window, and a query naming
+    an empty workspace was not sent, so the search was not narrowed by it.
     """
     out: list[str] = []
     sources: list[str] = []  # the template part each emitted argument came from
+    fill = re.compile("|".join(re.escape("{" + name + "}") for name in values))
     for part in template:
-        rendered = part
-        for name, value in values.items():
-            rendered = rendered.replace("{" + name + "}", value)
+        rendered = fill.sub(lambda found: values[found.group()[1:-1]], part) if values else part
         if rendered == "" and part != "":
             if sources and _is_literal_flag(sources[-1]):
                 out.pop()

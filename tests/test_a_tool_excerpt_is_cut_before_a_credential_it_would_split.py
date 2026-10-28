@@ -243,6 +243,16 @@ class TheCutIsTheLatestThatSplitsNoneTests(unittest.TestCase):
         self.assertEqual(len(_kept(_clip(text, limit))), begins)
         self.assertNotIn("a" * 20, _transcript("output", text))
 
+    def test_with_no_place_that_shows_none_raw_the_excerpt_keeps_nothing(self) -> None:
+        # No text measured reaches it, but with no place below the limit to try
+        # and a limit that splits a token, the cut falls to the empty head, which
+        # shows nothing, rather than failing for want of a place.
+        limit = LIMITS["output"]
+        text = "x" * (limit - 5) + " " + TOKEN + " tail"
+        self.assertEqual(len(_kept(_clip(text, limit))), limit - 4, "the token's start is tried")
+        with mock.patch.object(transcript_export, "credential_starts", return_value=[]):
+            self.assertEqual(_clip(text, limit), f" ...[clipped {len(text)} chars]")
+
     def test_each_shape_is_found_where_it_begins_and_a_kept_name_where_it_ends(self) -> None:
         for secret in SHAPED:
             with self.subTest(secret=secret[:12]):

@@ -63,6 +63,8 @@ fixtures_dir = "examples/fixtures"
 # LITERAL empty or whitespace element ("") is refused at load, by position: it
 # would be sent to the tool verbatim as an argument. So no config can express a
 # deliberately empty argument; a tool that needs one gets a one-line wrapper.
+# Each placeholder is filled once, from the template, so a value is sent as
+# written even when its own text names a placeholder.
 #
 # Your tool has to satisfy two documented contracts, both described in the
 # adapters: a discovery line grammar (numbered `N. "TITLE" (YYYY-MM-DD)`, an
