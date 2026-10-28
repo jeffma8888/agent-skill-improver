@@ -43,7 +43,9 @@ cronie, macOS) rewrites the command before the shell sees it, turning a bare `%`
 into a newline and consuming a backslash; busybox crond does no such rewriting,
 so a path that needs both quoting and a `%` is not portable to it. Inside the
 plist the paths are entity-escaped. A path with nothing awkward in it is printed
-exactly as it is.
+exactly as it is. The template is read once and each placeholder replaced as
+it is met, so a path whose own text looks like a placeholder is printed as
+itself.
 A config that does not load is a `ConfigError` here as everywhere, exit 3: a job
 for a config that cannot run is not worth printing.
 

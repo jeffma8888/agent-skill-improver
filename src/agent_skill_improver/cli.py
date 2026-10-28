@@ -1650,8 +1650,18 @@ def cmd_scheduler_template(args: argparse.Namespace) -> int:
     )
     for _marker, label, value in values:
         _refuse_a_path_no_template_carries(label, value, flavor=args.flavor)
-    for marker, _label, value in values:
-        text = text.replace(marker, quote(value))
+    # One pass over the template, so a value is never read again for a marker:
+    # replaced one marker at a time, a path holding a later marker's text had
+    # that value spliced into it after it was quoted. Measured before: a config
+    # under a directory named ``q __STATE__ ;echo INJECTED;`` printed a cron
+    # line whose shell commands were split at both semicolons, and the plist
+    # named a config that does not exist.
+    spelled = {marker: quote(value) for marker, _label, value in values}
+    text = re.sub(
+        "|".join(re.escape(marker) for marker in spelled),
+        lambda found: spelled[found.group(0)],
+        text,
+    )
     _say(text)
     _err(
         "\nThis template was printed, not installed. Nothing is scheduled. "
