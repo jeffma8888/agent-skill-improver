@@ -168,13 +168,13 @@ class MergeTests(unittest.TestCase):
     def test_the_note_names_at_most_five_entries_and_counts_the_rest(self):
         entries = [{"entry": f"/x/{i}.json", "reason": "is not valid JSON"} for i in range(7)]
         note = passed_over_note(entries)
-        self.assertTrue(note.startswith("discovery passed over 7 source entries that did not"))
+        self.assertTrue(note.startswith("discovery passed over 7 source entries it could not"))
         for i in range(5):
             self.assertIn(f"/x/{i}.json is not valid JSON", note)
         self.assertNotIn("/x/5.json", note)
         self.assertTrue(note.endswith("; +2 more"))
         one = passed_over_note(entries[:1])
-        self.assertIn("1 source entry that", one)
+        self.assertIn("1 source entry it", one)
         self.assertNotIn("more", one)
         self.assertEqual(passed_over_note([]), "", "a clean receipt gets no note")
 
@@ -401,7 +401,7 @@ class FixtureSourcePassedOverTests(unittest.TestCase):
             os.chmod(victim, 0o644)
         message = str(caught.exception)
         self.assertIn(f"no readable fixture for thread {thread_id!r}", message)
-        self.assertIn("1 entry there did not read as a thread and may be it", message)
+        self.assertIn("1 entry there could not be taken as a thread and may be it", message)
         self.assertIn(f"{victim} cannot be read (Permission denied)", message)
         self.assertEqual(caught.exception.record_id, thread_id)
 
@@ -441,7 +441,7 @@ class FixtureSourcePassedOverTests(unittest.TestCase):
         with self.assertRaises(RecordDefect) as caught:
             self.source().fetch("1700000000999-9")
         message = str(caught.exception)
-        self.assertIn("7 entries there did not read as a thread", message)
+        self.assertIn("7 entries there could not be taken as a thread", message)
         self.assertEqual(message.count("is JSON but not an object (list)"), 5)
         self.assertTrue(message.endswith("; +2 more"))
 

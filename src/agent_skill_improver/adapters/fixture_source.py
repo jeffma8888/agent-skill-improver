@@ -14,6 +14,7 @@ construction. Truncating a sorted list is a permanent filter, not a sample.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..jsonio import loads_untrusted
 from ..domain.candidate import one_line_label
 from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
+from ..domain.redaction import quoted_value, quoted_values
 from ..errors import RecordDefect, SourceUnavailable
 from .transcript_export import MAX_EXPORT_BYTES, normalize_export
 
@@ -142,6 +144,7 @@ class FixtureConversationSource:
         """
         accepted: list[tuple[Path, dict[str, Any]]] = []
         passed_over: list[tuple[str, str]] = []
+        digests: dict[Path, str] = {}
         for path in self._entries():
             try:
                 data = _read_export(path, self.max_export_bytes)
@@ -174,13 +177,67 @@ class FixtureConversationSource:
                 passed_over.append((str(path), "has a thread without an id"))
                 continue
             accepted.append((path, payload))
-        return accepted, passed_over
+            digests[path] = hashlib.sha256(data).hexdigest()
+        return self._one_export_per_thread(accepted, passed_over, digests), passed_over
+
+    @staticmethod
+    def _one_export_per_thread(
+        accepted: list[tuple[Path, dict[str, Any]]],
+        passed_over: list[tuple[str, str]],
+        digests: dict[Path, str],
+    ) -> list[tuple[Path, dict[str, Any]]]:
+        """``accepted`` with each thread claimed by one export at most.
+
+        Exports that claim one thread and differ in any byte are an ambiguity,
+        not a choice: none of them is taken and each is passed over naming the
+        others. A repeat of an export, the same bytes again, is taken once,
+        from the first in directory order, and the rest are passed over as
+        repeats. Bytes, not the parsed value: ``true == 1`` in Python, and the
+        normalizer reads the two differently. Measured before: an export claiming a healthy
+        thread's id, sorted ahead of it, was fetched in its place, and the
+        run proposed nothing from that thread, with nothing passed over and
+        ``doctor`` clean; one sorted after it was dropped without a word.
+        """
+        claims: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+        for path, payload in accepted:
+            claims.setdefault(payload["thread"]["id"], []).append((path, payload))
+        kept: list[tuple[Path, dict[str, Any]]] = []
+        for path, payload in accepted:
+            thread_id = payload["thread"]["id"]
+            group = claims[thread_id]
+            if len(group) == 1:
+                kept.append((path, payload))
+                continue
+            first = group[0][0]
+            if all(digests[other] == digests[first] for other, _ in group):
+                if path == first:
+                    kept.append((path, payload))
+                else:
+                    passed_over.append(
+                        (
+                            str(path),
+                            f"repeats, byte for byte, the export of thread "
+                            f"{quoted_value(thread_id)} in "
+                            f"{quoted_value(first.name)}, which is taken once",
+                        )
+                    )
+                continue
+            others = [other.name for other, _ in group if other != path]
+            passed_over.append(
+                (
+                    str(path),
+                    f"claims thread {quoted_value(thread_id)}, as {quoted_values(others)} "
+                    f"also {'does' if len(others) == 1 else 'do'} with other bytes; this "
+                    "source cannot tell which is the conversation, so it takes none of them",
+                )
+            )
+        return kept
 
     def _payloads(self) -> list[tuple[Path, dict[str, Any]]]:
         return self._scan()[0]
 
     def passed_over(self) -> list[tuple[str, str]]:
-        """Entries in the directory that do not read as a thread, with reasons."""
+        """Entries in the directory this source cannot take as a thread, with reasons."""
         return self._scan()[1]
 
     def discover_page(
@@ -265,7 +322,7 @@ class FixtureConversationSource:
         raise RecordDefect(
             f"no readable fixture for thread {thread_id!r} "
             f"in {one_line_label(str(self.directory))}; "
-            f"{len(passed_over)} entr{'y' if len(passed_over) == 1 else 'ies'} there did not "
-            f"read as a thread and may be it: {shown}",
+            f"{len(passed_over)} entr{'y' if len(passed_over) == 1 else 'ies'} there could not "
+            f"be taken as a thread and may be it: {shown}",
             record_id=thread_id,
         )

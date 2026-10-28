@@ -173,7 +173,7 @@ def passed_over_note(entries: Sequence[Mapping[str, str]], *, limit: int = 5) ->
     more = "" if len(entries) <= limit else f"; +{len(entries) - limit} more"
     noun = "entry" if len(entries) == 1 else "entries"
     return (
-        f"discovery passed over {len(entries)} source {noun} that did not read as a thread, "
+        f"discovery passed over {len(entries)} source {noun} it could not take as a thread, "
         f"so they are in no count here: {shown}{more}"
     )
 

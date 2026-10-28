@@ -317,7 +317,10 @@ than 32 MiB, one that is not UTF-8 or not JSON (a number that does not round to
 a finite double, such as `1e400`, or one of the non-standard not-a-number and
 infinity tokens, counts as not JSON; a number longer than 32 characters is
 named by its length), a JSON value that is not an object, an
-object with no thread or a thread without an id; `doctor` lists the
+object with no thread or a thread without an id, each export of a thread that
+another export claims with other bytes (none of them is taken, and each names
+the others), and a byte-for-byte repeat of an export (taken once, from the first
+in directory order); `doctor` lists the
 same entries as `WARN` lines under the source, and a fetch that cannot find a
 discovered thread while such entries exist quarantines the record as "no readable
 fixture" naming them, not as a thread that was never there. A directory the
