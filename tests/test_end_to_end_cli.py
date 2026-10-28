@@ -2897,20 +2897,23 @@ class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
         self.assertEqual(parsed["StandardErrorPath"], str(self.state / "daily.err.log"))
 
     def test_cron_quoting_round_trips_through_crons_own_rewrite(self):
-        """cron's command rewrite (Vixie ``do_command.c``, shared by cronie and
-        macOS): a backslash escapes the next character and is consumed, a bare
-        ``%`` ends the command. Modelled here on the quoted text, then handed
-        to a real shell, the original path must come back whole."""
+        """Each cron's command rewrite (``do_command.c``): a bare ``%`` ends the
+        command and a backslash before a ``%`` is consumed; FreeBSD and macOS
+        also make a backslash pair one, cronie and OpenBSD keep both, and busybox
+        crond rewrites nothing. Each is modelled here on the quoted text, then
+        handed to a real shell, and the original path must come back whole from
+        every one (from busybox only without a ``%``, which it cannot carry quoted)."""
         import shlex
         import subprocess
 
         from agent_skill_improver.cli import _cron_quote
 
-        def cron_rewrites(command: str) -> str:
+        def cron_rewrites(command: str, *, pair_made_one: bool) -> str:
             out, escaped = [], False
             for ch in command:
                 if escaped:
-                    out.append(ch if ch in "%\\" else "\\" + ch)
+                    kept_alone = ch == "%" or (pair_made_one and ch == "\\")
+                    out.append(ch if kept_alone else "\\" + ch)
                     escaped = False
                 elif ch == "\\":
                     escaped = True
@@ -2918,26 +2921,37 @@ class SchedulerTemplatesQuoteTheirPathsTests(unittest.TestCase):
                     raise AssertionError(f"cron would cut the command at a bare %: {command!r}")
                 else:
                     out.append(ch)
-            return "".join(out)
+            return "".join(out) + ("\\" if escaped else "")
 
+        rewrites = {
+            "FreeBSD and macOS": lambda command: cron_rewrites(command, pair_made_one=True),
+            "cronie and OpenBSD": lambda command: cron_rewrites(command, pair_made_one=False),
+            "busybox": lambda command: command,
+        }
         for value in (
             "/plain/path",
             "/My Projects & co 100%/state",
             "/a/100%",
             "/a/b\\%c",
             "/a/b\\\\c",
+            "/a/b\\c",
+            "/a/b\\",
+            "/a/b\\'c",
             "/it's/here",
         ):
-            with self.subTest(value=value):
-                shell_sees = cron_rewrites(_cron_quote(value))
-                self.assertEqual(shlex.split(shell_sees), [value])
-                proc = subprocess.run(
-                    ["/bin/sh", "-c", f"printf %s {shell_sees}"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertEqual(proc.stdout, value, proc.stderr)
+            for cron, rewrite in rewrites.items():
+                if cron == "busybox" and "%" in value:
+                    continue
+                with self.subTest(value=value, cron=cron):
+                    shell_sees = rewrite(_cron_quote(value))
+                    self.assertEqual(shlex.split(shell_sees), [value])
+                    proc = subprocess.run(
+                        ["/bin/sh", "-c", f"printf %s {shell_sees}"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(proc.stdout, value, proc.stderr)
 
     def test_the_control_a_plain_path_renders_byte_for_byte_as_before(self):
         """Quoting must be invisible when nothing needs it: an operator who has

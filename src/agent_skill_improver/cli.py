@@ -1567,13 +1567,19 @@ def _cron_quote(value: str) -> str:
     """Spell ``value`` for a crontab command.
 
     Shell-quoted first. Then for cron itself, which rewrites the command before
-    any shell sees it and knows nothing of quotes: a bare ``%`` becomes a
-    newline, and a backslash escapes the character after it and is consumed. So
-    every backslash is doubled (cron collapses the pair back to one) and every
-    ``%`` is escaped (cron hands the shell the percent sign). Vixie cron, cronie
-    and macOS share this loop verbatim; busybox crond has no such rewriting.
+    any shell sees it and knows nothing of quotes: a bare ``%`` ends the command
+    (the rest is its input), and a backslash before a ``%`` is consumed, so every
+    ``%`` is escaped and cron hands the shell the percent sign. The crons part
+    ways on a backslash before a backslash: FreeBSD and macOS make the pair one,
+    cronie and OpenBSD keep both, and busybox crond rewrites nothing. So no pair
+    is printed: each backslash in the path (always inside the shell quotes, as a
+    path holding one is always quoted) is followed by a quote ending the quoted
+    text and one resuming it, which every cron keeps as written and the shell
+    reads as the backslash alone. Measured before, when each backslash was
+    doubled: under cronie's rewrite a config under ``back\\slash`` was named
+    ``back\\\\slash``, a directory that does not exist.
     """
-    return shlex.quote(value).replace("\\", "\\\\").replace("%", "\\%")
+    return shlex.quote(value).replace("\\", "\\''").replace("%", "\\%")
 
 
 def _xml_quote(value: str) -> str:

@@ -38,14 +38,18 @@ substituted with the values from the invocation (`--config` is honoured, and the
 config is loaded to find its `state_dir`), so the output is ready to install by
 hand after you have read it, and the job it describes is the one you asked about.
 Each path is spelled for the syntax it lands in: shell-quoted on the cron line,
-with every `%` escaped as `\%` and every backslash doubled because cron (Vixie,
-cronie, macOS) rewrites the command before the shell sees it, turning a bare `%`
-into a newline and consuming a backslash; busybox crond does no such rewriting,
-so a path that needs both quoting and a `%` is not portable to it. Inside the
-plist the paths are entity-escaped. A path with nothing awkward in it is printed
-exactly as it is. The template is read once and each placeholder replaced as
-it is met, so a path whose own text looks like a placeholder is printed as
-itself.
+with every `%` escaped as `\%`, because a cron descended from Vixie cron
+(cronie, OpenBSD, FreeBSD, macOS) rewrites the command before the shell sees it,
+ending it at a bare `%` and consuming a backslash before one. Those crons part
+ways on a backslash before a backslash (FreeBSD and macOS make the pair one,
+cronie and OpenBSD keep both), so no pair is printed: each backslash in a path
+is followed by a quote ending the quoted text and one resuming it, which every
+cron keeps and the shell reads as the backslash alone. busybox crond does no
+rewriting, so a path that needs both quoting and a `%` is not portable to it.
+Inside the plist the paths are entity-escaped. A path with nothing awkward in it
+is printed exactly as it is. The template is read once and each placeholder
+replaced as it is met, so a path whose own text looks like a placeholder is
+printed as itself.
 A config that does not load is a `ConfigError` here as everywhere, exit 3: a job
 for a config that cannot run is not worth printing.
 
