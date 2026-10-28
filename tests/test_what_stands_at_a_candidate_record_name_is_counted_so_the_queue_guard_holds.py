@@ -174,6 +174,26 @@ class TheCommandsCountWhatStandsAtARecordNameTests(unittest.TestCase):
         folder = self.base / "state" / "candidates"
         return sorted(p.name for p in folder.glob("*.json") if p.is_file() and not p.is_symlink())
 
+    def test_the_control_a_regular_file_at_a_name_no_record_can_have_is_still_counted(
+        self,
+    ) -> None:
+        # The name rule is for entries that are not regular files: a regular
+        # file under any ``*.json`` name is read, and one that does not bind is
+        # unreadable, as before. A Finder duplicate of an open record is such a
+        # file, and dropping it would hide an open candidate from the caps.
+        folder = self.record.parent
+        copy = folder / f"{self.cid} copy.json"
+        notes = folder / "notes.json"
+        copy.write_bytes(self.body)
+        notes.write_text("{}", encoding="utf-8")
+        self.addCleanup(copy.unlink)
+        self.addCleanup(notes.unlink)
+        scan = StateStore(self.base / "state").scan_candidates()
+        self.assertEqual([c.id for c in scan.readable], [self.cid])
+        self.assertEqual(
+            sorted(u.path.name for u in scan.unreadable), sorted([copy.name, notes.name])
+        )
+
     def test_candidates_lists_each_entry_as_unreadable_in_text_and_json(self) -> None:
         for kind, words in ENTRIES.items():
             with self.subTest(kind=kind):

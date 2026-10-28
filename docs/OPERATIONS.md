@@ -149,7 +149,7 @@ report, `daily` and `candidates` refuse with exit 3.
 ## The daily pass
 
 ```bash
-asi daily                       # DRY RUN. Does the work, prints the receipt, writes NOTHING to state/
+asi daily                       # DRY RUN. Does the work, prints the receipt, writes no record to state/
 asi daily --commit              # persists to state/ ; still cannot touch a skill file
 asi daily --commit --day 2026-01-02 --seed t1   # pinned day and seed: reproducible
 ```
@@ -160,8 +160,9 @@ is meant literally and is tested on the whole tree: a dry run ingests, scores,
 proposes and validates exactly as a committed run does, but the store withholds
 every artifact (normalized conversations, raw exports, scorecards, failure cases,
 quarantine, refusal and deferral records, candidates, checkpoint and receipt), so
-the only things it leaves behind are the owner-only directory layout and the run
-lock. Every `daily` run, dry or committed, also resets any existing state path whose
+the only things it leaves behind are the owner-only directory layout, with the
+tree's README.txt (a fixed text explaining the layout, written whenever it is
+absent, so a dry run on a fresh tree writes it), and the run lock. Every `daily` run, dry or committed, also resets any existing state path whose
 mode drifted from owner-only (`state_modes_repaired`, as `doctor` does); that repair
 writes no content, so it is not withheld. A run that refuses after that repair
 (blocked, an unreadable record, a directory where its receipt goes) has no receipt
