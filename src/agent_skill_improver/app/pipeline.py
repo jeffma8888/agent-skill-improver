@@ -349,6 +349,11 @@ def propose_candidate(
         mirror_paths=tuple(str(m.path) for m in group.mirrors),
     )
     notes: list[str] = []
+    if proposal.risks_not_kept:
+        notes.append(
+            f"the improver listed {len(proposal.risks) + proposal.risks_not_kept} risks; "
+            f"the first {len(proposal.risks)} are kept"
+        )
     if canonical.payload_files:
         notes.append(
             "ELEVATED REVIEW RISK: this skill's directory contains "

@@ -548,6 +548,18 @@ def candidate_defects(candidate: Candidate, *, base_text: str) -> list[str]:
     return problems
 
 
+#: How much of the hypothesis, the intended change and the rollback note an
+#: improver reply keeps, how much of each risk, and how many risks. They are
+#: persisted in the candidate and printed by ``review``, and the reply is bounded
+#: only by the role's ``max_output_bytes``. Measured before: a hypothesis of
+#: 100,000 lines made a 2 MB candidate and a review of 100,052 lines, 200,000
+#: risks one of 200,052 lines, and a 1,000,000-character intended change, rollback
+#: note or risk a candidate and a review of about 1 MB each.
+MAX_PROPOSAL_PROSE_CHARS = 4_000
+MAX_RISK_CHARS = 2_000
+MAX_RISKS_KEPT = 20
+
+
 @dataclass(frozen=True)
 class Proposal:
     """The improver's raw output, before we turn it into a candidate."""
@@ -559,6 +571,8 @@ class Proposal:
     rollback: str
     new_skill_text: str
     addressed_criterion_ids: tuple[str, ...] = ()
+    #: How many risks the reply listed past ``MAX_RISKS_KEPT``; the candidate notes it.
+    risks_not_kept: int = 0
 
 
 def parse_proposal(payload: Any) -> Proposal:
@@ -589,12 +603,15 @@ def parse_proposal(payload: Any) -> Proposal:
     # A replacement that introduces a credential is refused in the pipeline.
     return Proposal(
         target_skill_id=str(payload["target_skill_id"]).strip(),
-        hypothesis=kept_prose(payload["hypothesis"]).strip(),
-        intended_change=kept_prose(payload["intended_change"]).strip(),
-        risks=tuple(kept_prose(r).strip() for r in risks),
-        rollback=kept_prose(payload["rollback"]).strip(),
+        hypothesis=kept_prose(payload["hypothesis"], limit=MAX_PROPOSAL_PROSE_CHARS).strip(),
+        intended_change=kept_prose(
+            payload["intended_change"], limit=MAX_PROPOSAL_PROSE_CHARS
+        ).strip(),
+        risks=tuple(kept_prose(r, limit=MAX_RISK_CHARS).strip() for r in risks[:MAX_RISKS_KEPT]),
+        rollback=kept_prose(payload["rollback"], limit=MAX_PROPOSAL_PROSE_CHARS).strip(),
         new_skill_text=str(payload["new_skill_text"]),
         addressed_criterion_ids=tuple(kept_prose(x) for x in addressed),
+        risks_not_kept=max(0, len(risks) - MAX_RISKS_KEPT),
     )
 
 

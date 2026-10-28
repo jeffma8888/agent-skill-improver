@@ -393,8 +393,10 @@ look reasonable" but "does the cited turn actually show the problem this edit
 claims to fix".
 
 The hypothesis, intended change, risks and rollback note are the model's own
-words, shown as written but quoted: every line of them opens with `  | `, or
-with `  - ` for the first line of a risk. Nothing the tool says carries that
+words, kept masked and clipped (each past 4,000 characters, a risk past 2,000,
+the first 20 risks with a note counting the rest), shown as written but
+quoted: every line of them opens with `  | `, or with `  - ` for the first
+line of a risk. Nothing the tool says carries that
 prefix. The real `asi apply ...` command is the two-space-indented line right
 under the sentence that begins "To promote this change", which itself stands
 at the left margin after `DIFF`. A `DIFF` or an apply

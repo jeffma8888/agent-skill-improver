@@ -298,6 +298,10 @@ replacement. Constraints:
   `ELEVATED REVIEW RISK`, because a skill directory can hold scripts and hooks
   and write access there is arbitrary code execution rather than documentation
   editing.
+- the improver's own words, its hypothesis, intended change, risks and rollback
+  note, are kept masked and clipped: each of the three past 4,000 characters,
+  each risk past 2,000, and only the first 20 risks, with a note `review` prints
+  saying how many the improver listed.
 
 ### 8. Validate
 
