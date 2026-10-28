@@ -489,7 +489,16 @@ def rollback_candidate(
                 "before its skill write leaves this; run that apply again to apply it."
             )
         _refuse_unwritable_receipt(state, "rollback", candidate)
-        result = skill_store.rollback(manifest)
+        # The manifest must record this candidate's own write: its document,
+        # from its base to its replacement. Measured before: a manifest edited
+        # to name another skill, a planted backup or a later edit's hash was
+        # restored from, and the candidate recorded rolled back.
+        result = skill_store.rollback(
+            manifest,
+            path=Path(candidate.target.canonical_path),
+            previous_sha256=candidate.target.base_sha256,
+            new_sha256=sha256_text(candidate.patch.new_text),
+        )
         return _record_rollback(candidate, manifest, result, state, clock)
 
 

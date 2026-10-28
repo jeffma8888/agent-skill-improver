@@ -324,7 +324,9 @@ Stated plainly, because a threat model that lists only wins is marketing.
   inequality check is a proxy for a property it cannot observe.
 - **A malicious local user.** Anyone who can edit `rubrics/`, the config, or the
   package source can change what the loop considers a failure. Protection here is
-  against the *loop* editing them, not against a human.
+  against the *loop* editing them, not against a human. Likewise `state/`: a
+  candidate record and its backup manifest edited together are restored from as
+  written, because rollback holds the manifest to the record and nothing signs it.
 - **Redaction as a control.** Best effort only. See above.
 - **A kernel-level sandbox escape.** The no-egress boundary is `sandbox-exec` or
   `bubblewrap`. Both are real enforcement points and neither is a hypervisor. A

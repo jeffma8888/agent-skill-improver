@@ -780,7 +780,14 @@ class FilesystemSkillStore:
             rollback_command=shlex.join(["cp", manifest["backup_path"], manifest["target_path"]]),
         )
 
-    def rollback(self, manifest_path: Path) -> dict[str, Any]:
+    def rollback(
+        self,
+        manifest_path: Path,
+        *,
+        path: Path | None = None,
+        previous_sha256: str | None = None,
+        new_sha256: str | None = None,
+    ) -> dict[str, Any]:
         """Restore a file from a backup manifest, verified before anything is written.
 
         Every check that can be made without touching the live file is made
@@ -801,6 +808,10 @@ class FilesystemSkillStore:
         candidate's apply, and overwriting it would make the recovery command
         the thing that destroyed work. ``apply`` has refused a changed base
         since the start; rollback holding the same line is the symmetric half.
+
+        Given the write a candidate's apply made (``path``, from
+        ``previous_sha256`` to ``new_sha256``), the manifest must record that
+        write, or nothing is touched (``_assert_records_the_write``).
         """
         manifest = self._read_backup_manifest(manifest_path)
         target = Path(manifest["target_path"])
@@ -819,6 +830,14 @@ class FilesystemSkillStore:
         # command fall as an internal error. Nothing is written before this
         # returns, so a refusal says so.
         try:
+            if path is not None or previous_sha256 is not None or new_sha256 is not None:
+                self._assert_records_the_write(
+                    manifest,
+                    Path(manifest_path),
+                    path=path,
+                    previous_sha256=previous_sha256,
+                    new_sha256=new_sha256,
+                )
             parent_fd, leaf, restored_bytes = self._judge_rollback(
                 target, backup, expected, manifest_path=Path(manifest_path)
             )
@@ -841,6 +860,62 @@ class FilesystemSkillStore:
             )
         finally:
             os.close(parent_fd)
+
+    @staticmethod
+    def _assert_records_the_write(
+        manifest: dict[str, Any],
+        manifest_path: Path,
+        *,
+        path: Path | None,
+        previous_sha256: str | None,
+        new_sha256: str | None,
+    ) -> None:
+        """Refuse a manifest that is not the record of the write being undone.
+
+        A manifest is a plain file under the state tree, and every field of it
+        was taken as written: the document, the backup and both hashes. Each
+        check after this one is made against the manifest's own values, so a
+        manifest naming another skill's document, a backup planted beside it
+        with its hash, or a ``new_sha256`` changed to the hash of a later edit
+        passed them all. Measured before (3.11 and 3.13): ``rollback`` wrote
+        the planted text into another skill, or into the candidate's own
+        document in place of its original text, or over a later edit, and each
+        time exited 0 and recorded the candidate rolled back. The document is
+        compared resolved on both sides, as ``earlier_write`` compares it.
+        """
+        target = Path(manifest["target_path"])
+        same_document = path is not None and target.resolve() == Path(path).resolve()
+        recorded = (manifest["previous_sha256"], manifest["new_sha256"])
+        same_write = recorded == (previous_sha256, new_sha256)
+        if same_document and same_write:
+            return
+        # Each clause is built inside the raise, so the rule that every value a
+        # skill store refusal interpolates is named holds over them too.
+        raise BackupUnusable(
+            f"refusing to roll back: backup manifest {named_path(manifest_path)} is not the "
+            "record of this candidate's apply: "
+            + "; ".join(
+                clause
+                for differs, clause in (
+                    (
+                        not same_document,
+                        f"it names {named_path(target)}, not this candidate's "
+                        f"document {named_path(path)}",
+                    ),
+                    (
+                        not same_write,
+                        "it records the text going from "
+                        f"{quoted_value(manifest['previous_sha256'])} to "
+                        f"{quoted_value(manifest['new_sha256'])}, not from this "
+                        f"candidate's base {quoted_value(previous_sha256)} to its "
+                        f"replacement {quoted_value(new_sha256)}",
+                    ),
+                )
+                if differs
+            )
+            + ". Rollback restores only what this candidate's apply wrote, so no file was "
+            "touched."
+        )
 
     def _judge_rollback(
         self, target: Path, backup: Path, expected: str, *, manifest_path: Path
