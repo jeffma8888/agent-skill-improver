@@ -29,14 +29,15 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .. import SCHEMA_JUDGEMENT, SCHEMA_PROPOSAL, SCHEMA_SCORECARD
 from ..config import PromptConfig
-from ..domain.conversation import NormalizedConversation
+from ..domain.conversation import Message, NormalizedConversation
 from ..domain.failure import FailureCase
-from ..domain.redaction import redact
+from ..domain.redaction import RedactionResult, redact, redact_placed
 from ..domain.rubric import Rubric
 from ..domain.validation import ReplayCase
 from ..jsonio import dumps
@@ -119,8 +120,109 @@ def _clip(text: str, limit: int) -> str:
 MAX_HEAD_FIELD_CHARS = 256
 
 
-def _field(text: str) -> str:
-    return _clip(text, MAX_HEAD_FIELD_CHARS)
+#: How far past a cut the mask reads, so a credential the cut would split is
+#: seen whole while the text far past the cut is never read: masking the whole
+#: of every long text cost 4.9 s for 2,000 messages of 20,000 characters.
+MASK_PAST_CUT = 4096
+
+
+def _cut(text: str, limit: int, took: dict[str, int] | None) -> str:
+    """``text`` as a transcript shows it, at most ``limit`` long.
+
+    With ``took`` None it is cut as written. Otherwise a text past the limit is
+    masked before the cut, as ``quoted_value`` and ``kept_prose`` mask before
+    they cut, so a credential the cut would split is masked whole, never cut to
+    a prefix the shapes no longer know (measured before: each of the five head
+    fields and a message's text showed up to 23 of a token's 40 characters
+    raw), and the masks in what is shown are added to ``took``. A text within
+    the limit is masked with its block.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    if took is None:
+        return _clip(text, limit)
+    window = text[: limit + MASK_PAST_CUT]
+    masked, places = redact_placed(window)
+    shown = masked.text[:limit]
+    for start, held in places:
+        # A mask counts when its placeholder starts in what is shown, with every
+        # mask the placeholder holds: a GitHub token a URL parameter's value was.
+        if start >= limit:
+            break
+        for label, n in held.items():
+            took[label] = took.get(label, 0) + n
+    rest = len(masked.text) - len(shown) + len(text) - len(window)
+    return shown + f" ...[clipped {rest} chars]" if rest else shown
+
+
+def _listed_id(value: str, cfg: PromptConfig) -> str:
+    """An element id as the citable list shows it: as ``_listed_value`` shows it, then cut.
+
+    Cut at ``MAX_HEAD_FIELD_CHARS`` after the mask, reading ``MASK_PAST_CUT``
+    past the cut, as ``_cut`` cuts a head line's id.
+    """
+    if len(value) <= MAX_HEAD_FIELD_CHARS:
+        return _listed_value(value, cfg)
+    window = value[: MAX_HEAD_FIELD_CHARS + MASK_PAST_CUT]
+    listed = _listed_value(window, cfg)
+    shown = listed[:MAX_HEAD_FIELD_CHARS]
+    rest = len(listed) - len(shown) + len(value) - len(window)
+    return shown + f" ...[clipped {rest} chars]" if rest else shown
+
+
+def _layout(message: Message, cfg: PromptConfig, cut: Callable[[str, int], str]) -> str:
+    """One message and its tool calls as the transcript shows them, each text cut by ``cut``."""
+    field = MAX_HEAD_FIELD_CHARS
+    head = (
+        f"[message element_id={cut(message.element_id, field)} "
+        f"position={message.position} role={cut(message.role, field)}]"
+    )
+    body = cut(message.text, cfg.max_message_chars)
+    parts = [head, body if body.strip() else "(no text)"]
+    for tool in message.tool_events:
+        parts.append(
+            f"[tool element_id={cut(tool.element_id, field)} position={tool.position} "
+            f"name={cut(tool.name, field)} status={cut(tool.status, field)}]"
+        )
+        parts.append(f"input: {cut(tool.input_text, min(cfg.max_message_chars, 1200))}")
+        parts.append(f"output: {cut(tool.output_excerpt, cfg.max_message_chars)}")
+    return "\n".join(parts)
+
+
+def _block(message: Message, cfg: PromptConfig) -> str:
+    """One block unmasked, each text cut as written."""
+    return _layout(message, cfg, _clip)
+
+
+def _masked_block(message: Message, cfg: PromptConfig, nonce: str) -> RedactionResult:
+    """One block masked: each text past its cut by ``_cut``, the rest with the block.
+
+    A cut text stands in the block as a mark while the block is masked, and is
+    put back after it, so what its cut shows is masked once and counted once.
+    Masked again with its block, a URL parameter's placeholder was read as the
+    parameter's value: counted twice, and when the cut split it, written out
+    whole past the cut. No shape starts in the mark (a NUL, hex digits, a colon,
+    an index), and only the layout's own words stand before it, so the one shape
+    that reaches it is a key block opened before it, which hides it as it hides a
+    text within its cut; the masks the cut text took count as that text's would.
+    ``nonce``, made for the render, keeps a message from writing a mark.
+    """
+    shown: list[str] = []
+    counts: dict[str, int] = {}
+
+    def stand_in(text: str, limit: int) -> str:
+        if limit <= 0 or len(text) <= limit:
+            return text
+        shown.append(_cut(text, limit, counts))
+        return f"\x00{nonce}:{len(shown) - 1}\x00"
+
+    masked = redact(_layout(message, cfg, stand_in))
+    for label, n in masked.counts.items():
+        counts[label] = counts.get(label, 0) + n
+    pieces = re.split(f"\x00{nonce}:([0-9]+)\x00", masked.text)
+    return RedactionResult(
+        "".join(shown[int(p)] if i % 2 else p for i, p in enumerate(pieces)), counts
+    )
 
 
 def _kept_indices(sizes: Sequence[int], budget: int) -> list[int]:
@@ -175,28 +277,11 @@ def render_transcript(
     into a transcript budgeted at 24,000.
     """
     keep = set(only_positions) if only_positions is not None else None
-    blocks: list[str] = []
-    for message in conversation.messages:
-        if keep is not None and message.position not in keep:
-            continue
-        head = (
-            f"[message element_id={_field(message.element_id)} position={message.position} "
-            f"role={_field(message.role)}]"
-        )
-        body = _clip(message.text, cfg.max_message_chars)
-        parts = [head, body if body.strip() else "(no text)"]
-        for tool in message.tool_events:
-            parts.append(
-                f"[tool element_id={_field(tool.element_id)} position={tool.position} "
-                f"name={_field(tool.name)} status={_field(tool.status)}]"
-            )
-            parts.append(f"input: {_clip(tool.input_text, min(cfg.max_message_chars, 1200))}")
-            parts.append(f"output: {_clip(tool.output_excerpt, cfg.max_message_chars)}")
-        blocks.append("\n".join(parts))
-
-    total = len(blocks)
+    messages = [m for m in conversation.messages if keep is None or m.position in keep]
+    total = len(messages)
     budget = cfg.max_transcript_chars
-    blocks = [blocks[i] for i in _kept_indices([len(b) + 2 for b in blocks], budget)]
+    blocks = [_block(message, cfg) for message in messages]
+    kept = _kept_indices([len(b) + 2 for b in blocks], budget)
     counts: dict[str, int] = {}
     if cfg.redact_secrets:
         # Each kept block is masked before the budget is held to what is kept: a
@@ -204,13 +289,19 @@ def render_transcript(
         # assignments came to 54,194 characters once masked, 2.26 times the
         # budget), and a key block opened in one message and closed in a later
         # one masked every message between. So a key whose body sits in a
-        # message of its own is not masked, as the threat model says.
-        results = [redact(b) for b in blocks]
-        results = [results[i] for i in _kept_indices([len(r.text) + 2 for r in results], budget)]
+        # message of its own is not masked, as the threat model says. A kept
+        # block is built again with each text past its cut masked first; the
+        # dropped ones are never masked.
+        nonce = secrets.token_hex(16)
+        results = [_masked_block(messages[i], cfg, nonce) for i in kept]
+        again = _kept_indices([len(r.text) + 2 for r in results], budget)
+        results = [results[i] for i in again]
         blocks = [r.text for r in results]
         for result in results:
             for label, n in result.counts.items():
                 counts[label] = counts.get(label, 0) + n
+    else:
+        blocks = [blocks[i] for i in kept]
     elided = total - len(blocks)
     if sum(len(b) + 2 for b in blocks) > budget:
         blocks = _share(blocks, budget)
@@ -332,8 +423,12 @@ def scorer_user_prompt(
     # a ``password=`` shape runs to the next space, and an opening delimiter with
     # no ``>`` then ran to the next ``>``, so either took the list's own quotes
     # and brackets with it, and a list that does not parse leaves nothing to cite.
+    # A long one is cut after the mask (``_listed_id``), as a head line's is.
     listed = [
-        {**element, "element_id": _listed_value(_field(element["element_id"]), cfg)}
+        {
+            **element,
+            "element_id": _listed_id(element["element_id"], cfg),
+        }
         for element in citable_elements(conversation)
     ]
     citable = dumps(listed).rstrip("\n")

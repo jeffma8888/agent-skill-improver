@@ -63,9 +63,12 @@ Consequences worth being explicit about:
    glued to an ASCII letter or digit is taken for part of a longer word. It is a reduction
    of risk and **not a guarantee**: a secret with an unusual shape, a credential
    split across lines or across messages, or a private value that simply looks
-   like prose will pass through. Treat it as defence in depth, never as a
-   control -- what keeps such a value on the machine is the sandbox, not the
-   regex.
+   like prose will pass through. A text a prompt cuts (a head field at 256
+   characters, a message at `max_message_chars`) is masked before the cut, so a
+   credential the cut would split is masked whole; a tool's input and output are
+   first cut when the export is read, before any mask, so one split there keeps
+   the part before the cut. Treat it as defence in depth, never as a control --
+   what keeps such a value on the machine is the sandbox, not the regex.
 3. **Prompt budgets bind.** When a transcript exceeds the budget, blocks are
    dropped from the middle and the count of dropped blocks is stated in the
    prompt, so the model knows it is looking at an incomplete record. Each block

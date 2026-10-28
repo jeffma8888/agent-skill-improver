@@ -18,6 +18,7 @@ short messages took 15 s to render, four times as long per doubling.
 from __future__ import annotations
 
 import random
+import re
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -44,6 +45,7 @@ BUDGET = PromptConfig().max_transcript_chars
 #: blocks that may share it, and the note saying how many blocks were dropped.
 MARKERS = 200
 BIG = 2 * 1024 * 1024
+CLIP_NOTE_AT_END = re.compile(r" \.\.\.\[clipped \d+ chars\]\Z")
 KEY_OPEN = "-----BEGIN " + "PRIVATE KEY-----"
 KEY_CLOSE = "-----END " + "PRIVATE KEY-----"
 #: The letter each planted field is made of, and what its head line shows next.
@@ -119,6 +121,9 @@ class TheTranscriptARoleReadsIsHeldToItsBudgetTests(unittest.TestCase):
             render.text.startswith("[message element_id=m1 position=0 role=user]\nhi\n\n")
         )
         self.assertGreater(render.chars, BUDGET - MARKERS, "the larger takes all that is left")
+        # Exactly: the budget counts each block's blank line, so what is shown
+        # of the two and the one blank line between them is two short of it.
+        self.assertEqual(len(CLIP_NOTE_AT_END.sub("", render.text)), BUDGET - 2)
         both = message(1, 0, text="q" * 3900) + [tool(100 + i, 2 + i, "m1") for i in range(8)]
         both += message(2, 20, role="assistant") + [tool(i, 30 + i, "m2") for i in range(20)]
         render = render_transcript(conversation(both), cfg=PromptConfig())
@@ -126,6 +131,8 @@ class TheTranscriptARoleReadsIsHeldToItsBudgetTests(unittest.TestCase):
         first, second = render.text.split("\n\n[message element_id=m2", 1)
         for block in (first, second):
             self.assertRegex(block, r" \.\.\.\[clipped \d+ chars\]$")
+        shown = [CLIP_NOTE_AT_END.sub("", block) for block in (first, second)]
+        self.assertEqual(sum(map(len, shown)), BUDGET - 4 - len("[message element_id=m2"))
         self.assertLess(abs(len(first) - len(second)), MARKERS, "two large blocks halve it")
 
     def test_a_long_id_role_name_or_status_is_clipped_in_its_head_line_and_the_list(self):
@@ -159,7 +166,10 @@ class TheTranscriptARoleReadsIsHeldToItsBudgetTests(unittest.TestCase):
     def test_a_masked_transcript_is_held_to_the_budget(self):
         elements: list = []
         for i in range(12):
-            elements += message(i, 2 * i, text=("tok" + "en=abcdef ") * 400)
+            # 3,900 characters each, within the message clip, so each is masked
+            # with its block and grows there (a text past the clip is masked
+            # before the cut: the row on a prompt's clip).
+            elements += message(i, 2 * i, text=("tok" + "en=abcdef ") * 300)
         render = render_transcript(conversation(elements), cfg=PromptConfig())
         self.assertLessEqual(render.chars, BUDGET + MARKERS)
         self.assertGreater(render.redaction_counts.get("secret-assignment", 0), 0)
@@ -167,10 +177,11 @@ class TheTranscriptARoleReadsIsHeldToItsBudgetTests(unittest.TestCase):
         kept = render.text.split("\n\n")
         kept.remove(ELISION_MARKER.format(n=render.blocks_elided))
         self.assertEqual(render.blocks_elided, render.blocks_total - len(kept))
+        self.assertEqual(len(kept), 2)
         for block in kept:
             # The middle ones are dropped on their masked lengths, so what is
-            # kept fits whole: each ends with its own body's clip, none again.
-            self.assertTrue(block.endswith(" ...[clipped 1200 chars]"), block[-80:])
+            # kept fits whole: none is clipped.
+            self.assertNotIn("[clipped", block)
 
     def test_a_key_block_opened_in_one_message_and_closed_in_a_later_one_hides_none_between(self):
         elements = message(1, 0, text=f"see {KEY_OPEN}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC")

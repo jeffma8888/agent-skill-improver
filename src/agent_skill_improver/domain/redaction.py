@@ -410,19 +410,61 @@ def redact(text: str) -> RedactionResult:
     applied it, through :func:`_matches`, so the time it takes is in proportion
     to the text whatever the text holds.
     """
+    return _redact(text, None)
+
+
+#: Where a placeholder starts in the masked text, and the masks it holds by label.
+Placed = tuple[int, dict[str, int]]
+
+
+def redact_placed(text: str) -> tuple[RedactionResult, list[Placed]]:
+    """``redact(text)``, and where each placeholder starts in its text, in order.
+
+    A shape can mask a placeholder an earlier one placed, as the URL parameter's
+    shape masks a GitHub token that was its value, so each placeholder holds its
+    own mask and every mask it replaced: what they hold sums to the counts. So a
+    cut can count the masks its shown part holds, the ones a later placeholder
+    took in included, where counting the placeholders it shows lost those.
+    """
+    places: list[tuple[int, int, dict[str, int]]] = []
+    result = _redact(text, places)
+    return result, [(start, held) for start, _end, held in places]
+
+
+def _redact(text: str, places: list[tuple[int, int, dict[str, int]]] | None) -> RedactionResult:
+    """:func:`redact`, keeping ``places`` (start, end, masks held) when it is a list."""
     counts: dict[str, int] = {}
     out = text
     for shape in _SHAPES:
         placeholder = PLACEHOLDER.format(label=shape.label)
         pieces: list[str] = []
-        last = n = 0
+        moved: list[tuple[int, int, dict[str, int]]] = []
+        last = n = shift = at = 0
         for found in _matches(shape, out):
+            replacement = found.group(1) + placeholder if shape.keep_prefix else placeholder
+            if places is not None:
+                begin = found.end(1) if shape.keep_prefix else found.start()
+                while at < len(places) and places[at][1] <= begin:
+                    start, end, held = places[at]
+                    moved.append((start + shift, end + shift, held))
+                    at += 1
+                holds: dict[str, int] = {}
+                while at < len(places) and places[at][0] < found.end():
+                    for label, k in places[at][2].items():
+                        holds[label] = holds.get(label, 0) + k
+                    at += 1
+                holds[shape.label] = holds.get(shape.label, 0) + 1
+                moved.append((begin + shift, begin + shift + len(placeholder), holds))
+                shift += len(replacement) - (found.end() - found.start())
             pieces.append(out[last : found.start()])
-            pieces.append(found.group(1) + placeholder if shape.keep_prefix else placeholder)
+            pieces.append(replacement)
             last = found.end()
             n += 1
         if n:
             pieces.append(out[last:])
             out = "".join(pieces)
             counts[shape.label] = counts.get(shape.label, 0) + n
+            if places is not None:
+                moved.extend((start + shift, end + shift, held) for start, end, held in places[at:])
+                places[:] = moved
     return RedactionResult(out, counts)
