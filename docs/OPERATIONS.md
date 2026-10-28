@@ -242,7 +242,10 @@ none of the counts beside it, and this list is the only unattended surface that
 says so; `doctor` and `skills` print the same entries. A copy passed over in an
 editable root also withholds that skill's canonical slot: `skills` shows the skill
 with no canonical copy and a `why:` line naming the copy, and `daily` refuses to
-propose against it rather than point a proposal at another copy.
+propose against it rather than point a proposal at another copy. A candidate
+whose copy discovery has since passed over is refused by `review`, `apply` and
+`rollback` with that entry and discovery's reason, not only as a target in no
+configured root.
 
 **`counts`** — the honest arithmetic:
 

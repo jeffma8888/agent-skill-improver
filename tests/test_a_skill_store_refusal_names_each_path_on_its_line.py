@@ -50,9 +50,12 @@ NAMERS = frozenset({"named_path", "quoted_value"})
 #: (a short hash or a fixed phrase), the reason a rollback check raised (an OS
 #: error's text or a ``ValueError``'s own), the inventory's canonical reason
 #: (root ids, quoted, and each copy it lists named where ``domain/skills.py``
-#: builds it, held below), the manifest fields found missing (a fixed list),
-#: and ``read_json``'s own error (a decode error names no content; an OS
-#: error quotes its file name with ``repr``).
+#: builds it, held below), the reason discovery gave for an entry it passed
+#: over (each path in it named where it is built, which
+#: ``test_a_refusal_of_a_copy_discovery_passed_over_says_why`` holds), the
+#: manifest fields found missing (a fixed list), and ``read_json``'s own error
+#: (a decode error names no content; an OS error quotes its file name with
+#: ``repr``).
 NOT_PATHS = frozenset(
     {
         "verb",
@@ -66,6 +69,7 @@ NOT_PATHS = frozenset(
         "found",
         "reason",
         "group.canonical_reason",
+        "passed.reason",
         "', '.join(missing)",
         "exc",
     }
@@ -84,11 +88,12 @@ PATH_NAMES = (
     "walked",
     "guard",
     "canonical",
+    "passed.path",
 )
 #: A short hash, as each hash refusal shows one.
 SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: How many paths the refusals name through ``named_path`` at this change.
-NAMED_AT_THIS_CHANGE = 67
+NAMED_AT_THIS_CHANGE = 69
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:

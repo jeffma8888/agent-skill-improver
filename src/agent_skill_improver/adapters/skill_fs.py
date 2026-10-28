@@ -300,8 +300,10 @@ def _root_shape_problem(path: Path) -> str | None:
     if stat.S_ISLNK(st.st_mode):
         if _root_is_directory(path):
             return None
+        # The link's text is a path, named as a refusal names one: a refusal
+        # of a target below this root gives this reason whole.
         try:
-            target = os.readlink(path)
+            target = named_path(os.readlink(path))
         except OSError as exc:
             target = f"(unreadable: {exc.strerror or exc})"
         try:
@@ -1342,12 +1344,42 @@ class FilesystemSkillStore:
                 "never reaches the agent that loads the canonical file."
             )
         if kind == "unknown":
+            # Discovery says why it did not take a copy it saw; the refusal
+            # says so too, rather than leave the operator to find it in
+            # ``doctor``. Measured before: a copy whose directory could not be
+            # listed, or that sat below another skill's directory, was refused
+            # by ``review``, ``apply`` and ``rollback`` alike as "not a skill
+            # document in any configured root", with no word of either.
+            passed = self._passed_over_on_the_way(target, resolved)
+            if passed is not None:
+                raise MirrorEditRefused(
+                    f"refusing to {action} {named_path(target)}: discovery passed over "
+                    f"{named_path(passed.path)}, which is {passed.reason}, so it is not a skill "
+                    "document in any configured root and this tool cannot tell whether it is "
+                    "canonical. An unrecognised target is refused rather than assumed safe."
+                )
             raise MirrorEditRefused(
                 f"refusing to {action} {named_path(target)}: it is not a skill document in any configured "
                 "root, so this tool cannot tell whether it is canonical. An unrecognised "
                 "target is refused rather than assumed safe."
             )
         return group
+
+    def _passed_over_on_the_way(self, target: Path, resolved: Path) -> PassedOverDocument | None:
+        """The entry discovery passed over at ``target`` or above it, if any.
+
+        Read after a refresh, so it is what this run's discovery saw. The
+        first entry that applies is returned; discovery does not descend below
+        a directory it passes over, so within one root only one can. The
+        target is matched as spelled and as resolved: entries are recorded
+        under the root's resolved path, and a link at the document's own place
+        is recorded as the link.
+        """
+        forms = (Path(os.path.abspath(target)), resolved)
+        for document in self._passed_over:
+            if any(document.path == form or document.path in form.parents for form in forms):
+                return document
+        return None
 
     @staticmethod
     def _entries_named_like_a_document(
@@ -1475,7 +1507,8 @@ class FilesystemSkillStore:
             if owner is not None:
                 skip(
                     candidate,
-                    f"below {owner / SKILL_FILENAME}, the place of skill {owner.name!r}; a "
+                    f"below {named_path(owner / SKILL_FILENAME)}, the place of skill "
+                    f"{quoted_value(owner.name)}; a "
                     f"document under another skill's directory is that skill's material, not a skill",
                     copy_of_a_skill=False,
                 )
