@@ -706,12 +706,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     "them there."
                 )
             # A directory where only records are written is not a foreign entry
-            # and no read lists it, but a write cannot replace it: a write that
-            # comes to that name refuses by name. Measured before: a directory
-            # at one conversation record's path left this report at ready and
-            # the next run exited 70 from the middle of its pass. One already
-            # raised to a problem above (today's receipt or checkpoint) is not
-            # repeated here as a warning.
+            # and no read lists it as a record, but a write cannot replace it:
+            # a write that comes to that name refuses by name. Measured before:
+            # a directory at one conversation record's path left this report at
+            # ready and the next run exited 70 from the middle of its pass. One
+            # already raised to a problem above (today's receipt or checkpoint)
+            # is not repeated here as a warning.
             misplaced_directories = state.misplaced_directories()
             not_yet_named = [
                 rel

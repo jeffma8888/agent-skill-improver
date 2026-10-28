@@ -83,7 +83,7 @@ rather than follows it. `doctor` lists such entries as `left_alone` and
 prints a `WARN`, so a tree is never called clean while a foreign entry sits in it.
 A directory is the one entry a write cannot replace. One sitting where only
 records are written (every state directory but `backups/`, `sandbox/` and
-`locks/`) is not a foreign entry and no record read lists it, so `doctor` names
+`locks/`) is not a foreign entry and no record read lists it as a record, so `doctor` names
 it separately (`misplaced_directories`, a `WARN`, unless it is today's receipt or
 checkpoint, which is already a `PROBLEM`): a write that comes to that name
 refuses by name (`SafetyRefusal`, exit 3) and leaves it as found, rather than
@@ -278,9 +278,11 @@ candidates_gate_passed        proposals with no-regression evidence
 candidates_gate_failed        kept, with reasons, for a human to read
 proposals_refused_by_policy   targets declined by a guard rule (includes the next line)
 skills_with_open_candidate    implicated skills skipped because a candidate of theirs awaits review
-candidate_records_unreadable  files under state/candidates/ that do not parse as a candidate; one
-                              or more stands the run down (`queue guard`) because the open queue
-                              cannot be counted, and the file is left exactly as found
+candidate_records_unreadable  entries under state/candidates/ named *.json that do not read as a
+                              candidate (a file that does not parse, or a directory, link or fifo
+                              at a name a record could have, `<candidate id>.json`); one or more
+                              stands the run down (`queue guard`) because the open queue cannot
+                              be counted, and each is left exactly as found
 open_candidates_after         open-status candidate files on disk, what a bare `asi review`
                               lists; a dry run's own proposals are never in it, and neither
                               is an unreadable record (see candidate_records_unreadable)
@@ -585,8 +587,12 @@ proposal. Nothing on disk is overwritten or mutated.
 Anything but a regular file at a candidate's record name (a directory, a link to
 a directory or to nothing, a fifo) is a `StateUnreadable` refusal too: `review`,
 `apply` and `rollback` name what it is and exit 3, not the exit 4 of a record
-that is not there. `doctor` warns of the entry; move it aside, and if it is a
-directory holding the record, put the record back at its name.
+that is not there. `doctor` warns of the entry. It may stand where an open
+candidate's record was, so `candidates` lists it as unreadable, `doctor` makes
+it a `PROBLEM` as well, and `daily` stands down on it (`queue guard`) rather than
+propose a second candidate for a skill whose open one it cannot see. Move it
+aside, and if it is a directory holding the record, put the record back at its
+name; the next run resumes.
 
 ## Housekeeping
 

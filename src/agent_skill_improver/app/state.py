@@ -504,11 +504,13 @@ class StateStore:
 
         The record directories (``RECORD_SUBDIRS``) hold regular files and
         nothing else. A directory in one is not a foreign entry
-        (``_foreign_reason`` passes directories) and no read lists it (a record
-        read skips anything that is not a regular file), yet a write that comes
-        to that name refuses by name rather than replacing it (``_persist``). A
-        record directory this process cannot list is passed over, as the mode
-        walk passes it; the mode report names it. Nothing here removes one.
+        (``_foreign_reason`` passes directories) and no read lists it as a
+        record (a record read skips anything that is not a regular file, and
+        the candidate scan lists one at a record's name as unreadable), yet a
+        write that comes to that name refuses by name rather than replacing it
+        (``_persist``). A record directory this process cannot list is passed
+        over, as the mode walk passes it; the mode report names it. Nothing
+        here removes one.
         """
         if not self.root.exists() or self.layout_problems():
             return []
@@ -714,7 +716,7 @@ class StateStore:
             if path.is_symlink() or path.exists():
                 raise StateUnreadable(
                     f"refusing to use the candidate record {_shown(path)}: it "
-                    f"{_foreign_reason(path) or 'is a directory'}. This tool writes each "
+                    f"{_what_stands_at_a_record_name(path)}. This tool writes each "
                     "candidate record as a regular file, so this entry is not one it wrote; "
                     "it is left alone, and `doctor` warns of it."
                 )
@@ -738,16 +740,46 @@ class StateStore:
         the caller decides what an unreadable record means for it. ``daily``
         treats one as a queue it cannot measure and stands down; the listings
         name it.
+
+        Anything but a regular file at a name a record could have
+        (``<candidate id>.json``: a directory, a link, a fifo) is listed as
+        unreadable too, judged with ``lstat`` and never opened or followed; one
+        at a name no record can have (an editor's lock link
+        ``.#<record>.json``) is only the foreign entry it is, since no
+        candidate can stand there. Measured before (3.11 and 3.13,
+        the same on both): it was passed over, so with one at a validated
+        candidate's name ``candidates --all`` listed 0 candidates and 0
+        unreadable, ``doctor`` stayed ready with a warning, and the next day's
+        committed run proposed a second candidate for the same skill, 1 where
+        it proposed 0 with the record in place, for each of a directory (empty
+        or holding the record), a link to the record moved elsewhere, a link
+        to nothing, a link to a directory and a fifo.
         """
         readable: list[Candidate] = []
         unreadable: list[UnreadableRecord] = []
         for path in sorted(self.dir("candidates").glob("*.json")):
-            # A link or any other non-file is not a record at all: this tool never
-            # writes one, it is already named by ``foreign_entries`` (a
-            # directory by ``misplaced_directories``) and left alone, and
-            # ``read_candidate`` refuses it by name. An unreadable record is a
-            # regular file that does not parse.
+            # A link or any other non-file is not a record this tool wrote: it is
+            # named by ``foreign_entries`` (a directory by
+            # ``misplaced_directories``) and left alone, and ``read_candidate``
+            # refuses it by name. At a name a record could have, it may still
+            # stand where an open candidate's record was, hiding it from both
+            # queue caps, so it is counted as a record that cannot be read,
+            # never as nothing.
             if path.is_symlink() or not path.is_file():
+                if not _names_a_candidate_record(path):
+                    continue
+                unreadable.append(
+                    UnreadableRecord(
+                        path=path,
+                        reason=(
+                            f"refusing to count the candidate record {_shown(path)}: it "
+                            f"{_what_stands_at_a_record_name(path)}. This tool writes each "
+                            "candidate record as a regular file, so this entry is not one "
+                            "it wrote and may stand where an open candidate's record was; "
+                            "it is left alone."
+                        ),
+                    )
+                )
                 continue
             try:
                 candidate = _candidate_from_file(path)
@@ -872,8 +904,10 @@ class StateStore:
     def scan_set_aside(self) -> SetAsideScan:
         """Every quarantine, refusal and deferral record, newest first.
 
-        Same rules as ``scan_candidates``: a link or other non-file is not a
-        record and is skipped (``foreign_entries`` names it); a regular file
+        A link or other non-file is not a record and is skipped
+        (``foreign_entries`` names it), where ``scan_candidates`` lists one at a
+        record's name as unreadable, since there it could hide an open
+        candidate from the queue caps; as there, a regular file
         that does not read as a record of the expected shape is listed as
         unreadable with the reason, never dropped. Newest first because the
         question this answers is "what went wrong lately"; ties keep the kind
@@ -1723,6 +1757,28 @@ def _non_file_kind(path: Path) -> str | None:
     if not path.is_file():
         return "is not a regular file"
     return None
+
+
+def _names_a_candidate_record(path: Path) -> bool:
+    """Whether ``path``'s name is one ``candidate_path`` could give: ``<candidate id>.json``.
+
+    Emacs marks a file it is editing with a link named ``.#<file>``, which
+    ``*.json`` matches but no candidate id does.
+    """
+    try:
+        validate_candidate_id(path.name[: -len(".json")])
+    except ValueError:
+        return False
+    return path.name.endswith(".json")
+
+
+def _what_stands_at_a_record_name(path: Path) -> str:
+    """What stands at a record's name that is not a regular file, in ``doctor``'s words.
+
+    ``_foreign_reason`` judges with ``lstat`` first; what it passes here is a
+    directory, since a regular file is never asked about.
+    """
+    return _foreign_reason(path) or "is a directory"
 
 
 def _foreign_reason(path: Path) -> str | None:
