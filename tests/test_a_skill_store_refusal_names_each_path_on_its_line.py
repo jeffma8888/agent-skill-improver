@@ -81,7 +81,7 @@ PATH_NAMES = (
     "spelled",
     "cursor",
     "resolved",
-    "root_form / part",
+    "walked",
     "guard",
     "canonical",
 )

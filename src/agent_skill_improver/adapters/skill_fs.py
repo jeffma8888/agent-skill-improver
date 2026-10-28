@@ -1207,8 +1207,15 @@ class FilesystemSkillStore:
                         f"not a document in it. Nothing was touched."
                     )
                 fd = os.open(str(root_form), os.O_RDONLY | os.O_DIRECTORY)
+                # The directory each refusal names is the one being opened, the
+                # root joined to every component so far. Measured before: it was
+                # the root joined to the last component alone, so a copy at
+                # ``<root>/x/tdd`` named ``<root>/tdd``, a directory that need
+                # not exist.
+                walked = root_form
                 try:
                     for part in below.parts[:-1]:
+                        walked = walked / part
                         try:
                             nxt = os.open(
                                 part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
@@ -1216,12 +1223,12 @@ class FilesystemSkillStore:
                         except OSError as exc:
                             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                                 raise LinkedTargetRefused(
-                                    f"refusing to {verb} {named_path(spelled)}: {named_path(root_form / part)} is a "
+                                    f"refusing to {verb} {named_path(spelled)}: {named_path(walked)} is a "
                                     f"symbolic link or not a directory on the way to the "
                                     f"document, judged on the open handle. Nothing was touched."
                                 ) from exc
                             raise BaseHashMismatch(
-                                f"refusing to {verb} {named_path(spelled)}: {named_path(root_form / part)} could not be "
+                                f"refusing to {verb} {named_path(spelled)}: {named_path(walked)} could not be "
                                 f"opened ({exc.strerror}). Nothing was touched."
                             ) from exc
                         os.close(fd)
