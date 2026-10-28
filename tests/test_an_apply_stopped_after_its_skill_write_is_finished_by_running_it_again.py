@@ -319,7 +319,7 @@ class AnApplyStoppedAfterItsSkillWriteTests(unittest.TestCase):
         self.assertEqual(self._status(), "applied")
         again = run_cli(self.rollback)
         self.assertEqual(again.returncode, cli.RC_OK, again.stderr)
-        self.assertIn("'already_restored': True", again.stdout)
+        self.assertIn("\n  nothing written the file already held the backup's text", again.stdout)
         self.assertEqual(self._status(), "rolled-back")
 
     def test_the_control_a_stop_of_another_command_says_nothing_of_running_it_again(

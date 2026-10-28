@@ -439,8 +439,8 @@ whose candidate id is exactly the one you named.
 Rollback overwrites only the text its own apply wrote. If the skill has been
 edited since (by you, or by applying another candidate), it refuses with
 `BaseHashMismatch` and leaves the file alone. Running it twice is safe: the
-second run finds the previous text already in place and reports
-`already_restored` without writing.
+second run finds the previous text already in place and says so without
+writing: `nothing written` on its fourth line, `already_restored` in `--json`.
 
 ## Recovery
 

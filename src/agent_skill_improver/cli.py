@@ -1528,10 +1528,22 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     candidate = state.read_candidate(args.candidate_id)
     store = build_skill_store(config, writable=True)
     result = rollback_candidate(candidate, skill_store=store, state=state, clock=SystemClock())
-    if args.json:
-        _say_json(result)
-    else:
-        _say(f"rolled back {result['candidate_id']}: {result['result']}\n")
+    restored = result["result"]
+    # Each line through ``_emit``, as ``apply``'s are, so a path is kept to its
+    # line and spelled as ``review`` spells it. Measured before: the store's
+    # result was printed as a Python dict, its keys and ``True``/``False``
+    # included, on the line that said what was rolled back.
+    lines = [
+        f"rolled back {result['candidate_id']}: {restored['rolled_back']}",
+        f"  restored sha256 {restored['restored_sha256']}",
+        f"  from backup     {restored['from_backup']}",
+    ]
+    if restored["already_restored"]:
+        lines.append(
+            "  nothing written the file already held the backup's text (a second rollback, "
+            "or the backup copied by hand)"
+        )
+    _emit(result, as_json=args.json, lines=lines)
     return 0
 
 
