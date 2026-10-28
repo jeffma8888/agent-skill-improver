@@ -341,7 +341,11 @@ names them. `is_total` is unaffected: the window was read whole; part of it did
 not parse.
 
 **`selection.bucket_coverage`** — fraction of buckets that contributed. A run that
-touched one bucket of five looks fine by count and is not representative.
+touched one bucket of five looks fine by count and is not representative. A
+bucket key (a workspace, with `fairness_dimension = "workspace"`) is written as
+the record gave it (not trimmed or case-folded) up to 512 characters; a longer
+one is cut there and ends "... [N characters, sha256 <16 hex>]", still a
+bucket of its own.
 
 **`classes`** — the authorship classification per record, with reasons. Machine
 traffic and human sessions are different populations; a loop reading mostly

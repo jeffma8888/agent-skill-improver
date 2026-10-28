@@ -66,7 +66,7 @@ from ..domain.discovery import error_page, merge_pages, passed_over_note
 from ..domain.failure import FailureCase
 from ..domain.isolation import decide as decide_isolation
 from ..domain.rubric import Rubric
-from ..domain.selection import bucket_coverage, select_fair
+from ..domain.selection import bucket_coverage, bucket_key, select_fair
 from ..domain.skills import (
     SkillGroup,
     describe_tree_change,
@@ -175,7 +175,7 @@ def _bucket_of(dimension: str, *, agent_title_markers: Sequence[str] = ()) -> Ca
     if dimension == "date":
         return lambda t: getattr(t, "updated_date", "") or "unknown-date"
     if dimension == "workspace":
-        return lambda t: getattr(t, "workspace", "") or "unknown-workspace"
+        return lambda t: bucket_key(getattr(t, "workspace", "") or "unknown-workspace")
     return lambda t: classify_thread(t, agent_title_markers=tuple(agent_title_markers))
 
 

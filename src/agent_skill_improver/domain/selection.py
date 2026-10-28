@@ -16,12 +16,36 @@ exactly the one a human needs to see.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 
 T = TypeVar("T")
 
 UNCLASSIFIED_BUCKET = ""
+
+#: How long a bucket key read from a record may be and still be the key as
+#: written. Longer than any path most tools write; a real path past it is still
+#: a bucket of its own (see ``bucket_key``).
+BUCKET_KEY_CHARS = 512
+
+
+def bucket_key(value: str) -> str:
+    """``value`` as a selection bucket key: as written up to ``BUCKET_KEY_CHARS``.
+
+    Neither trimmed nor case-folded, so values differing only in case or
+    surrounding spaces are two buckets. A longer value is cut and fingerprinted,
+    so two values that share the first ``BUCKET_KEY_CHARS`` characters stay two
+    buckets, and a fingerprinted key, being longer than the limit, never equals
+    one kept whole. A key is written three times into the receipt (``buckets``,
+    ``selected_per_bucket``, ``exhausted_buckets``). Measured before: a
+    200,000-character ``workspacePath`` in one fixture export made a 610 KB
+    receipt where the healthy fixtures make one of about 10 KB.
+    """
+    if len(value) <= BUCKET_KEY_CHARS:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return f"{value[:BUCKET_KEY_CHARS]}... [{len(value)} characters, sha256 {digest}]"
 
 
 @dataclass(frozen=True)
