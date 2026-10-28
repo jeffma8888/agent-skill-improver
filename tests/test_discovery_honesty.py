@@ -461,7 +461,10 @@ class RawExportConfinementTests(unittest.TestCase):
 
     def test_a_discovered_thread_id_cannot_escape_the_state_raw_directory(self):
         fixture = Path(__file__).parent / "fixtures" / "exports" / "compliant.json"
-        raw = fixture.read_text(encoding="utf-8")
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+        # The export answers for the id it was asked for, so it is taken.
+        payload["thread"]["id"] = "x/../../../outside"
+        raw = json.dumps(payload)
         with TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             state = StateStore(root / "state")
@@ -623,7 +626,7 @@ class SourceOutputBoundsTests(unittest.TestCase):
         fixture = Path(__file__).parent / "fixtures" / "exports" / "compliant.json"
         program = "import sys;sys.stdout.write(open(sys.argv[1]).read())"
         source = self._source(program, str(fixture))
-        conversation = source.fetch("thread-4")
+        conversation = source.fetch("1700000000001-1")
         self.assertTrue(conversation.messages, "the fixture export must normalize to messages")
 
 

@@ -491,7 +491,11 @@ refused and deferred record on disk, newest first, with its stage and reason
 (`--kind quarantined` for one kind; `--json` for the fields and file paths), so
 you do not have to open the reason files, whose names flatten the stage. A
 repeating shape defect usually means the source changed its export format,
-which is a normalizer fix, not a data problem.
+which is a normalizer fix, not a data problem. A record quarantined at ingest
+because its "export names thread" another one means the conversation command,
+or a wrapper or cache in front of it, answered for a different conversation
+than the id it was given; the run does not score one conversation as another,
+and the raw export (with `keep_raw`) is kept under the id asked for.
 
 **The same record defers every day.** Deferral is for transient failures, and a
 deferred record is retried first on the next run. That priority is a ratchet if

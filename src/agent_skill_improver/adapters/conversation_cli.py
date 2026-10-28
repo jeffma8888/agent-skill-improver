@@ -50,7 +50,7 @@ from ..domain.discovery import (
     is_safe_thread_id,
     page_from_threads,
 )
-from ..domain.redaction import redact
+from ..domain.redaction import quoted_value, redact
 from ..errors import RecordDefect, SourceUnavailable
 from ..jsonio import loads_untrusted
 from .bounded_process import (
@@ -432,11 +432,25 @@ class ConversationCliSource:
             # The discovered id is untrusted. StateStore owns both confinement
             # and collision-safe leaf naming for this private artifact.
             self.raw_store.write_raw(thread_id, raw)
-        return normalize_export(
+        conversation = normalize_export(
             payload,
             output_excerpt_chars=self.output_excerpt_chars,
             max_messages=self.max_messages,
         )
+        if conversation.thread_id != thread_id:
+            # Measured before: the run scored whatever conversation the command
+            # answered with, under this record, and filed its failure cases
+            # under the id the export named. A failing thread answered with a
+            # passing one proposed nothing; a passing thread answered with a
+            # failing one counted that failure twice; every record read as
+            # scored. Ids are compared exactly, as the command line passed one.
+            raise RecordDefect(
+                f"export for {thread_id} names thread {quoted_value(conversation.thread_id)}; "
+                "the conversation command answered for another conversation, so this "
+                "export was not taken as either one",
+                record_id=thread_id,
+            )
+        return conversation
 
     # -- plumbing --------------------------------------------------------
     def preflight(self) -> None:
