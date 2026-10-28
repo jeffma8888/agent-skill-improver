@@ -1017,6 +1017,11 @@ def cmd_rubrics(args: argparse.Namespace) -> int:
     return 0
 
 
+#: How much of a thread's title a ``discover`` row shows: the cut it always
+#: had, now said (``listed_value``) rather than silent.
+DISCOVER_TITLE_CHARS = 60
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     config = _load(args)
     state = _open_state(config)
@@ -1045,7 +1050,18 @@ def cmd_discover(args: argparse.Namespace) -> int:
         "truncated_by_limit": page.truncated_by_limit,
         "honesty_note": page.honesty_note,
     }
-    lines = [f"{t.thread_id}  {t.workspace}  {t.title[:60]}" for t in found]
+    # A row's id, workspace and title are the export's (or a listing's),
+    # untrusted and unbounded, so each is shown as ``listed_value`` shows a
+    # stored record's values: masked, then cut, with no quotes added, so a
+    # healthy row lists exactly as it did. Measured before: a 200,000-character
+    # workspace or id made a row of that length, and a credential in a title or
+    # an id was printed whole. The JSON ``threads`` keep each record whole.
+    lines = [
+        f"{listed_value(t.thread_id)}  "
+        f"{listed_value(t.workspace, limit=LISTED_PATH_CHARS)}  "
+        f"{listed_value(t.title, limit=DISCOVER_TITLE_CHARS)}"
+        for t in found
+    ]
     lines.append(f"{len(found)} thread(s) returned, limit {page.limit}")
     lines.append(
         "this is the WHOLE population the source would return"
