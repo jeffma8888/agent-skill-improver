@@ -22,7 +22,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from agent_skill_improver.adapters.fixture_source import FixtureConversationSource
-from agent_skill_improver.domain.discovery import passed_over_note
+from agent_skill_improver.domain.discovery import MAX_THREAD_ID_LENGTH, passed_over_note
 from agent_skill_improver.errors import RecordDefect
 from tests.support import FIXTURE_EXPORTS, build_env, run_cli
 
@@ -160,7 +160,9 @@ class TheSourceTakesNoneOfTheClaimsTests(unittest.TestCase):
         self.assertEqual(passed["zz.json"], ambiguous(THREAD, "'copy.json', 'failing.json'", "do"))
 
     def test_a_long_thread_id_and_many_claims_make_a_bounded_reason(self) -> None:
-        thread_id = "t" * 10_000
+        # The longest id the source takes: a longer one is passed over for its
+        # length before claims are grouped. Its repr is still past the cut.
+        thread_id = "t" * MAX_THREAD_ID_LENGTH
         for n in range(8):
             self.write(f"c{n}.json", {"thread": {"id": thread_id}, "elements": [{}] * n})
         _, passed = self.scan()
@@ -168,6 +170,19 @@ class TheSourceTakesNoneOfTheClaimsTests(unittest.TestCase):
         self.assertLess(len(reason), 600)
         self.assertIn("... [", reason)
         self.assertIn("'c1.json', 'c2.json', 'c3.json', 'c4.json', 'c5.json', and 2 more", reason)
+
+    def test_claims_of_an_over_long_id_are_each_passed_over_for_its_length(self) -> None:
+        thread_id = "u" * (MAX_THREAD_ID_LENGTH + 1)
+        for n in range(3):
+            self.write(f"o{n}.json", {"thread": {"id": thread_id}, "elements": [{}] * n})
+        threads, passed = self.scan()
+        self.assertNotIn(thread_id, threads)
+        self.assertEqual(set(passed), {"o0.json", "o1.json", "o2.json"})
+        for name, reason in passed.items():
+            with self.subTest(export=name):
+                self.assertIn("an id that is over-long (257 characters; the limit is 256", reason)
+                self.assertNotIn("also do", reason)
+                self.assertNotIn(".json", reason)
 
     def test_a_credential_in_a_claimed_thread_id_is_masked(self) -> None:
         token = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"

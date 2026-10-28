@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from agent_skill_improver.domain.discovery import MAX_THREAD_ID_LENGTH
 from agent_skill_improver.domain.redaction import LISTED_PATH_CHARS, QUOTED_VALUE_CHARS
 from tests.support import FIXTURE_EXPORTS, build_env, run_cli
 
@@ -73,7 +74,9 @@ class ARowIsBoundedTests(unittest.TestCase):
         self.assertLess(len(stdout), 6_000)
 
     def test_a_long_id_is_cut_in_its_row(self) -> None:
-        thread_id = "t-" + "9" * LONG
+        # The longest id the source takes: a longer one is passed over before
+        # it is listed. It is still past the row's cut.
+        thread_id = "t-" + "9" * (MAX_THREAD_ID_LENGTH - 2)
         stdout = discover({"id": thread_id})
         row = the_row(stdout, "t-")
         self.assertTrue(

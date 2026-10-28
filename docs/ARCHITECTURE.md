@@ -172,7 +172,10 @@ Two more things are refused before any child runs. A discovered thread id must
 satisfy `is_safe_thread_id` (no leading dash, no whitespace or control
 characters), because listing titles derive from conversation content and a
 forged `Thread:` line could otherwise plant an id that the export argv would
-hand to the conversation CLI as an *option*. And a skill file that holds a
+hand to the conversation CLI as an *option*; the fixtures source, which runs no
+child, holds an export's thread id to the same length (`MAX_THREAD_ID_LENGTH`)
+and passes a longer one over, since an id is its record's key in the receipt
+and the state files. And a skill file that holds a
 credential (`credential_labels`, the high-confidence shapes only) is refused as
 a proposal target with `CredentialInSkill`: the transcript is redacted before a
 model sees it, but the skill text cannot be, because the improver returns the

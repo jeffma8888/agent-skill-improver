@@ -23,7 +23,12 @@ from typing import Any
 from ..jsonio import loads_untrusted
 from ..domain.candidate import one_line_label
 from ..domain.conversation import NormalizedConversation
-from ..domain.discovery import DiscoveredThread, DiscoveryPage, page_from_threads
+from ..domain.discovery import (
+    MAX_THREAD_ID_LENGTH,
+    DiscoveredThread,
+    DiscoveryPage,
+    page_from_threads,
+)
 from ..domain.redaction import quoted_value, quoted_values
 from ..errors import RecordDefect, SourceUnavailable
 from .transcript_export import MAX_EXPORT_BYTES, normalize_export
@@ -175,6 +180,25 @@ class FixtureConversationSource:
                 continue
             if not isinstance(thread.get("id"), str) or not thread.get("id"):
                 passed_over.append((str(path), "has a thread without an id"))
+                continue
+            thread_id = thread["id"]
+            if len(thread_id) > MAX_THREAD_ID_LENGTH:
+                # An id is its record's key in the receipt, the checkpoint and
+                # each scorecard and failure case, so it is held to the length
+                # a listed id is held to (the command-line source refuses a
+                # longer one at discovery). Measured before: an export claiming
+                # a 2,000,000-character id was taken, and the receipt and
+                # ``daily --json`` grew to 4.0 MB (10 KB without it), the
+                # checkpoint and the scorecard to 2.0 MB each.
+                passed_over.append(
+                    (
+                        str(path),
+                        f"claims thread {quoted_value(thread_id)}, an id that is over-long "
+                        f"({len(thread_id)} characters; the limit is {MAX_THREAD_ID_LENGTH}, "
+                        "as for an id a conversation command lists), so it was not taken "
+                        "as a thread",
+                    )
+                )
                 continue
             accepted.append((path, payload))
             digests[path] = hashlib.sha256(data).hexdigest()
