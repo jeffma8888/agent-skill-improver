@@ -195,11 +195,27 @@ def _double_sized_int(token: str) -> int:
     )
 
 
+#: The longest number literal a refusal spells out; a longer one is named by
+#: its length, as an integer too large is named by its digits.
+_SHOWN_NUMBER_CHARS = 32
+
+
 def _finite_float(token: str) -> float:
+    """A number literal with a fraction or exponent, refused when it does not
+    round to a finite double.
+
+    The refusal is the reason a source entry, a model reply or a record is
+    passed over, and from there it reaches ``doctor``, ``daily`` and the run's
+    receipt; a literal is as long as the text it came in. Measured before: one
+    conversation export holding a 1 MB literal made ``doctor`` print a 1 MB
+    line and ``daily --commit`` keep a 3 MB receipt. A literal is digits, a
+    sign, a point and an exponent, so a short one is spelled as it is.
+    """
     number = float(token)
     if not math.isfinite(number):
+        shown = token if len(token) <= _SHOWN_NUMBER_CHARS else f"of {len(token)} characters"
         raise ValueError(
-            f"JSON number {token} does not round to a finite double; nothing this tool reads "
+            f"JSON number {shown} does not round to a finite double; nothing this tool reads "
             "can carry it"
         )
     return number

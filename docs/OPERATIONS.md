@@ -315,7 +315,8 @@ socket or a directory, judged on what a link there names) and so is never opened
 or read, one larger
 than 32 MiB, one that is not UTF-8 or not JSON (a number that does not round to
 a finite double, such as `1e400`, or one of the non-standard not-a-number and
-infinity tokens, counts as not JSON), a JSON value that is not an object, an
+infinity tokens, counts as not JSON; a number longer than 32 characters is
+named by its length), a JSON value that is not an object, an
 object with no thread or a thread without an id; `doctor` lists the
 same entries as `WARN` lines under the source, and a fetch that cannot find a
 discovered thread while such entries exist quarantines the record as "no readable
