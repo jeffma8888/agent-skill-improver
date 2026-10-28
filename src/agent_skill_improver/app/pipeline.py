@@ -30,7 +30,7 @@ from ..domain.rubric import Rubric
 from ..domain.scoring import ScoreCard, parse_scorecard
 from ..domain.skills import BOM, SkillGroup, parse_frontmatter
 from ..errors import CredentialInSkill, MalformedModelOutput, RecordDefect, SelfMutationRefused
-from ..hashing import sha256_text
+from ..hashing import normalize_text, sha256_text
 from ..ports import ModelRunner
 from . import prompts
 
@@ -314,7 +314,14 @@ def propose_candidate(
             f"{group.skill_id!r}; refusing to redirect a patch to a different skill",
             record_id=group.skill_id,
         )
-    new_text = proposal.new_skill_text
+    # The base is read with its line endings folded to LF, and apply writes the
+    # replacement folded the same way, in the document's own convention. The
+    # replacement is folded here, before it is checked, diffed or replayed, so
+    # the diff review prints shows the lines apply writes. Measured before: a
+    # reply in CRLF made a diff that removed and re-added every line of the
+    # document (+12 -10 for a two-line change), and a lone carriage return put
+    # a "\ No newline at end of file" marker in the middle of the diff.
+    new_text = normalize_text(proposal.new_skill_text)
     text_problems = skill_text_defects(new_text, base_text=base_text, skill_id=group.skill_id)
     if text_problems:
         raise RecordDefect(

@@ -1,6 +1,6 @@
 """A skill holding an executable payload is proposed against with its risk note.
 
-``propose_for_group`` in ``app/pipeline.py`` refuses a skill listed in
+``propose_candidate`` in ``app/pipeline.py`` refuses a skill listed in
 ``[guard].protected_skill_ids`` (``SelfMutationRefused``, written to
 ``state/refusals/``), and proposes against a skill whose directory holds an
 executable payload, noting ``ELEVATED REVIEW RISK`` with the payload count and

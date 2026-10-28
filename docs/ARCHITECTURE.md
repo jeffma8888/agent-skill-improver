@@ -305,6 +305,9 @@ replacement. Constraints:
   note, are kept masked and clipped: each of the three past 4,000 characters,
   each risk past 2,000, and only the first 20 risks, with a note `review` prints
   saying how many the improver listed.
+- the replacement's line endings are folded to LF before it is checked, diffed
+  or replayed, as the base's are when it is read; apply writes it in the
+  document's own convention, so the diff shows the lines apply writes.
 
 ### 8. Validate
 
