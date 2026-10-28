@@ -346,6 +346,8 @@ touched one bucket of five looks fine by count and is not representative.
 **`classes`** — the authorship classification per record, with reasons. Machine
 traffic and human sessions are different populations; a loop reading mostly
 generated threads is grading the orchestrator, not the skills a person uses.
+A reason quotes the title, agent name or origin it rests on as the export wrote
+it, with a credential masked and anything past 120 characters cut.
 
 **`evaluator_independence`** — whether the judge, improver and scorer commands are
 distinct, plus a note on what that check cannot see.

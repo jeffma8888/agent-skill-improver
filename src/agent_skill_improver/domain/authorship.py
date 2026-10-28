@@ -30,6 +30,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Sequence
 
+from .redaction import quoted_value
+
 CLASS_HUMAN = "human"
 CLASS_ORCHESTRATED = "orchestrated"
 CLASS_UNKNOWN = "unknown"
@@ -126,16 +128,26 @@ def classify_conversation(
     Post-fetch there are more signals than the title, so this can promote a
     thread from ``unknown`` to a decided class -- and it records *why*, because a
     classification with no stated reason is not reviewable.
+
+    A reason quotes what the export says, through ``quoted_value``: the title,
+    agent name and origin are untrusted text that lands in the receipt and the
+    run's JSON output. Measured before: each was quoted whole with ``repr``, so a
+    200,000-character title made a 210 KB receipt where the run otherwise
+    writes 10 KB, and a credential in a title was copied there unmasked (one in
+    an agent name lowercased, otherwise whole). The agent name and origin are
+    quoted as written, not as lowercased for matching, which would hide a key
+    from the masking shapes.
     """
     reasons: list[str] = []
     title = getattr(conversation, "title", "") or ""
     by_title = classify_title(title, agent_title_markers=agent_title_markers)
     if by_title == CLASS_ORCHESTRATED:
-        reasons.append(f"title matches an orchestrator marker: {title!r}")
+        reasons.append(f"title matches an orchestrator marker: {quoted_value(title)}")
 
-    agent_name = _norm(getattr(conversation, "agent_name", "") or "")
+    raw_agent_name = getattr(conversation, "agent_name", "") or ""
+    agent_name = _norm(raw_agent_name)
     if agent_name:
-        reasons.append(f"thread carries an agent_name ({agent_name!r})")
+        reasons.append(f"thread carries an agent_name ({quoted_value(raw_agent_name)})")
 
     opening_generated = False
     users = getattr(conversation, "user_messages", ()) or ()
@@ -147,10 +159,13 @@ def classify_conversation(
                 opening_generated = True
                 reasons.append(f"opening user turn reads as a generated role prompt ({marker!r})")
                 break
-        origin = _norm(getattr(first, "origin", "") or "")
+        raw_origin = getattr(first, "origin", "") or ""
+        origin = _norm(raw_origin)
         if origin and origin not in ("user", "human", "interactive"):
             opening_generated = True
-            reasons.append(f"opening user turn has a non-human origin marker ({origin!r})")
+            reasons.append(
+                f"opening user turn has a non-human origin marker ({quoted_value(raw_origin)})"
+            )
 
     if by_title == CLASS_ORCHESTRATED or opening_generated or agent_name:
         return CLASS_ORCHESTRATED, tuple(reasons)
