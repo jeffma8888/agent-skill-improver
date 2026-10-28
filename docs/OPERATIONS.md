@@ -582,6 +582,12 @@ a skill whose candidate from the first run is still open is skipped by the
 per-skill cap, and a skill whose candidate was closed gets a fresh `-02-`
 proposal. Nothing on disk is overwritten or mutated.
 
+Anything but a regular file at a candidate's record name (a directory, a link to
+a directory or to nothing, a fifo) is a `StateUnreadable` refusal too: `review`,
+`apply` and `rollback` name what it is and exit 3, not the exit 4 of a record
+that is not there. `doctor` warns of the entry; move it aside, and if it is a
+directory holding the record, put the record back at its name.
+
 ## Housekeeping
 
 `state/` grows: raw exports, records, receipts, backups. It is all local and all

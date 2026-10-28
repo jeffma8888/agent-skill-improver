@@ -705,6 +705,19 @@ class StateStore:
         """
         path = self.candidate_path(candidate_id)
         if not path.is_file():
+            # Something that is not a regular file stands at the record's name:
+            # a directory, a link to one or to nothing, a fifo. It is named for
+            # what it is. Measured before: each was "not found: no candidate",
+            # exit 4, for ``review``, ``apply`` and ``rollback`` alike, while
+            # ``doctor`` warned of the same entry. A link to a regular file is read
+            # and refused by ``_read_state_json``, as before.
+            if path.is_symlink() or path.exists():
+                raise StateUnreadable(
+                    f"refusing to use the candidate record {_shown(path)}: it "
+                    f"{_foreign_reason(path) or 'is a directory'}. This tool writes each "
+                    "candidate record as a regular file, so this entry is not one it wrote; "
+                    "it is left alone, and `doctor` warns of it."
+                )
             raise FileNotFoundError(f"no candidate {candidate_id!r} at {_shown(path)}")
         candidate = _candidate_from_file(path)
         if candidate.id != candidate_id:
@@ -730,9 +743,10 @@ class StateStore:
         unreadable: list[UnreadableRecord] = []
         for path in sorted(self.dir("candidates").glob("*.json")):
             # A link or any other non-file is not a record at all: this tool never
-            # writes one, it is already named by ``foreign_entries`` and left
-            # alone, and ``read_candidate`` refuses it by name. An unreadable
-            # record is a regular file that does not parse.
+            # writes one, it is already named by ``foreign_entries`` (a
+            # directory by ``misplaced_directories``) and left alone, and
+            # ``read_candidate`` refuses it by name. An unreadable record is a
+            # regular file that does not parse.
             if path.is_symlink() or not path.is_file():
                 continue
             try:

@@ -13,12 +13,16 @@ record the tool wrote lists exactly as before.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
-from agent_skill_improver.app.state import StateStore
+from agent_skill_improver import cli
+from agent_skill_improver.app.state import SetAsideRecord, SetAsideScan, StateStore
 from agent_skill_improver.cli import LISTED_RECORD_ID_CHARS, RC_OK
 from agent_skill_improver.domain.discovery import MAX_THREAD_ID_LENGTH
 from agent_skill_improver.domain.redaction import LISTED_SKILL_ID_CHARS
@@ -159,6 +163,39 @@ class AValueNoRealRecordHoldsIsCutTests(_Listing):
         self.assertEqual(
             str(records[0]["path"]).replace(MASK, TOKEN), str(written), "only the token is masked"
         )
+
+
+class ThePathIsCutPastWhatASystemCallTakesTests(_Listing):
+    def test_a_path_as_long_as_its_limit_is_whole_and_one_longer_is_cut(self) -> None:
+        # No file the store can open has a path this long, so the listing is
+        # handed one: the scan is patched and the command runs in process.
+        limit = 4096
+        for length in (limit, limit + 1):
+            with self.subTest(length=length):
+                path = Path("/" + "p" * (length - 1))
+                self.assertEqual(len(str(path)), length)
+                record = SetAsideRecord(
+                    kind="quarantined",
+                    record_id="conv-1",
+                    stage="ingest",
+                    reason="r",
+                    at="2026-01-02T03:04:05Z",
+                    attempts=None,
+                    path=path,
+                )
+                out = io.StringIO()
+                scan = SetAsideScan(readable=(record,), unreadable=())
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(
+                        mock.patch.object(StateStore, "scan_set_aside", return_value=scan)
+                    )
+                    stack.enter_context(contextlib.redirect_stdout(out))
+                    stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    rc = cli.main([*self.cfg, "--json", "set-aside"])
+                self.assertEqual(rc, RC_OK)
+                listed = json.loads(out.getvalue())["records"][0]["path"]
+                expected = str(path) if length == limit else _cut(str(path), limit)
+                self.assertEqual(listed, expected)
 
 
 class TheControlARealRecordListsAsBeforeTests(_Listing):
