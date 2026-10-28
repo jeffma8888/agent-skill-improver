@@ -70,6 +70,15 @@ DEFAULT_ROLE_PROMPT_MARKERS: tuple[str, ...] = (
     "iteration id",
 )
 
+#: Origins of an opening user turn that a person typed. Any other non-empty
+#: origin marks the turn as generated. ``user-input`` is the value the export
+#: contract gives a typed user turn (``adapters/transcript_export.py``, and
+#: every user message the fixture builder writes). Measured before it was
+#: listed: each of the five healthy fixture conversations was classed
+#: orchestrated on that origin alone, so ``class_counts_scored`` read
+#: ``human: 0`` for a corpus written by a person.
+HUMAN_ORIGINS: tuple[str, ...] = ("user", "user-input", "human", "interactive")
+
 _WS = re.compile(r"\s+")
 
 
@@ -161,7 +170,7 @@ def classify_conversation(
                 break
         raw_origin = getattr(first, "origin", "") or ""
         origin = _norm(raw_origin)
-        if origin and origin not in ("user", "human", "interactive"):
+        if origin and origin not in HUMAN_ORIGINS:
             opening_generated = True
             reasons.append(
                 f"opening user turn has a non-human origin marker ({quoted_value(raw_origin)})"

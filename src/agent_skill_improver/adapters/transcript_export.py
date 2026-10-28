@@ -16,7 +16,9 @@ every rule below exists because a plausible-looking guess gets it wrong:
   message via ``parentId``. Elements describing the session rather than a turn
   are parentless;
 * a ``message`` carries ``role`` and ``author`` but **no content** -- the words
-  live in its child ``text`` elements, whose key is ``content``;
+  live in its child ``text`` elements, whose key is ``content``; a ``user``
+  message also carries ``origin``, ``user-input`` when a person typed it (any
+  origin outside ``domain.authorship.HUMAN_ORIGINS`` marks the turn generated);
 * ``tool`` carries ``name`` / ``status`` / ``input`` / ``output``, where
   ``status`` is a short word such as ``done`` / ``error`` / ``running`` and
   ``input`` is usually an object but is sometimes a bare string.

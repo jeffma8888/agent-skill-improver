@@ -347,7 +347,10 @@ touched one bucket of five looks fine by count and is not representative.
 traffic and human sessions are different populations; a loop reading mostly
 generated threads is grading the orchestrator, not the skills a person uses.
 A reason quotes the title, agent name or origin it rests on as the export wrote
-it, with a credential masked and anything past 120 characters cut.
+it, with a credential masked and anything past 120 characters cut. An opening
+user turn whose origin is `user`, `user-input`, `human` or `interactive`, in any
+case and with any surrounding spaces, or that has no origin, is a person's; any
+other origin marks the conversation orchestrated.
 
 **`evaluator_independence`** — whether the judge, improver and scorer commands are
 distinct, plus a note on what that check cannot see.
