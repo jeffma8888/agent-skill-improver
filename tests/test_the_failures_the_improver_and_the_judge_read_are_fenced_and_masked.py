@@ -2,7 +2,8 @@
 
 ``improver_user_prompt`` in ``app/prompts.py`` lists the failures a proposal
 must address: each case's id, its conversation's id, the scorer's rationale and
-the element ids it cites. ``judge_user_prompt`` shows the conversation's id and a
+the id and kind of each element it cites. ``judge_user_prompt`` shows the
+conversation's id and a
 rationale, which ``app/validate.py`` fills with the proposal's own hypothesis.
 None of these is local: the ids are the export's text, the rationale is the
 scorer's words about an untrusted transcript, and the hypothesis is the words of
@@ -12,6 +13,10 @@ derived locally, so a forged closing delimiter and an instruction in any of them
 reached the improver or the judge outside the fences, and a ``ghp_`` token in any
 of them reached it whole. Now each is fenced and masked, the improver's list
 encoded only after each value is masked and neutralized, so it still parses.
+The kind of each cited element is the export's text as well, and it was still
+listed as written once the ids were masked (measured: a ``ghp_`` token in it
+reached the improver whole, and an opening delimiter with no ``>`` left the
+list unreadable); it is masked and neutralized as they are.
 """
 
 from __future__ import annotations
@@ -79,7 +84,12 @@ def conversation(thread: str = "thr-1", element: str = "m1") -> NormalizedConver
     )
 
 
-def case(rationale: str = "it skipped the check", thread: str = "thr-1", element: str = "m1"):
+def case(
+    rationale: str = "it skipped the check",
+    thread: str = "thr-1",
+    element: str = "m1",
+    kind: str = "message",
+):
     return FailureCase(
         id=f"FC:{thread}:r:c1",
         conversation_id=thread,
@@ -89,7 +99,7 @@ def case(rationale: str = "it skipped the check", thread: str = "thr-1", element
         criterion_title="Checks first",
         weight=1,
         rationale=rationale,
-        evidence=(EvidenceRef(element, 0, "message"),),
+        evidence=(EvidenceRef(element, 0, kind),),
         signals={},
         attributions=(),
     )
@@ -126,7 +136,14 @@ def judge(failure: FailureCase, *, masked: bool = True, texts: dict[str, str] | 
 
 def planted(field: str, value: str) -> FailureCase:
     return case(
-        **{{"rationale": "rationale", "thread_id": "thread", "element_id": "element"}[field]: value}
+        **{
+            {
+                "rationale": "rationale",
+                "thread_id": "thread",
+                "element_id": "element",
+                "kind": "kind",
+            }[field]: value
+        }
     )
 
 
@@ -162,7 +179,7 @@ class TheFailuresTheImproverAndTheJudgeReadAreFencedTests(unittest.TestCase):
         self.assertIn(NEUTRALIZED, text)
 
     def test_an_instruction_in_a_rationale_or_an_id_stays_inside_a_fence_for_the_improver(self):
-        for field in ("rationale", "thread_id", "element_id"):
+        for field in ("rationale", "thread_id", "element_id", "kind"):
             with self.subTest(field=field):
                 value = INSTRUCTION if field == "rationale" else INSTRUCTION.replace("\n", " ")
                 self.assert_inside(improver(planted(field, value)))
@@ -174,11 +191,11 @@ class TheFailuresTheImproverAndTheJudgeReadAreFencedTests(unittest.TestCase):
                 self.assert_inside(judge(planted(field, value)))
 
     def test_a_credential_in_a_rationale_or_an_id_reaches_neither_role_whole(self):
-        for field in ("rationale", "thread_id", "element_id"):
+        for field in ("rationale", "thread_id", "element_id", "kind"):
             failure = planted(field, f"x-{TOKEN}-y" if field != "rationale" else f"x {TOKEN} y")
             with self.subTest(field=field, role="improver"):
                 self.assertNotIn(TOKEN, improver(failure))
-            if field != "element_id":
+            if field not in ("element_id", "kind"):
                 with self.subTest(field=field, role="judge"):
                     self.assertNotIn(TOKEN, judge(failure))
 
@@ -192,7 +209,7 @@ class TheFailuresTheImproverAndTheJudgeReadAreFencedTests(unittest.TestCase):
             self.assertNotIn("derived locally", text)
 
     def test_the_improvers_list_reads_with_each_value_masked_and_neutralized(self):
-        for field in ("rationale", "thread_id", "element_id"):
+        for field in ("rationale", "thread_id", "element_id", "kind"):
             for value in AWKWARD:
                 with self.subTest(field=field, value=value):
                     _, listed = self.listed(improver(planted(field, value)))
@@ -202,6 +219,7 @@ class TheFailuresTheImproverAndTheJudgeReadAreFencedTests(unittest.TestCase):
                         "rationale": entry["rationale"],
                         "thread_id": entry["conversation_id"],
                         "element_id": entry["evidence"][0]["element_id"],
+                        "kind": entry["evidence"][0]["kind"],
                     }[field]
                     self.assertEqual(shown, want)
                     self.assertNotIn("UNTRUSTED-DATA", shown)
@@ -209,6 +227,22 @@ class TheFailuresTheImproverAndTheJudgeReadAreFencedTests(unittest.TestCase):
                         [entry["rubric_id"], entry["criterion_id"], entry["criterion_title"]],
                         ["r", "c1", "Checks first"],
                     )
+
+    def test_each_evidence_entry_lists_the_cited_elements_id_position_and_kind(self):
+        cited = (EvidenceRef("m1", 0, "message"), EvidenceRef("x1", 1, ""))
+        failure = dataclasses.replace(case(), evidence=cited)
+        for masked in (True, False):
+            with self.subTest(masked=masked):
+                _, listed = self.listed(improver(failure, masked=masked))
+                (entry,) = listed
+                self.assertEqual(
+                    entry["evidence"],
+                    [
+                        {"element_id": "m1", "position": 0, "kind": "message"},
+                        {"element_id": "x1", "position": 1, "kind": ""},
+                    ],
+                )
+                self.assertIs(type(entry["evidence"][1]["position"]), int)
 
     def test_each_fences_own_nonce_in_a_rationale_is_stripped(self):
         failures_nonce = nonce_for(SEED, "failures:s1")
@@ -235,6 +269,17 @@ class TheFailuresTheImproverAndTheJudgeReadAreFencedTests(unittest.TestCase):
         self.assertIn(TOKEN, body)
         for text in (improver(failure, masked=False), judge(failure, masked=False)):
             self.assertNotIn(TOKEN, FENCED.sub("", text))
+        for field in ("thread_id", "element_id", "kind"):
+            with self.subTest(field=field):
+                text = improver(planted(field, f"x-{TOKEN}-y"), masked=False)
+                (entry,) = self.listed(text)[1]
+                shown = {
+                    "thread_id": entry["conversation_id"],
+                    "element_id": entry["evidence"][0]["element_id"],
+                    "kind": entry["evidence"][0]["kind"],
+                }[field]
+                self.assertEqual(shown, f"x-{TOKEN}-y")
+                self.assertNotIn(TOKEN, FENCED.sub("", text))
 
     def test_the_example_improver_still_reads_the_rule_a_rationale_names(self):
         failure = case(rationale="FAIL: no source given. required-rule: name the source")

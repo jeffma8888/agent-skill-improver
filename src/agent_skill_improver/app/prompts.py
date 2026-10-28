@@ -359,11 +359,11 @@ def improver_user_prompt(
     seed: str,
 ) -> str:
     # The rationale is the scorer's own words about an untrusted transcript, and
-    # the case id, the conversation id and each cited element id are the
-    # export's text. Measured before: the list sat outside every fence under a
-    # heading calling it trusted, so a forged delimiter and an instruction in any
-    # of them reached the improver there. Each is masked and neutralized before
-    # the list is encoded (``_listed_value``), and the list is fenced.
+    # the case id, the conversation id and each cited element's id and kind are
+    # the export's text. Measured before: the list sat outside every fence under
+    # a heading calling it trusted, so a forged delimiter and an instruction in
+    # any of them reached the improver there. Each is masked and neutralized
+    # before the list is encoded (``_listed_value``), and the list is fenced.
     failures = [
         {
             "failure_case_id": _listed_value(c.id, cfg),
@@ -373,7 +373,12 @@ def improver_user_prompt(
             "conversation_id": _listed_value(c.conversation_id, cfg),
             "rationale": _listed_value(c.rationale, cfg),
             "evidence": [
-                {**e.to_dict(), "element_id": _listed_value(e.element_id, cfg)} for e in c.evidence
+                {
+                    "element_id": _listed_value(e.element_id, cfg),
+                    "position": e.position,
+                    "kind": _listed_value(e.kind, cfg),
+                }
+                for e in c.evidence
             ],
             "attribution_basis": [a.basis for a in c.attributions],
         }
