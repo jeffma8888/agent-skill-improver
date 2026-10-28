@@ -1711,8 +1711,13 @@ class FilesystemSkillStore:
         skill_id = rel.parts[-2]
         declared = fields.get("name", "")
         if declared and declared != skill_id:
+            # The name is the document's own text, quoted masked and bounded
+            # (``quoted_value``). Measured before: with ``!r`` a name of
+            # 2,000,000 characters made one ``skills`` line of 2,000,070 and a
+            # token in it printed whole, in the text and in ``--json``.
             warnings = warnings + [
-                f"frontmatter name {declared!r} differs from directory name {skill_id!r}"
+                f"frontmatter name {quoted_value(declared)} differs from directory name "
+                f"{skill_id!r}"
             ]
         disable = fields.get("disable-model-invocation", "").strip().lower() in ("true", "yes", "1")
         if disable:

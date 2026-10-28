@@ -155,8 +155,13 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
             "an invisible byte the model added is not an improvement"
         )
     if base_open and base_fields.get("name") and new_fields.get("name") != base_fields.get("name"):
+        # Both names are quoted bounded: the base's is the skill document's own
+        # text. Measured before: a base name of 20,000 characters, under the
+        # default [prompt].max_skill_text_chars, was copied whole into the
+        # quarantine record, the checkpoint, the receipt and the daily summary.
         problems.append(
-            f"replacement changes the frontmatter name from {base_fields.get('name')!r} to "
+            "replacement changes the frontmatter name from "
+            f"{quoted_value(base_fields.get('name'))} to "
             f"{quoted_value(new_fields.get('name'))}; renaming a skill is not an in-place "
             "improvement"
         )
