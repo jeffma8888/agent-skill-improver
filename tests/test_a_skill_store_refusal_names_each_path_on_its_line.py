@@ -31,6 +31,7 @@ from tempfile import TemporaryDirectory
 
 from agent_skill_improver.cli import RC_REFUSED
 from agent_skill_improver.domain.candidate import make_patch
+from agent_skill_improver.domain.integrity import repropose_advice
 from agent_skill_improver.domain.skills import SkillRoot, SkillSnapshot, resolve_groups
 from tests.support import REPO_ROOT, build_env, run_cli
 
@@ -386,9 +387,13 @@ class AReviewOrApplyRefusalNamesTheDocumentOnItsLineTests(_Named):
         self.assertEqual(proc.returncode, RC_REFUSED, proc.stderr)
         self.assertEqual(
             proc.stderr,
-            f"LinkedTargetRefused: refusing to read {target}: the document is a symbolic link, "
-            "which the write path would refuse to replace, so nothing may be shown or approved "
-            "against it.\n",
+            f"LinkedTargetRefused: refusing to review {self.cid}: its canonical target {target} "
+            "is a symbolic link, which apply refuses to replace, so there is no base text to "
+            "show or to verify against. The skill and the candidate are unchanged, and nothing "
+            "was backed up: with a regular UTF-8 file holding the text it was written against "
+            "back at that path, it is reviewed and applied as before. To propose against other "
+            "text instead, put a regular UTF-8 file there first, then "
+            f"{repropose_advice(self.cid)}.\n",
         )
 
 

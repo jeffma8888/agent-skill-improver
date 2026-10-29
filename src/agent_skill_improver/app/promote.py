@@ -54,7 +54,9 @@ from ..errors import (
     AutomationRefused,
     BaseHashMismatch,
     GateFailed,
+    LinkedTargetRefused,
     SafetyRefusal,
+    UndecodableDocument,
 )
 from ..hashing import sha256_text, short
 from .lock import RunLock
@@ -431,6 +433,42 @@ def _refuse_unwritable_receipt(state: StateStore, action: str, candidate: Candid
         )
 
 
+def no_document_to_read(candidate: Candidate, path: Path, action: str, exc: AsiError) -> str:
+    """The refusal of a candidate whose target is there but is no document to read.
+
+    The store's ``read_text`` refuses a target that is a symbolic link, one that
+    is not a regular file (a fifo, a device) and one whose bytes are not UTF-8.
+    Measured before, ``review`` and ``apply`` gave that refusal as it was: it
+    named no candidate and said nothing of what to do, and the one for bytes
+    that are not UTF-8 said "the next pass will handle it", which is what
+    ``daily`` does with such a skill. A regular UTF-8 file holding the text the
+    candidate was written against was reviewed and applied as before; with the
+    record deleted, ``daily`` quarantined the skill while the target kept its
+    shape, and proposed again on another day once a regular file was back.
+    """
+    if isinstance(exc, LinkedTargetRefused):
+        shape = "is a symbolic link, which apply refuses to replace"
+    elif isinstance(exc, UndecodableDocument):
+        cause = exc.__cause__
+        at = (
+            f" at byte {cause.start} ({cause.reason})"
+            if isinstance(cause, UnicodeDecodeError)
+            else ""
+        )
+        shape = f"is not valid UTF-8{at}"
+    else:
+        shape = "is not a regular file"
+    return (
+        f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} {shape}, "
+        "so there is no base text to show or to verify against. The skill and the candidate "
+        "are unchanged, and nothing was backed up: with a regular UTF-8 file holding the "
+        "text it was written against back at that path, it is reviewed and applied as "
+        "before. To propose against other text instead, put a regular UTF-8 file there "
+        "first, then "
+        f"{repropose_advice(candidate.id)}."
+    )
+
+
 def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str = "apply") -> str:
     """Read the canonical file the candidate claims to patch.
 
@@ -452,6 +490,8 @@ def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str =
         )
     try:
         return str(skill_store.read_text(path))
+    except (BaseHashMismatch, LinkedTargetRefused, UndecodableDocument) as exc:
+        raise type(exc)(no_document_to_read(candidate, path, action, exc)) from exc
     except OSError as exc:
         raise BaseHashMismatch(
             f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} could "
