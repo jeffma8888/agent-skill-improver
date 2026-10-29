@@ -105,6 +105,32 @@ _HEADER_LINE = re.compile(
 _WORKSPACE_LINE = re.compile(r"^\s*Workspace:\s*(?P<path>.*?\S|[^\S\n])\s*$")
 
 
+#: How much of a command line a failure reason quotes before it is cut: room
+#: for a program named in full (``NAMED_PATH_CHARS``) and as much again for the
+#: arguments after it.
+SHOWN_COMMAND_CHARS = 2 * NAMED_PATH_CHARS
+
+
+def shown_command(argv: Sequence[str]) -> str:
+    """A command line as a failure reason quotes it: masked, then cut.
+
+    The reason lands in each quarantine or deferral record, its checkpoint, the
+    receipt and the run's output, once per conversation when a fetch fails, so
+    an option of any length was repeated there whole. Redaction runs over the
+    whole line before the cut, so a key is masked whole rather than sliced into
+    a fragment the shapes no longer recognise; the cut says how much was left
+    unquoted. A line within the limit reads as before. Measured before: a
+    5,000-character option made each of the five quarantine reasons of a run
+    5,265 characters, and its receipt 44 KB where it was 9 KB without the option.
+    """
+    text = redact(" ".join(argv)).text
+    if len(text) <= SHOWN_COMMAND_CHARS:
+        return text
+    return (
+        f"{text[:SHOWN_COMMAND_CHARS]}... [{len(text) - SHOWN_COMMAND_CHARS} more chars not quoted]"
+    )
+
+
 def render_argv(template: Sequence[str], values: dict[str, str]) -> list[str]:
     """Substitute ``{placeholder}`` tokens, dropping args that render empty.
 
@@ -502,8 +528,9 @@ class ConversationCliSource:
         always the source: the command, not the record, failed to answer.
         """
         # The command line is quoted into every failure reason below, and a
-        # configured argv can carry a key as an option value just as stderr can.
-        shown = redact(" ".join(argv)).text
+        # configured argv can carry a key as an option value just as stderr can,
+        # or an option of any length (``shown_command``).
+        shown = shown_command(argv)
         try:
             result = run_bounded(
                 argv,
