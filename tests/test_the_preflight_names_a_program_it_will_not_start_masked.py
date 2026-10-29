@@ -8,7 +8,9 @@ mode 644: a key-shaped directory in its path was printed raw, once by
 ``daily`` and once (a role) or twice (the source: its ``source`` line and its
 ``PROBLEM``) by ``doctor``; and a path of 872 or 874 characters made lines of
 1,004 to 1,076. They are now quoted as the start refusal quotes them
-(``quoted_value`` at ``NAMED_PATH_CHARS``), so a plain path reads as before.
+(``quoted_value`` at ``NAMED_PATH_CHARS``), so a plain path reads as before;
+any role's program is quoted so, and an export program the discovery one does
+not share.
 """
 
 from __future__ import annotations
@@ -55,20 +57,22 @@ class _Case(unittest.TestCase):
     def long_program(self) -> str:
         return self.program(*["d" * 100 + str(i) for i in range(8)], "prog")
 
-    def role_problems(self, program: str) -> list[str]:
+    def role_problems(self, program: str, role: str = "scorer") -> list[str]:
+        other = "judge" if role == "scorer" else "scorer"
         runner = CommandModelRunner(
             {
-                "scorer": RoleCommand(role="scorer", argv=(program,)),
-                "judge": RoleCommand(role="judge", argv=(sys.executable,)),
+                role: RoleCommand(role=role, argv=(program,)),
+                other: RoleCommand(role=other, argv=(sys.executable,)),
             },
             isolation=NoSandbox(),
             parent_env=dict(os.environ),
         )
         return runner.program_problems()
 
-    def source_refusal(self, program: str) -> str:
+    def source_refusal(self, program: str, export: str | None = None) -> str:
         source = ConversationCliSource(
-            discovery_argv=(program, "{since}", "{limit}"), export_argv=(program, "{thread_id}")
+            discovery_argv=(program, "{since}", "{limit}"),
+            export_argv=(export or program, "{thread_id}"),
         )
         with self.assertRaises(SourceUnavailable) as ctx:
             source.preflight()
@@ -99,6 +103,16 @@ class ARoleProgramTests(_Case):
         self.assertTrue(problems[0].startswith("role 'scorer' command '"), problems)
         self.assertTrue(problems[0].endswith(f"/prog' {NOT_EXECUTABLE}"), problems)
 
+    def test_a_key_in_any_role_program_path_is_masked(self):
+        for role in ("improver", "judge"):
+            with self.subTest(role=role):
+                problems = self.role_problems(self.program(role, KEY, "prog"), role)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertNotIn(KEY, problems[0])
+                self.assertEqual(problems[0].count("[REDACTED:"), 1, problems)
+                self.assertTrue(problems[0].startswith(f"role '{role}' command '"), problems)
+                self.assertTrue(problems[0].endswith(f"/prog' {NOT_EXECUTABLE}"), problems)
+
     def test_a_long_role_program_path_is_cut_at_the_limit(self):
         program = self.long_program()
         problems = self.role_problems(program)
@@ -121,6 +135,13 @@ class ASourceProgramTests(_Case):
         self.assertEqual(message.count("[REDACTED:"), 1, message)
         self.assertTrue(message.startswith("conversation command '"), message)
         self.assertTrue(message.endswith(f"/prog' {NOT_EXECUTABLE}{SET_ARGV}"), message)
+
+    def test_a_key_in_an_export_program_path_alone_is_masked(self):
+        message = self.source_refusal(sys.executable, self.program(KEY, "export"))
+        self.assertNotIn(KEY, message)
+        self.assertEqual(message.count("[REDACTED:"), 1, message)
+        self.assertTrue(message.startswith("conversation command '"), message)
+        self.assertTrue(message.endswith(f"/export' {NOT_EXECUTABLE}{SET_ARGV}"), message)
 
     def test_a_long_source_program_path_is_cut_at_the_limit(self):
         program = self.long_program()

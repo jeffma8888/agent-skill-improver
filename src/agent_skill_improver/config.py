@@ -357,6 +357,11 @@ SOURCE_KEYS: frozenset[str] = frozenset(
 )
 
 
+def recorded_argv(argv: Sequence[str]) -> list[str]:
+    """An argv template as a record shows it: each element with a key masked."""
+    return [redact(part).text for part in argv]
+
+
 @dataclass(frozen=True)
 class SourceConfig:
     kind: str = SOURCE_FIXTURES
@@ -375,12 +380,22 @@ class SourceConfig:
     timeout_seconds: int = 180
 
     def to_dict(self) -> dict[str, Any]:
+        # Every daily receipt records this block. A template carrying a key as
+        # an option value (``--api-key=...``, or the key as the next element),
+        # or naming a program under a key-shaped directory, is recorded with
+        # the key masked, element by element as ``RoleCommand.to_dict`` masks a
+        # model role's argv; the config keeps the template as written, since
+        # that is what runs. Measured before: each such template put the key
+        # raw in the committed receipt, once per template, while the run
+        # printed none of it. Element by element, a key that reads as one only
+        # with the element before it (``Bearer`` and then the token) is left as
+        # written, where the joined command line a refusal quotes masks it.
         return {
             "kind": self.kind,
-            "discovery_argv": list(self.discovery_argv),
-            "query_argv": list(self.query_argv),
-            "workspace_argv": list(self.workspace_argv),
-            "export_argv": list(self.export_argv),
+            "discovery_argv": recorded_argv(self.discovery_argv),
+            "query_argv": recorded_argv(self.query_argv),
+            "workspace_argv": recorded_argv(self.workspace_argv),
+            "export_argv": recorded_argv(self.export_argv),
             "since": self.since,
             "discovery_limit": self.discovery_limit,
             "query": self.query,
