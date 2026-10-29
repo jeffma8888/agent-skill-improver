@@ -263,12 +263,12 @@ class AnIgnoredSigchldTests(_RoleCase):
         # The check before the start is made to miss the ignore, as one a signal
         # handler took up after the role started would be missed.
         checks = iter([False])
-        real = bounded_process._children_reaped_by_the_kernel
+        real = bounded_process.children_reaped_by_the_kernel
         sent = []
         token = _token()
         _root, runner = self._call(f"(sleep {token}) {QUIET} &\n{REPLY}", token=token)
         with mock.patch.object(
-            bounded_process, "_children_reaped_by_the_kernel", lambda: next(checks, real())
+            bounded_process, "children_reaped_by_the_kernel", lambda: next(checks, real())
         ):
             with mock.patch.object(
                 bounded_process.os, "killpg", side_effect=lambda pid, sig: sent.append(pid)

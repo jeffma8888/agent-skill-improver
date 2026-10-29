@@ -59,6 +59,7 @@ from .domain.isolation import (
 )
 from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
+from .adapters.bounded_process import children_reaped_by_the_kernel
 from .adapters.skill_fs import root_presence
 from .domain.discovery import MAX_THREAD_ID_LENGTH
 from .domain.redaction import (
@@ -450,6 +451,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for role in ("scorer", "improver", "judge"):
         if role not in config.model_roles:
             problems.append(f"no [model.{role}] command configured")
+    # ``asi`` puts SIGCHLD back to its default as it starts; a caller of
+    # ``main`` keeps what it has, and while that is an ignore no role or source
+    # command is started (``ExitUnreadable``). Measured before (3.11 and 3.13):
+    # ``main(["doctor"])`` with SIGCHLD ignored said ready, and ``daily`` called
+    # the same way then scored none of 5 conversations and deferred all 5.
+    if children_reaped_by_the_kernel():
+        problems.append(
+            "SIGCHLD is ignored in this process, so no role or source command would be "
+            "started (a child's exit status could not be read) and the run would score "
+            "nothing; `asi` puts SIGCHLD back to its default as it starts, and a program "
+            "that calls `main` must do the same first"
+        )
     # The same rules minimal_env applies at the first model call, applied here
     # so the operator learns about a refused role environment from the report
     # rather than from the first scheduled run. Names and shapes only; a value
@@ -2308,7 +2321,7 @@ def _put_sigchld_back() -> None:
     exports that exited 1). The commands the run starts then start with it at
     the default too. Only the process's own command does this: a caller of
     :func:`main` keeps the disposition it has, and while that is an ignore no
-    child is started (``ExitUnreadable``).
+    child is started (``ExitUnreadable``) and ``doctor`` names it as a problem.
     """
     sigchld = getattr(signal, "SIGCHLD", None)
     if sigchld is not None and threading.current_thread() is threading.main_thread():

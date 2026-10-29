@@ -196,7 +196,7 @@ def run_bounded(
     :class:`ExitUnreadable`, before anything is started, while SIGCHLD is
     ignored.
     """
-    if _children_reaped_by_the_kernel():
+    if children_reaped_by_the_kernel():
         raise ExitUnreadable(
             "SIGCHLD is ignored in this process, so the child's exit status could not be "
             "read; nothing was started (asi puts SIGCHLD back to its default as it starts)"
@@ -326,7 +326,7 @@ def _exited_unreaped(pid: int, timeout: float) -> bool | None:
     ``run_bounded`` starts no child while it is ignored, so here that is an
     ignore taken up while the child ran, from a signal handler or C code.
     """
-    if _children_reaped_by_the_kernel():
+    if children_reaped_by_the_kernel():
         return None
     if getattr(os, "waitid", None) is not None and getattr(os, "WNOWAIT", None) is not None:
         return _waitid_exited(pid, timeout)
@@ -335,7 +335,7 @@ def _exited_unreaped(pid: int, timeout: float) -> bool | None:
     return None
 
 
-def _children_reaped_by_the_kernel() -> bool:
+def children_reaped_by_the_kernel() -> bool:
     """Whether SIGCHLD is ignored, so the kernel may reap each child itself.
 
     Set so in the run, it does (measured on macOS; Linux from its
@@ -344,7 +344,9 @@ def _children_reaped_by_the_kernel() -> bool:
     the process's own command puts it back to the default first
     (``cli._put_sigchld_back``), so only a caller of ``run_bounded`` started so
     is refused a child (:class:`ExitUnreadable`) when, on macOS, its exit could
-    have been read.
+    have been read. ``doctor`` asks it too, so a caller of ``cli.main`` that
+    ignores SIGCHLD learns from the report, not from the run, that nothing
+    would be started.
     """
     sigchld = getattr(signal, "SIGCHLD", None)
     return sigchld is not None and signal.getsignal(sigchld) is signal.SIG_IGN

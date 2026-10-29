@@ -162,7 +162,7 @@ pipes:
   (`ExitUnreadable`, an `OSError`, so a role or the source is reported as a
   command that cannot be started): the kernel would reap the child itself, its
   exit would read as 0, and a kill at the deadline or the cap could reach an id
-  already freed;
+  already freed (`asi doctor` names such an ignore as a problem);
 - stdin is fed from a helper thread, so a child that answers before it reads
   cannot wedge the parent on a full pipe;
 - stderr is drained concurrently and only a bounded tail is kept for the
