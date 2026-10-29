@@ -62,7 +62,7 @@ from ..domain.candidate import (
     one_line_label,
     validate_candidate_id,
 )
-from ..domain.redaction import quoted_value
+from ..domain.redaction import quoted_value, why_unreadable
 from ..errors import ConfigError, SafetyRefusal, StateUnreadable
 from ..jsonio import FILE_MODE, loads_untrusted, write_json, write_text_atomic
 
@@ -1431,7 +1431,8 @@ def _read_state_object(path: Path, *, what: str) -> dict[str, Any]:
         raw = _read_state_json(path)
     except (OSError, ValueError) as exc:
         raise StateUnreadable(
-            f"refusing to use the {what} record {_shown(path)}: it could not be read ({exc}). "
+            f"refusing to use the {what} record {_shown(path)}: it could not be read "
+            f"({why_unreadable(exc)}). "
             "A truncated or hand-edited state file is never guessed at; move it aside "
             "to continue without it."
         ) from exc
@@ -1471,7 +1472,8 @@ def _candidate_from_file(path: Path) -> Candidate:
         raw = _read_state_json(path)
     except (OSError, ValueError) as exc:
         raise StateUnreadable(
-            f"refusing to use the candidate record {_shown(path)}: it could not be read ({exc}). "
+            f"refusing to use the candidate record {_shown(path)}: it could not be read "
+            f"({why_unreadable(exc)}). "
             "A truncated or hand-edited record is never guessed at."
         ) from exc
     if not isinstance(raw, dict):

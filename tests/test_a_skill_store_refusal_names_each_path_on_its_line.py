@@ -54,8 +54,8 @@ NAMERS = frozenset({"named_path", "quoted_value"})
 #: over (each path in it named where it is built, which
 #: ``test_a_refusal_of_a_copy_discovery_passed_over_says_why`` holds), the
 #: manifest fields found missing (a fixed list), and ``read_json``'s own error
-#: (a decode error names no content; an OS error quotes its file name with
-#: ``repr``).
+#: as ``why_unreadable`` gives it (a decode error's text, which names no
+#: content; an OS error's number and words, without the file name it carries).
 NOT_PATHS = frozenset(
     {
         "verb",
@@ -71,7 +71,7 @@ NOT_PATHS = frozenset(
         "group.canonical_reason",
         "passed.reason",
         "', '.join(missing)",
-        "exc",
+        "why_unreadable(exc)",
     }
 )
 #: The paths the refusals name, each through ``named_path``: bare when it reads

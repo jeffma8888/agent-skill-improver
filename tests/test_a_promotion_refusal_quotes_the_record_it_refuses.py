@@ -28,7 +28,6 @@ from typing import Any, Callable
 from unittest import mock
 
 from agent_skill_improver.app import promote
-from agent_skill_improver.app.promote import _why_unreadable
 from agent_skill_improver.cli import RC_REFUSED
 from agent_skill_improver.domain.candidate import Candidate
 from agent_skill_improver.domain.redaction import (
@@ -36,6 +35,7 @@ from agent_skill_improver.domain.redaction import (
     QUOTED_VALUES_SHOWN,
     named_path,
     quoted_value,
+    why_unreadable,
 )
 from agent_skill_improver.errors import GateFailed
 from tests.support import build_env, run_cli
@@ -336,13 +336,13 @@ class NamedPathTests(unittest.TestCase):
 class WhyUnreadableTests(unittest.TestCase):
     def test_an_os_error_is_named_by_its_number_and_words_without_its_file_name(self):
         error = FileNotFoundError(2, "No such file or directory", PLANTED)
-        self.assertEqual(_why_unreadable(error), "[Errno 2] No such file or directory")
+        self.assertEqual(why_unreadable(error), "[Errno 2] No such file or directory")
 
     def test_an_os_error_with_no_number_is_quoted(self):
-        reason = _why_unreadable(OSError(PLANTED))
+        reason = why_unreadable(OSError(PLANTED))
         self.assertEqual(reason, f"'{SPELLED}'")
         # A number with no words for it is quoted too, rather than left as a bare number.
-        self.assertEqual(_why_unreadable(OSError(5, "")), "'[Errno 5] '")
+        self.assertEqual(why_unreadable(OSError(5, "")), "'[Errno 5] '")
 
 
 if __name__ == "__main__":

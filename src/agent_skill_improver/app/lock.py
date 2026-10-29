@@ -17,6 +17,7 @@ from types import TracebackType
 from typing import Any
 
 from ..domain.candidate import one_line_label
+from ..domain.redaction import why_unreadable
 from ..errors import LockHeld, SafetyRefusal
 
 
@@ -65,7 +66,8 @@ class RunLock:
             # the run ended with exit 70 and a traceback.
             foreign = exc.errno in (errno.EISDIR, errno.ENOTDIR, errno.ELOOP)
             raise SafetyRefusal(
-                f"refusing to use {self._shown} as a run lock: it could not be opened ({exc})."
+                f"refusing to use {self._shown} as a run lock: it could not be opened "
+                f"({why_unreadable(exc)})."
                 + (" Remove the entry at that path if you did not put it there." if foreign else "")
             ) from exc
         # Judged before anything is done to it: a fifo or a device at the lock
@@ -76,7 +78,8 @@ class RunLock:
         except OSError as exc:
             os.close(fd)
             raise SafetyRefusal(
-                f"refusing to use {self._shown} as a run lock: cannot stat it ({exc})"
+                f"refusing to use {self._shown} as a run lock: cannot stat it "
+                f"({why_unreadable(exc)})"
             ) from exc
         if not stat.S_ISREG(kind):
             os.close(fd)
@@ -95,7 +98,8 @@ class RunLock:
         except OSError as exc:
             os.close(fd)
             raise SafetyRefusal(
-                f"refusing to use {self._shown} as a run lock: cannot enforce mode 0600 ({exc})"
+                f"refusing to use {self._shown} as a run lock: cannot enforce mode 0600 "
+                f"({why_unreadable(exc)})"
             ) from exc
         if actual_mode != 0o600:
             os.close(fd)

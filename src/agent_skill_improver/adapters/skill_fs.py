@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from ..domain.redaction import named_path, quoted_value
+from ..domain.redaction import named_path, quoted_value, why_unreadable
 from ..domain.skills import (
     SKILL_FILENAME,
     UNREADABLE_ENTRY,
@@ -1085,8 +1085,8 @@ class FilesystemSkillStore:
             manifest = read_json(path)
         except (OSError, ValueError) as exc:
             raise BackupUnusable(
-                f"refusing to roll back: backup manifest {named_path(path)} could not be read ({exc}). "
-                "No file was touched."
+                f"refusing to roll back: backup manifest {named_path(path)} could not be read "
+                f"({why_unreadable(exc)}). No file was touched."
             ) from exc
         if not isinstance(manifest, dict):
             raise BackupUnusable(

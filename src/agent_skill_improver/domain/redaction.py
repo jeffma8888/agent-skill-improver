@@ -347,6 +347,26 @@ def named_path(path: object) -> str:
     return quoted_value(text, limit=NAMED_PATH_CHARS)
 
 
+def why_unreadable(exc: BaseException) -> str:
+    """Why an open or a read failed, without the path the error carries.
+
+    ``str(exc)`` of an ``OSError`` ends with the file name it was given, which
+    every refusal that says this has named already, as it names a path: masked
+    and cut by ``named_path``, or kept on its line by ``one_line_label``. Quoted
+    raw, the error printed the path a second time, whole and unmasked. So an
+    ``OSError`` is shown by its number and the system's words for it. One with
+    no number or no words, which no failed system call raises, is quoted whole
+    by ``quoted_value``, a file name it carries included, masked and cut. Any
+    other error (a torn or too deeply nested JSON document, text that is not
+    UTF-8) carries no file name and is its own text.
+    """
+    if not isinstance(exc, OSError):
+        return str(exc)
+    if exc.errno is not None and exc.strerror:
+        return f"[Errno {exc.errno}] {exc.strerror}"
+    return quoted_value(str(exc))
+
+
 #: How long a stored record's skill id may be and still be listed whole. A
 #: skill id is a directory name, which is at most 255 bytes on APFS and ext4,
 #: so a cut past 255 characters never shortens a real one.

@@ -45,7 +45,7 @@ from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
 from ..domain.integrity import verify_full_integrity
-from ..domain.redaction import named_path, quoted_value, quoted_values
+from ..domain.redaction import named_path, quoted_value, quoted_values, why_unreadable
 from ..domain.validation import ValidationRecord
 from ..errors import (
     AsiError,
@@ -415,18 +415,6 @@ def _refuse_unwritable_receipt(state: StateStore, action: str, candidate: Candid
         )
 
 
-def _why_unreadable(exc: OSError) -> str:
-    """Why a read failed, without the path the error carries.
-
-    ``str(exc)`` of an ``OSError`` ends with the file name it was given, which
-    here is the record's canonical path, already named; it is shown by its
-    number and the system's words for it, or quoted when it has none.
-    """
-    if exc.errno is not None and exc.strerror:
-        return f"[Errno {exc.errno}] {exc.strerror}"
-    return quoted_value(str(exc))
-
-
 def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str = "apply") -> str:
     """Read the canonical file the candidate claims to patch.
 
@@ -451,7 +439,7 @@ def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str =
     except OSError as exc:
         raise BaseHashMismatch(
             f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} could "
-            f"not be read ({_why_unreadable(exc)}), so the recorded base hash and diff cannot be "
+            f"not be read ({why_unreadable(exc)}), so the recorded base hash and diff cannot be "
             "verified. If the skill root "
             "was moved or re-pointed, the candidate describes a file at its old path; re-run "
             "`asi daily --commit` to propose against the configured tree."
