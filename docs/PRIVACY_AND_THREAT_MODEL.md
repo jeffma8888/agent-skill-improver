@@ -284,7 +284,7 @@ the gate becomes decoration that still emits a passing verdict.
 `require_independent_judge = true` refuses the gate when the judge's command
 matches the improver's, and every receipt records the full comparison
 (`judge_vs_improver_distinct`, `judge_vs_scorer_distinct`,
-`scorer_vs_improver_distinct`). Command inequality is a weak proxy — two different
+`scorer_vs_improver_distinct`). The gate compares what each role runs as its command id records it, the isolation mode and the command line with any credential masked, never the role or the label; two command lines that differ only in a masked value (two keys, say) are one command there, so the gate refuses a pair that comparison, which reads the argv as written, calls distinct. Command inequality is a weak proxy — two different
 commands can wrap the same model, or two different models from the same family
 can share the failure — so the receipt states the limitation rather than implying
 that a passing check means genuine independence. The example configuration wires

@@ -278,6 +278,20 @@ class GateDecision:
         }
 
 
+def runs_the_same_command(first_id: str, second_id: str) -> bool:
+    """Whether two command ids name the same command.
+
+    A command id is ``role:label:iso=MODE:argv`` (``RoleCommand.command_id``).
+    The role, and usually the label, differ between a judge and an improver, so
+    comparing the whole ids called every configured judge independent, one
+    running the improver's byte-identical command included. What runs is what
+    follows the id's last ``:iso=``: the label never reaches it, so no label can
+    make two commands differ, and an argv that holds ``:iso=`` only narrows what
+    is compared, toward "the same". An id with no ``:iso=`` is compared whole.
+    """
+    return first_id.rpartition(":iso=")[2] == second_id.rpartition(":iso=")[2]
+
+
 def evaluate_gate(
     outcomes: Sequence[ReplayOutcome],
     judgements: Sequence[Judgement],
@@ -979,7 +993,7 @@ class ValidationRecord:
         the persisted decision stops matching.
         """
         judge_independent = bool(self.judge_command_id) and (
-            self.judge_command_id != self.improver_command_id
+            not runs_the_same_command(self.judge_command_id, self.improver_command_id)
         )
         decision = evaluate_gate(
             self.outcomes,

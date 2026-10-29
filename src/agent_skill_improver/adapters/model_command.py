@@ -109,7 +109,9 @@ class RoleCommand:
         # The id is persisted in every scorecard, candidate and receipt the
         # role touches, so an argv carrying a key as an option value is shown
         # with the key masked. The placeholder is deterministic, so the id still
-        # tells two configurations apart.
+        # tells two configurations apart, unless they differ only in a masked
+        # value: the gate (``runs_the_same_command``) reads that pair as one
+        # command.
         return f"{self.role}:{label}:iso={isolation_mode}:{redact(' '.join(self.argv)).text}"
 
     def to_dict(self) -> dict[str, Any]:

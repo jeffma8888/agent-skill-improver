@@ -47,6 +47,7 @@ from ..domain.validation import (
     evaluate_gate,
     evidence_call_count,
     parse_judgement,
+    runs_the_same_command,
 )
 from ..errors import AsiError, ConfigError
 from ..ports import ModelRunner
@@ -165,7 +166,11 @@ def validate_candidate(
     scorer_command_id = runner.command_id(ROLE_SCORER)
     improver_command_id = candidate.improver_command_id
     judge_command_id = runner.command_id(ROLE_JUDGE) if policy.require_judge else ""
-    judge_independent = bool(judge_command_id) and judge_command_id != improver_command_id
+    # What runs, not the whole id: every id starts with its role, so comparing
+    # whole ids called a judge running the improver's very command independent.
+    judge_independent = bool(judge_command_id) and not runs_the_same_command(
+        judge_command_id, improver_command_id
+    )
 
     # The claim set is recorded whether or not a case turns out to be
     # replayable, because it is what the gate is asked to prove. A claimed

@@ -273,7 +273,11 @@ class InProcessRunner:
         return list(self.prompts)
 
     def command_id(self, role: str) -> str:
-        return f"{role}:in-process-fake:iso={self.isolation_mode}"
+        # Shaped as ``RoleCommand.command_id`` is, with a command line per role
+        # after ``iso=``, as ``role_argv`` gives the subprocess fake one flag per
+        # role: the gate compares what follows the last ``:iso=``, so an id
+        # that ended at the mode named one command for all three roles.
+        return f"{role}:in-process-fake:iso={self.isolation_mode}:in-process-fake --role {role}"
 
     def program_problems(self) -> list[str]:
         """Nothing to start: the fake runs in this process."""
