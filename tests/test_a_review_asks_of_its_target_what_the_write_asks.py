@@ -104,8 +104,11 @@ class _Target(unittest.TestCase):
 class AProtectedSkillIsNeverReviewedOrWrittenTests(_Target):
     def test_a_skill_listed_as_protected_after_validation_gets_no_token_and_is_not_written(self):
         self.guarded("tdd")
-        for proc in self.assert_both_refuse("SelfMutationRefused", "review", "write"):
-            self.assertIn("'tdd' is listed in [guard].protected_skill_ids", proc.stderr)
+        for proc in self.assert_both_refuse(
+            "SelfMutationRefused", f"review {self.cid}:", f"apply {self.cid}:"
+        ):
+            self.assertIn("'tdd' at ", proc.stderr)
+            self.assertIn(" is listed in [guard].protected_skill_ids", proc.stderr)
 
     def test_a_skill_not_listed_is_reviewed_as_before(self):
         self.guarded("example-guardrails")

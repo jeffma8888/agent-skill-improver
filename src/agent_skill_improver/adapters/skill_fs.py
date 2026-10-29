@@ -346,6 +346,43 @@ def changed_before_the_write(target: Path, current: str, expected: str, candidat
     )
 
 
+def listed_as_protected(target: Path, named: str, candidate_id: str, verb: str) -> str:
+    """The refusal of a skill listed in ``[guard].protected_skill_ids``.
+
+    ``review`` and ``apply`` read the list again, so a candidate validated
+    before its skill was listed is refused here. Measured before (a committed
+    run with one validated candidate, then its skill listed): both refused it
+    with "refusing to review <path>" and "refusing to write <path>", named no
+    candidate, and said "nothing was touched", while ``apply`` had written the
+    run lock's owner line. The record stayed ``validated``, so it stayed open:
+    with ``[caps].max_open_candidates`` at 1, the next day stood down on it,
+    and with it deleted the next day ran. With the skill taken off the list,
+    ``review`` and ``apply`` with the same token took it. With the candidate,
+    the refusal now names it, for the command that asked, and says how it is
+    closed; without one it is worded as before. It says ``apply`` does not
+    write the skill, not that the candidate is never applied: an ``apply``
+    that finishes an earlier run of itself, stopped after it wrote the skill,
+    records that write before this check is asked, and writes nothing.
+    """
+    if not candidate_id:
+        return (
+            f"refusing to {verb} {named_path(target)}: skill {quoted_value(named)} is "
+            "listed in [guard].protected_skill_ids, so it is never a proposal target "
+            "and never applied. A candidate validated before the skill was listed, or "
+            "a record edited to name it, is refused here; nothing was touched."
+        )
+    command = "review" if verb == "review" else "apply"
+    return (
+        f"refusing to {command} {candidate_id}: its skill {quoted_value(named)} at "
+        f"{named_path(target)} is listed in [guard].protected_skill_ids, so `apply` does "
+        "not write it while it is listed. The skill and the candidate are unchanged. The "
+        "candidate stays open, and counts against [caps].max_open_candidates, until it is "
+        f"closed: to close it, delete its record ({candidate_id}.json in the state "
+        "directory's candidates/). If the skill is not meant to stay listed, take it off "
+        "the list, and `review` and `apply` take the candidate as before."
+    )
+
+
 class FilesystemSkillStore:
     """Discovers and (only when explicitly writable) edits skill files."""
 
@@ -1139,7 +1176,9 @@ class FilesystemSkillStore:
             )
         return manifest
 
-    def assert_write_target(self, path: Path, *, action: str, skill_id: str = "") -> Path:
+    def assert_write_target(
+        self, path: Path, *, action: str, skill_id: str = "", candidate_id: str = ""
+    ) -> Path:
         """Every judgement the write makes of its target before it opens it, in its order.
 
         ``write_canonical`` makes them here, ``apply`` asks them before it makes
@@ -1153,8 +1192,9 @@ class FilesystemSkillStore:
         ``[guard].protected_skill_ids`` after its candidate was validated was
         reviewed and written, the list being read only when a proposal is
         made. ``skill_id`` is the skill the caller's
-        record names. Returns the target as the write addresses it: resolved
-        when it exists.
+        record names, and ``candidate_id`` the candidate ``review`` or ``apply``
+        is judging, which the refusal of a listed skill names (``listed_as_protected``).
+        Returns the target as the write addresses it: resolved when it exists.
         """
         replace = "replace" if action == "write" else action
         write = "write" if action == "write" else action
@@ -1171,7 +1211,9 @@ class FilesystemSkillStore:
         self._assert_document(target, verb=write)
         self._assert_not_protected(target, verb=write)
         group = self.assert_canonical_target(target, action=action)
-        self._assert_not_a_protected_skill(target, group, skill_id, verb=write)
+        self._assert_not_a_protected_skill(
+            target, group, skill_id, verb=write, candidate_id=candidate_id
+        )
         return target
 
     def mirror_paths_of(self, path: Path) -> tuple[str, ...]:
@@ -1195,7 +1237,13 @@ class FilesystemSkillStore:
         return tuple(str(m.path) for m in group.mirrors)
 
     def _assert_not_a_protected_skill(
-        self, target: Path, group: SkillGroup | None, skill_id: str, *, verb: str
+        self,
+        target: Path,
+        group: SkillGroup | None,
+        skill_id: str,
+        *,
+        verb: str,
+        candidate_id: str = "",
     ) -> None:
         """Refuse a skill listed in ``[guard].protected_skill_ids``.
 
@@ -1205,12 +1253,7 @@ class FilesystemSkillStore:
         """
         for named in (group.skill_id if group is not None else "", skill_id):
             if named and named in self._protected_skill_ids:
-                raise SelfMutationRefused(
-                    f"refusing to {verb} {named_path(target)}: skill {quoted_value(named)} is "
-                    "listed in [guard].protected_skill_ids, so it is never a proposal target "
-                    "and never applied. A candidate validated before the skill was listed, or "
-                    "a record edited to name it, is refused here; nothing was touched."
-                )
+                raise SelfMutationRefused(listed_as_protected(target, named, candidate_id, verb))
 
     def _assert_document(self, target: Path, *, verb: str = "write") -> None:
         """Only the skill document is ever writable.

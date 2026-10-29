@@ -288,6 +288,7 @@ def apply_candidate(
             Path(candidate.target.canonical_path),
             action="write",
             skill_id=candidate.target.skill_id,
+            candidate_id=candidate.id,
         )
         # The copies the receipt records as not written are the live
         # inventory's, not the list the record carries, which neither the token

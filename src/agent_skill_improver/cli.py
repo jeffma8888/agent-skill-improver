@@ -1462,7 +1462,10 @@ def cmd_review(args: argparse.Namespace) -> int:
     # asks them (status, integrity, base, then the target), so a closed or
     # tampered candidate is named as that first.
     store.assert_write_target(
-        Path(candidate.target.canonical_path), action="review", skill_id=candidate.target.skill_id
+        Path(candidate.target.canonical_path),
+        action="review",
+        skill_id=candidate.target.skill_id,
+        candidate_id=candidate.id,
     )
     # The mirror copies `apply` does not write, as the live inventory holds
     # them: the record's own list is bound by neither the token nor the
