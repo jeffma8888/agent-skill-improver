@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from .redaction import redact
+
 #: Longest thread id accepted. Real ids are tens of characters; the cap exists so
 #: a forged line cannot push kilobytes onto a command line or into a filename.
 MAX_THREAD_ID_LENGTH = 256
@@ -63,6 +65,28 @@ class DiscoveredThread:
         }
 
 
+def shown_workspace(workspace: str) -> str:
+    """A configured workspace as a page, its note and a receipt name it.
+
+    Masked: the workspace is the operator's, put into the command line, and the
+    command line a refusal quotes is masked. Measured before: a key-shaped
+    workspace was raw three times in every receipt's ``discovery`` block, and
+    once in the note a truncated or failed page prints and the receipt keeps.
+    """
+    return redact(workspace).text if workspace else "<all>"
+
+
+def shown_passed_over(entry: str, reason: str) -> dict[str, str]:
+    """An entry discovery passed over, as a page and a receipt record it.
+
+    The entry is masked whole: it names the workspace queried, and a listing's
+    title or id. Measured before: a key-shaped workspace was raw twice in the
+    receipt's ``discovery`` block and once in its notes for one passed-over
+    entry, and a token as the entry's title the same.
+    """
+    return {"entry": redact(entry).text, "reason": reason}
+
+
 @dataclass(frozen=True)
 class DiscoveryPage:
     """One bounded page of discovery results, honest about its own bounds."""
@@ -94,21 +118,22 @@ class DiscoveryPage:
 
     @property
     def honesty_note(self) -> str:
+        shown = shown_workspace(self.workspace)
         if self.error:
             return (
-                f"discovery for workspace={self.workspace or '<all>'!r} failed, so this page is "
+                f"discovery for workspace={shown!r} failed, so this page is "
                 "not evidence about the population: " + self.error
             )
         if self.truncated_by_limit:
             return (
                 f"discovery returned exactly its limit ({self.limit}) for "
-                f"workspace={self.workspace or '<all>'}: this is a PAGE, not a total. The real "
+                f"workspace={shown}: this is a PAGE, not a total. The real "
                 "population is unknown and larger. Raise [source].discovery_limit or narrow "
                 "[source].since before reading this count as coverage."
             )
         return (
             f"discovery returned {self.returned} of at most {self.limit} for "
-            f"workspace={self.workspace or '<all>'}: fewer than the limit, so this page may be "
+            f"workspace={shown}: fewer than the limit, so this page may be "
             "read as the whole window."
         )
 
@@ -116,14 +141,14 @@ class DiscoveryPage:
         return {
             "limit": self.limit,
             "since": self.since,
-            "workspace": self.workspace or "<all>",
-            "query": self.query,
+            "workspace": shown_workspace(self.workspace),
+            "query": redact(self.query).text,
             "returned": self.returned,
             "truncated_by_limit": self.truncated_by_limit,
             "is_total": self.is_total,
             "error": self.error,
             "honesty_note": self.honesty_note,
-            "passed_over": [{"entry": e, "reason": r} for e, r in self.passed_over],
+            "passed_over": [shown_passed_over(e, r) for e, r in self.passed_over],
         }
 
 
@@ -192,13 +217,15 @@ def merge_pages(pages: Iterable[DiscoveryPage]) -> tuple[list[DiscoveredThread],
     any_truncated = any(p.truncated_by_limit for p in materialized)
     errors = [p.error for p in materialized if p.error]
     # One source scanned once per workspace reports the same unreadable export
-    # on every page; it is one entry, named once.
+    # on every page; it is one entry, named once. Told apart as listed, before
+    # each is masked: two key-shaped workspaces mask alike and are two entries.
     passed_over: list[dict[str, str]] = []
+    listed: set[tuple[str, str]] = set()
     for page in materialized:
         for entry, reason in page.passed_over:
-            item = {"entry": entry, "reason": reason}
-            if item not in passed_over:
-                passed_over.append(item)
+            if (entry, reason) not in listed:
+                listed.add((entry, reason))
+                passed_over.append(shown_passed_over(entry, reason))
     summary = {
         "pages": [p.to_dict() for p in materialized],
         "threads_returned": len(threads),

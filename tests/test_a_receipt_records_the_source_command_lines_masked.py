@@ -32,8 +32,12 @@ from tests.support import FIXTURE_EXPORTS, build_env
 #: Shaped like a provider key, so redaction masks it; split so no scanner
 #: reads this file as holding one.
 KEY = "sk-ant-" + "api03-" + "A1b2C3d4E5f6G7h8" * 4
-#: The shortest shape the redactor knows, 24 characters, likewise split.
+#: A GitHub token of the shortest length its shape takes, 24 characters,
+#: likewise split.
 SHORT = "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0"
+#: A Slack token of the shortest length its shape takes, 15 characters,
+#: likewise split.
+SLACK = "xo" + "xb-" + "1234567890"
 FIELDS = ("discovery_argv", "query_argv", "workspace_argv", "export_argv")
 
 #: A conversation command over the fixture exports that writes each argv it
@@ -89,14 +93,16 @@ class TheSourceRecordTests(unittest.TestCase):
 
     def test_a_short_token_on_its_own_is_masked(self):
         self.assertEqual(len(SHORT), 24)
-        for field in FIELDS:
-            with self.subTest(field=field):
-                recorded = SourceConfig(**{field: ("prog", SHORT, "{x}")}).to_dict()[field]
-                self.assertNotIn(SHORT, json.dumps(recorded))
-                self.assertEqual(len(recorded), 3, recorded)
-                self.assertEqual(recorded[0], "prog")
-                self.assertTrue(recorded[1].startswith("[REDACTED:"), recorded)
-                self.assertEqual(recorded[2], "{x}")
+        self.assertEqual(len(SLACK), 15)
+        for token in (SHORT, SLACK):
+            for field in FIELDS:
+                with self.subTest(token=len(token), field=field):
+                    recorded = SourceConfig(**{field: ("prog", token, "{x}")}).to_dict()[field]
+                    self.assertNotIn(token, json.dumps(recorded))
+                    self.assertEqual(len(recorded), 3, recorded)
+                    self.assertEqual(recorded[0], "prog")
+                    self.assertTrue(recorded[1].startswith("[REDACTED:"), recorded)
+                    self.assertEqual(recorded[2], "{x}")
 
     def test_the_control_a_plain_template_is_recorded_as_written(self):
         plain = ("/usr/bin/conv tool", "--since", "{since}", "--limit={limit}", "{query}", "über")

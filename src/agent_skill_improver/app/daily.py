@@ -62,7 +62,7 @@ from ..domain.candidate import (
     validate_run_day,
 )
 from ..domain.conversation import NormalizedConversation
-from ..domain.discovery import error_page, merge_pages, passed_over_note
+from ..domain.discovery import error_page, merge_pages, passed_over_note, shown_workspace
 from ..domain.failure import FailureCase
 from ..domain.isolation import decide as decide_isolation
 from ..domain.rubric import Rubric
@@ -623,7 +623,7 @@ def _discover(config: Config, source: Any, receipt: RunReceipt) -> list[Any]:
         classify_thread(t, agent_title_markers=config.selection.agent_title_markers) for t in found
     ]
     receipt.discovery = {
-        "workspaces_queried": [w or "<all>" for w in targets],
+        "workspaces_queried": [shown_workspace(w or "") for w in targets],
         "threads_returned": len(found),
         "is_total": summary["is_total"],
         "any_page_truncated_by_limit": summary["any_page_truncated_by_limit"],

@@ -397,7 +397,9 @@ class ConversationCliSource:
             # A listing is numbered per query. "listing entry 1" in one workspace
             # and in the next are two conversations; merge_pages de-duplicates
             # passed-over items by their text, so the workspace has to be in it
-            # or two become one on the receipt.
+            # or two become one on the receipt. The workspace goes in as written;
+            # the entry is masked where it is recorded (``shown_passed_over``),
+            # after merge_pages has told them apart.
             passed_over = [
                 (f"{entry} in workspace {workspace}", reason) for entry, reason in passed_over
             ]
