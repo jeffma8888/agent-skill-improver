@@ -28,6 +28,11 @@ from tests.support import REPO_ROOT, build_env
 
 SIGCHLD = getattr(signal, "SIGCHLD", None)
 NAMED = "SIGCHLD is ignored in this process, so no role or source command would be started"
+EXEC_ASI_IGNORING = (
+    "import os, signal, sys\n"
+    "signal.signal(signal.SIGCHLD, signal.SIG_IGN)\n"
+    "os.execv(sys.executable, [sys.executable, '-m', 'agent_skill_improver', *sys.argv[1:]])\n"
+)
 
 
 @unittest.skipIf(SIGCHLD is None, "this platform has no SIGCHLD")
@@ -67,6 +72,33 @@ class DoctorNamesAnIgnoredSigchldTests(unittest.TestCase):
         problems = json.loads(text)["problems"]
         self.assertEqual(sum(1 for p in problems if p.startswith(NAMED)), 1)
 
+    def test_it_is_named_after_a_daily_has_made_its_state_tree(self):
+        # The fresh tree above has no state directory yet; the check must not
+        # hang on that. A daily at the default makes it, and scores.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = cli.main(["--config", self.config, "daily", "--commit", "--day", "2026-01-02"])
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertTrue((Path(self.config).parent.parent / "state").is_dir())
+        signal.signal(SIGCHLD, signal.SIG_IGN)
+        rc, text = self.doctor()
+        self.assertEqual(rc, 1)
+        self.assertEqual(sum(1 for line in text.splitlines() if NAMED in line), 1, text)
+
+    def test_it_is_named_with_a_role_unconfigured_as_well(self):
+        # A missing role is a problem of its own; the check must not hang on
+        # every role being there.
+        config = Path(self.config)
+        text = config.read_text(encoding="utf-8")
+        start = text.index("\n[model.judge]\n")
+        end = text.find("\n[", start + 1)
+        config.write_text(text[:start] + (text[end:] if end != -1 else "\n"), encoding="utf-8")
+        signal.signal(SIGCHLD, signal.SIG_IGN)
+        rc, report = self.doctor()
+        self.assertEqual(rc, 1)
+        self.assertIn("PROBLEM  no [model.judge] command configured", report.splitlines())
+        self.assertEqual(sum(1 for line in report.splitlines() if NAMED in line), 1, report)
+
     def test_at_the_default_it_is_not_named(self):
         signal.signal(SIGCHLD, signal.SIG_DFL)
         rc, text = self.doctor()
@@ -75,14 +107,15 @@ class DoctorNamesAnIgnoredSigchldTests(unittest.TestCase):
         self.assertIn("verdict: ready", text.splitlines())
 
     def test_asi_started_with_sigchld_ignored_puts_it_back_and_is_ready(self):
+        # The ignore is set in a parent that then becomes ``asi`` through
+        # ``exec``, as a scheduler wrapper can leave it.
         proc = subprocess.run(
-            [sys.executable, "-m", "agent_skill_improver", "--config", self.config, "doctor"],
+            [sys.executable, "-c", EXEC_ASI_IGNORING, "--config", self.config, "doctor"],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
             env=_env(),
             timeout=300,
-            preexec_fn=lambda: signal.signal(SIGCHLD, signal.SIG_IGN),
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertNotIn("SIGCHLD", proc.stdout + proc.stderr)
