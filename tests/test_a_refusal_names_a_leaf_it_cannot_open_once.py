@@ -38,6 +38,7 @@ TOKEN = "gh" + "p_" + "Zq8vLm3pXr7tWk2sQ1aB0123456789abcdef"
 MASKED = "[REDACTED:github-token]"
 DENIED = f"[Errno {errno.EACCES}] {os.strerror(errno.EACCES)}"
 CANDIDATE_ID = "CAND-2026-01-02-01-tdd"
+DAY = "2026-01-02"
 
 
 class _Tree(unittest.TestCase):
@@ -113,6 +114,19 @@ class AStateRecordItCannotReadTests(_Tree):
         self.assertIn(
             f"refusing to use the conversation record {path}: it could not be read "
             f"({DENIED}). ",
+            message,
+        )
+        self.assertEqual(message.count(TOKEN), 1)
+
+    def test_a_checkpoint_record_names_its_path_once(self):
+        store = self.store()
+        path = store.write_checkpoint(DAY, {"schema": "asi.checkpoint.v1", "day": DAY})
+        self.unreadable(path)
+        with self.assertRaises(StateUnreadable) as ctx:
+            store.read_checkpoint(DAY)
+        message = str(ctx.exception)
+        self.assertIn(
+            f"refusing to use the checkpoint record {path}: it could not be read ({DENIED}). ",
             message,
         )
         self.assertEqual(message.count(TOKEN), 1)
