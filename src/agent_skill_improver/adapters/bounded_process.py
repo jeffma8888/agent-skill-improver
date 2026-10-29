@@ -26,6 +26,11 @@ This module is the one place that reads a child's pipes:
   or never reads, cannot wedge the parent on a full pipe;
 * stderr is drained concurrently and only a bounded tail is kept, because it is
   diagnostic, not data.
+* nothing is started while SIGCHLD is ignored in this process
+  (:class:`ExitUnreadable`): the kernel would reap the child itself, its exit
+  would read as 0, and a kill at the deadline or the cap could reach an id
+  already freed. It is an ``OSError``, so each caller reports it as a command
+  that could not be started.
 * whatever a caller quotes from the child into a failure message goes through
   ``quotable``: redacted with the transcript's credential shapes, then cut to
   the documented length, because that message becomes a persisted ``reason``.
@@ -117,6 +122,19 @@ class OutputOverflow(Exception):
     """The child wrote more than ``max_output_bytes`` to stdout. It has been killed."""
 
 
+class ExitUnreadable(OSError):
+    """Nothing was started: SIGCHLD is ignored in this process.
+
+    The kernel then reaps each child itself as it exits, and ``subprocess``
+    reads every exit as 0. Measured before, with SIGCHLD ignored in the run
+    (3.11 and 3.13): a role's answer that exited 3 was taken, an export that
+    exited 1 was taken as the export, the kill at the output cap went to an id
+    already freed, and what a role started ran on after the call, 5 calls of 5
+    each. An ``OSError``, so a caller that reports a command it cannot start
+    reports this one so too.
+    """
+
+
 def program_problem(program: str) -> str:
     """Why ``program`` could not be started as a subprocess, or "" when it can.
 
@@ -174,8 +192,15 @@ def run_bounded(
     untrusted; the conversation CLI is the operator's own and keeps what it
     starts); a process that moved to a group of its own is not reached.
     Raises ``FileNotFoundError`` if the executable is missing,
-    :class:`RunTimedOut` or :class:`OutputOverflow` as described above.
+    :class:`RunTimedOut` or :class:`OutputOverflow` as described above, and
+    :class:`ExitUnreadable`, before anything is started, while SIGCHLD is
+    ignored.
     """
+    if _children_reaped_by_the_kernel():
+        raise ExitUnreadable(
+            "SIGCHLD is ignored in this process, so the child's exit status could not be "
+            "read; nothing was started (asi puts SIGCHLD back to its default as it starts)"
+        )
     deadline = time.monotonic() + timeout_seconds
     proc = subprocess.Popen(  # noqa: S603 - argv is constructed by the caller, never shell
         list(argv),
@@ -295,11 +320,11 @@ def _exited_unreaped(pid: int, timeout: float) -> bool | None:
     failed, and the caller must not signal the group, since once the child is
     reaped its id may be another process's. ``waitid`` with ``WNOWAIT`` where
     there is one (Linux; macOS from Python 3.13), else a kqueue (macOS and the
-    BSDs before that). None too while SIGCHLD is ignored: set so in the run,
-    the kernel then reaps each child itself as it exits, so an exit seen is no
-    proof the id is still the child's (the kqueue reports that exit all the
-    same). The process's own command puts back an ignore it was started with
-    before it starts any child (``cli._put_sigchld_back``).
+    BSDs before that). None too while SIGCHLD is ignored: the kernel then
+    reaps each child itself as it exits, so an exit seen is no proof the id is
+    still the child's (the kqueue reports that exit all the same).
+    ``run_bounded`` starts no child while it is ignored, so here that is an
+    ignore taken up while the child ran, from a signal handler or C code.
     """
     if _children_reaped_by_the_kernel():
         return None
@@ -318,7 +343,8 @@ def _children_reaped_by_the_kernel() -> bool:
     all the same (measured on 3.11 and 3.13), though macOS does not reap by it;
     the process's own command puts it back to the default first
     (``cli._put_sigchld_back``), so only a caller of ``run_bounded`` started so
-    is told the kernel reaps when, on macOS, it does not.
+    is refused a child (:class:`ExitUnreadable`) when, on macOS, its exit could
+    have been read.
     """
     sigchld = getattr(signal, "SIGCHLD", None)
     return sigchld is not None and signal.getsignal(sigchld) is signal.SIG_IGN

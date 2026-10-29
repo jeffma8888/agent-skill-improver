@@ -246,10 +246,12 @@ class WhatARoleLeavesInItsGroupIsEndedTests(_RoleCase):
 
 class AnIgnoredSigchldTests(_RoleCase):
     """With SIGCHLD ignored in the run, the kernel reaps the role itself as
-    it exits, so its id is free at once and
-    another process may take it. Found by this row's first audit: on 3.11
-    (macOS waits with a kqueue there) the exit was taken for one not yet
-    reaped and the freed id was signalled."""
+    it exits, so its id is free at once and another process may take it.
+    ``run_bounded`` starts no role then (the module of the row "No child is
+    started while its exit could not be read"); an ignore taken up while a
+    role runs is still not taken for an exit not yet reaped. Found by this
+    row's first audit: on 3.11 (macOS waits with a kqueue there) the exit was
+    taken for one not yet reaped and the freed id was signalled."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -257,16 +259,22 @@ class AnIgnoredSigchldTests(_RoleCase):
         signal.signal(signal.SIGCHLD, signal.SIG_IGN)
         self.addCleanup(signal.signal, signal.SIGCHLD, previous)
 
-    def test_with_sigchld_ignored_a_role_the_kernel_reaped_is_not_signalled(self):
+    def test_an_ignore_taken_up_while_a_role_runs_leaves_its_group_unsignalled(self):
+        # The check before the start is made to miss the ignore, as one a signal
+        # handler took up after the role started would be missed.
+        checks = iter([False])
+        real = bounded_process._children_reaped_by_the_kernel
         sent = []
         token = _token()
         _root, runner = self._call(f"(sleep {token}) {QUIET} &\n{REPLY}", token=token)
         with mock.patch.object(
-            bounded_process.os, "killpg", side_effect=lambda pid, sig: sent.append(pid)
+            bounded_process, "_children_reaped_by_the_kernel", lambda: next(checks, real())
         ):
-            self.assertEqual(
-                runner.run(role="scorer", system="s", user="u", response_schema="x"), {"x": 1}
-            )
+            with mock.patch.object(
+                bounded_process.os, "killpg", side_effect=lambda pid, sig: sent.append(pid)
+            ):
+                reply = runner.run(role="scorer", system="s", user="u", response_schema="x")
+        self.assertEqual(reply, {"x": 1})
         self.assertEqual(sent, [], "an id the kernel had already freed was signalled")
 
     def test_with_sigchld_ignored_no_exit_is_taken_for_one_not_yet_reaped(self):

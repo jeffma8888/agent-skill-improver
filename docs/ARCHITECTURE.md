@@ -153,12 +153,16 @@ pipes:
   whose real worker is a grandchild; killing the wrapper alone left that worker
   running past the deadline, one more each time a scheduled run timed out. A
   model role's group is ended when the role exits on its own as well, before
-  the role is reaped (so its id cannot have passed to another process; with
-  SIGCHLD ignored in the run the kernel reaps it at once, and nothing is
-  signalled; an ignore the run was started with is put back to the default
-  first, since macOS reports one but does not reap by it), and in rounds,
+  the role is reaped (so its id cannot have passed to another process; an
+  ignore the run was started with is put back to the default first, since
+  macOS reports one but does not reap by it), and in rounds,
   since one signal misses a child forked as it arrives; a process
   that moved to a group of its own is not reached;
+- nothing is started while SIGCHLD is ignored in the process
+  (`ExitUnreadable`, an `OSError`, so a role or the source is reported as a
+  command that cannot be started): the kernel would reap the child itself, its
+  exit would read as 0, and a kill at the deadline or the cap could reach an id
+  already freed;
 - stdin is fed from a helper thread, so a child that answers before it reads
   cannot wedge the parent on a full pipe;
 - stderr is drained concurrently and only a bounded tail is kept for the

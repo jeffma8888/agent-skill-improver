@@ -2307,7 +2307,8 @@ def _put_sigchld_back() -> None:
     then read as 0 (measured: 5 of 5 role answers that exited 3 taken, 5 of 5
     exports that exited 1). The commands the run starts then start with it at
     the default too. Only the process's own command does this: a caller of
-    :func:`main` keeps the disposition it has.
+    :func:`main` keeps the disposition it has, and while that is an ignore no
+    child is started (``ExitUnreadable``).
     """
     sigchld = getattr(signal, "SIGCHLD", None)
     if sigchld is not None and threading.current_thread() is threading.main_thread():
