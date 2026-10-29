@@ -199,7 +199,7 @@ def repropose_advice(candidate_id: str) -> str:
     ``validated`` before any check that gives this advice, so the record refused
     is still open and counts against its skill's
     ``caps.max_open_candidates_per_skill``: a run for another day refuses that
-    skill ("review or close them"), and review refuses the record again with the
+    skill ("open candidate(s) already target"), and review refuses the record again with the
     same advice. And a day never re-scores a conversation it has already scored,
     so a run for the same day does not look at the ones behind the candidate.
     Deleting the record is how a candidate review refuses is closed. A candidate

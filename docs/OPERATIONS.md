@@ -499,14 +499,18 @@ promotion landing in the tree a run is reading, is exactly what the lock exists 
 prevent.
 
 **The queue is full and runs keep standing down.** That is the backlog guard
-working. Review or discard candidates, or raise `max_open_candidates` if you have
-decided the queue can carry more. Do not remove the guard.
+working. A review does not shrink the queue: apply the candidates you want and
+delete the records of those you do not (`<id>.json` in the state directory's
+`candidates/`; `asi candidates` lists the open ones), or raise
+`max_open_candidates` if you have decided the queue can carry more. At 0 it holds
+with nothing open, and no run proposes until it is raised. Do not remove the guard.
 
 **A skill has a validated candidate waiting, and later runs propose nothing new
 for it.** That is `max_open_candidates_per_skill` (default 1) holding: the
 receipt's `skills` table shows the skill as `refused` with "open candidate(s)
 already target". Two open drafts for one file cannot both be applied, so the run
-waits for you to review or close the existing one rather than queue a competitor.
+waits for you to apply the existing one, or close it by deleting its record (a
+review alone leaves it open), rather than queue a competitor.
 A candidate `review` refuses (`CandidateTampered`, `BaseHashMismatch`) can be
 neither reviewed nor applied; close it by deleting its record, as the refusal says
 (the one for a skill path that is not a regular file does not; see `BaseHashMismatch`).

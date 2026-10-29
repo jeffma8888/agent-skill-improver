@@ -115,6 +115,23 @@ def _runner_isolation(runner: Any) -> Mapping[str, Any]:
 DEFER_EXHAUSTED = "defer-exhausted"
 
 
+#: What releases a cap that holds the queue or a skill, said by both. Measured
+#: before, both said "review or close": a candidate ``review`` has shown stays
+#: ``validated``, so it still counts, and the run after it was refused or stood
+#: down the same way; there is no command that closes one. A candidate leaves
+#: the open statuses when ``apply`` writes it, or when its record is deleted.
+RELEASE_ADVICE = (
+    "a review leaves a candidate open, and one is closed by applying it (`asi apply`) or by "
+    "deleting its record (its <id>.json in the state directory's candidates/; "
+    "`asi candidates` lists the open ones)"
+)
+
+
+def _once_fewer_than(cap: int) -> str:
+    """When a cap of ``cap`` open candidates lets the next run through (it holds at ``>=``)."""
+    return "once none is open" if cap == 1 else f"once fewer than {cap} are open"
+
+
 def _defer(
     state: StateStore,
     receipt: RunReceipt,
@@ -422,10 +439,17 @@ def run_daily(
             )
         open_candidates = [c for c in scan.readable if c.status in OPEN_STATUSES]
         if len(open_candidates) >= config.caps.max_open_candidates:
+            queue_cap = config.caps.max_open_candidates
+            # A cap of 0 holds with nothing open, so closing a candidate never
+            # lets a run through: only raising the cap does.
+            resumes = (
+                "No run proposes while [caps].max_open_candidates is 0; raise it to resume"
+                if queue_cap == 0
+                else f"The next run resumes {_once_fewer_than(queue_cap)}: {RELEASE_ADVICE}"
+            )
             receipt.stand_down(
                 f"backlog guard: {len(open_candidates)} candidate(s) already awaiting review, "
-                f"cap is {config.caps.max_open_candidates}. Nothing was discarded; review or "
-                "close the queue and the next run resumes."
+                f"cap is {queue_cap}. Nothing was discarded. {resumes}."
             )
             return _finish(
                 receipt, state, skill_store, entries_before, clock, dry_run, run_day, {}, []
@@ -709,8 +733,8 @@ def _propose_and_validate(
     for skill_id in already_open:
         reason = (
             f"{open_by_skill[skill_id]} open candidate(s) already target {skill_id!r} "
-            f"(cap {per_skill_cap} per skill); review or close them and the next run "
-            "proposes again"
+            f"(cap {per_skill_cap} per skill). The next run proposes for it again "
+            f"{_once_fewer_than(per_skill_cap)}: {RELEASE_ADVICE}"
         )
         state.refuse(skill_id, stage=STAGE_PROPOSE, reason=reason)
         receipt.record(
