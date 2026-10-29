@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from ..domain.integrity import repropose_advice
 from ..domain.redaction import named_path, quoted_value, why_unreadable
 from ..domain.skills import (
     SKILL_FILENAME,
@@ -318,6 +319,31 @@ def _root_shape_problem(path: Path) -> str | None:
     if stat.S_ISREG(st.st_mode):
         return "a regular file, not a directory"
     return f"{_entry_kind(path)}, not a directory"
+
+
+def changed_before_the_write(target: Path, current: str, expected: str, candidate_id: str) -> str:
+    """The refusal of a write whose file no longer hashes what the caller checked.
+
+    ``apply`` (``app/promote.py``) checks the live file against the candidate's
+    base before it calls the write, so a file this check refuses changed while
+    ``apply`` ran: after its check and before this read. Measured before, the
+    refusal said "re-run validation against the new base", which no command
+    does, and named no candidate. With the candidate it now names it and gives
+    the advice ``apply``'s own check gives; without one it gives no advice.
+    """
+    if not candidate_id:
+        return (
+            f"refusing to write {named_path(target)}: on-disk sha256 is {current[:12]} but the "
+            f"write was asked against {expected[:12]}, so the file changed after that hash "
+            "was taken. Nothing was written."
+        )
+    return (
+        f"refusing to apply {candidate_id}: {named_path(target)} now hashes {current[:12]} "
+        f"but the candidate was written against {expected[:12]}. The skill changed while "
+        "this apply ran, after it checked the file and before it wrote, and the skill was "
+        "not written. To propose and validate against the new base, "
+        f"{repropose_advice(candidate_id)}."
+    )
 
 
 class FilesystemSkillStore:
@@ -615,8 +641,14 @@ class FilesystemSkillStore:
         backup_dir: Path,
         skill_id: str = "",
         actor: str = "human",
+        candidate_id: str = "",
     ) -> WriteReceipt:
-        """The single method in this package that modifies a skill file."""
+        """The single method in this package that modifies a skill file.
+
+        ``candidate_id`` names the candidate ``apply`` is writing, so a file that
+        changed after ``apply`` checked it is refused with that candidate and the
+        advice ``apply``'s own check gives (see ``changed_before_the_write``).
+        """
         if self.read_only:
             raise ReadOnlyViolation(
                 f"refusing to write {named_path(path)}: this skill store is read-only. "
@@ -638,9 +670,7 @@ class FilesystemSkillStore:
             current = self._document_sha256(data, target)
             if current != expected_sha256:
                 raise BaseHashMismatch(
-                    f"refusing to write {named_path(target)}: on-disk sha256 is {current[:12]} but the "
-                    f"candidate was written against {expected_sha256[:12]}. The skill changed "
-                    "since the proposal was made -- re-run validation against the new base."
+                    changed_before_the_write(target, current, expected_sha256, candidate_id)
                 )
             # The target's own mode, captured BEFORE anything is written. An
             # atomic write replaces the inode, so without this the new file would

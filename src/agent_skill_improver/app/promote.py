@@ -307,6 +307,7 @@ def apply_candidate(
             backup_dir=backup_dir,
             skill_id=candidate.target.skill_id,
             actor=f"human:{operator or 'unspecified'}",
+            candidate_id=candidate.id,
         )
         return _record_apply(
             candidate, receipt, approval, gate, state, clock, operator, mirror_paths=mirror_paths
