@@ -391,7 +391,9 @@ class SourceConfig:
         # with the element before it (``Bearer`` and then the token) is left as
         # written, where the joined command line a refusal quotes masks it. The
         # query and each workspace go into the command line too, and are masked
-        # the same way (measured before: a key as either was raw here).
+        # the same way (measured before: a key as either was raw here), as is a
+        # fixtures source's directory (measured before: a key-shaped directory
+        # above it was raw here once).
         return {
             "kind": self.kind,
             "discovery_argv": recorded_argv(self.discovery_argv),
@@ -403,7 +405,7 @@ class SourceConfig:
             "query": redact(self.query).text,
             "workspaces": [redact(workspace).text for workspace in self.workspaces],
             "keep_raw": self.keep_raw,
-            "fixtures_dir": str(self.fixtures_dir) if self.fixtures_dir else "",
+            "fixtures_dir": redact(str(self.fixtures_dir)).text if self.fixtures_dir else "",
             "max_messages": self.max_messages,
             "output_excerpt_chars": self.output_excerpt_chars,
             "timeout_seconds": self.timeout_seconds,

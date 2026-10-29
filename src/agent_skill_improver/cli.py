@@ -61,7 +61,7 @@ from .errors import AsiError, BlockedRunUnreviewed, ConfigError
 from .jsonio import dumps
 from .adapters.bounded_process import children_reaped_by_the_kernel
 from .adapters.skill_fs import root_presence
-from .domain.discovery import MAX_THREAD_ID_LENGTH
+from .domain.discovery import MAX_THREAD_ID_LENGTH, shown_passed_over
 from .domain.redaction import (
     LISTED_PATH_CHARS,
     LISTED_SKILL_ID_CHARS,
@@ -833,9 +833,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             # The report must not fall over on the way to its verdict.
             skipped = []
             warnings.append(f"source could not say what it passed over: {exc}")
+        # Masked as the daily receipt masks them. Measured before: a key-shaped
+        # export name, or a directory above it, was raw in the warning and in
+        # ``--json``'s list, while the receipt of a run over it held none.
         for entry, reason in skipped:
-            source_passed_over.append({"entry": entry, "reason": reason})
-            warnings.append(f"source entry passed over: {entry} {reason}")
+            item = shown_passed_over(entry, reason)
+            source_passed_over.append(item)
+            warnings.append(f"source entry passed over: {item['entry']} {item['reason']}")
 
     payload = {
         "version": __version__,

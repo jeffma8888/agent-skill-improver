@@ -29,7 +29,7 @@ from ..domain.discovery import (
     DiscoveryPage,
     page_from_threads,
 )
-from ..domain.redaction import quoted_value, quoted_values
+from ..domain.redaction import quoted_value, quoted_values, redact
 from ..errors import RecordDefect, SourceUnavailable
 from .transcript_export import MAX_EXPORT_BYTES, normalize_export
 
@@ -109,11 +109,20 @@ class FixtureConversationSource:
         self.output_excerpt_chars = output_excerpt_chars
         self.max_messages = max_messages
 
+    def named_directory(self) -> str:
+        """The directory as this source's messages name it: masked, on one line.
+
+        The operator's path, as the conversation command's program is, and
+        masked the same way. Measured before: a key-shaped directory above it
+        was raw in ``doctor``'s source line and its problem, in ``daily``'s
+        refusal, and, through the defect a fetch raised, in each quarantined
+        conversation's line and record, its checkpoint and the receipt.
+        """
+        return one_line_label(redact(str(self.directory)).text)
+
     def preflight(self) -> None:
         if not self.directory.is_dir():
-            raise SourceUnavailable(
-                f"fixtures_dir {one_line_label(str(self.directory))} is not a directory"
-            )
+            raise SourceUnavailable(f"fixtures_dir {self.named_directory()} is not a directory")
         # Listing it is the question the run will ask; asked here so ``doctor``
         # and the daily preflight refuse before anything is spent.
         self._entries()
@@ -131,7 +140,7 @@ class FixtureConversationSource:
                 names = [entry.name for entry in it if entry.name.endswith(".json")]
         except OSError as exc:
             raise SourceUnavailable(
-                f"fixtures_dir {one_line_label(str(self.directory))} "
+                f"fixtures_dir {self.named_directory()} "
                 f"cannot be listed ({exc.strerror or exc}); "
                 "nothing in it can be discovered, so this is not an empty window"
             ) from exc
@@ -332,20 +341,23 @@ class FixtureConversationSource:
                 )
         if not passed_over:
             raise RecordDefect(
-                f"no fixture for thread {thread_id!r} in {one_line_label(str(self.directory))}",
+                f"no fixture for thread {thread_id!r} in {self.named_directory()}",
                 record_id=thread_id,
             )
         # Measured before: an export discovered a moment ago and then made
         # unreadable (mode 000, truncated mid-write) was reported as "no
         # fixture", as if the thread had never been there. The directory holds
         # entries this scan could not take as a thread; one of them may be it.
-        shown = "; ".join(one_line_label(f"{entry} {reason}") for entry, reason in passed_over[:5])
+        # Each entry and its reason masked together; the receipt masks the entry.
+        shown = "; ".join(
+            one_line_label(redact(f"{entry} {reason}").text) for entry, reason in passed_over[:5]
+        )
         more = len(passed_over) - 5
         if more > 0:
             shown += f"; +{more} more"
         raise RecordDefect(
             f"no readable fixture for thread {thread_id!r} "
-            f"in {one_line_label(str(self.directory))}; "
+            f"in {self.named_directory()}; "
             f"{len(passed_over)} entr{'y' if len(passed_over) == 1 else 'ies'} there could not "
             f"be taken as a thread and may be it: {shown}",
             record_id=thread_id,
