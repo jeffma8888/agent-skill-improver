@@ -45,14 +45,15 @@ Failure classification is the other important part:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
-import shutil
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Iterator, Mapping, Protocol, Sequence
 
 from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
@@ -74,6 +75,11 @@ from .bounded_process import (
 #: to the umask: a permissive umask is exactly the condition under which private
 #: scratch content becomes world-readable, and it is not this process's to fix.
 WORKDIR_MODE = 0o700
+
+#: The flags an owner may set on an entry that stop it from being removed or
+#: changed (macOS and the BSDs; Linux has no user flags). A role may set them on
+#: what it writes in its scratch, so its removal clears them first.
+USER_FLAGS_THAT_KEEP_AN_ENTRY = stat.UF_IMMUTABLE | stat.UF_APPEND
 
 PLACEHOLDER_ROLE = "{role}"
 
@@ -119,6 +125,212 @@ class RoleCommand:
             "max_output_bytes": self.max_output_bytes,
             "model_label": self.model_label,
         }
+
+
+def remove_scratch(workdir: Path) -> None:
+    """Remove one call's scratch, whatever the role did to it.
+
+    ``rmtree`` with its errors ignored stopped at an entry the role made
+    read-only, unsearchable or immutable and removed no link or file the role
+    put where its scratch was (measured: a subdirectory at mode 500 or 000, the
+    scratch itself at 500 or 000, ``chflags uchg`` on a file or a directory, and
+    the scratch replaced by a link or a file each left the role's entries in the
+    state tree while the call reported success, confined or not), and on 3.11 a
+    tree deeper than the recursion limit raised ``RecursionError`` through it.
+
+    So the scratch is removed by one walk of its own, without recursion, that
+    acts only on a name inside a directory it holds open (``_sweep``): nothing
+    is reached by a path a process could change under it, no link is followed,
+    and a mode or a flag is changed only where a removal needs it. A file the
+    role flagged that has a link outside the scratch keeps its flags and stays,
+    since they are that file's too; one whose links are all inside is removed by
+    a second walk, once the first has counted them.
+    """
+    parent, name = os.path.split(os.fspath(workdir))
+    try:
+        root = os.open(parent, _OPEN_A_DIRECTORY)
+    except OSError:
+        return
+    try:
+        seen: dict[_Inode, int] = {}
+        kept: dict[_Inode, int] = {}
+        _sweep(root, name, {}, seen, kept)
+        inside = {inode: links for inode, links in kept.items() if seen.get(inode) == links}
+        if inside:
+            _sweep(root, name, inside, {}, {})
+    finally:
+        os.close(root)
+
+
+#: How a directory of a scratch is opened for its removal: only a directory,
+#: never through a link.
+_OPEN_A_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+#: A file's identity as ``lstat`` gives it: device and inode.
+_Inode = tuple[int, int]
+
+
+def _sweep(
+    root: int,
+    name: str,
+    inside: Mapping[_Inode, int],
+    seen: dict[_Inode, int],
+    kept: dict[_Inode, int],
+) -> None:
+    """Remove ``name`` in the directory ``root`` holds, and all below it, depth first.
+
+    Each directory is held by a descriptor while its entries are removed, so the
+    walk needs one descriptor a level and no recursion. ``inside`` names the
+    flagged files with more than one link that may be cleared (all their links
+    were counted in the scratch); ``seen`` counts the links met of each file with
+    more than one, and ``kept`` records a flagged one that was left.
+    """
+    stack: list[tuple[int, int, str, Iterator[str]]] = []
+    try:
+        opened = _remove_or_open(root, name, inside, seen, kept)
+        if opened is not None:
+            stack.append((opened, root, name, _names(opened)))
+        while stack:
+            here, parent, own, names = stack[-1]
+            entry = next(names, None)
+            if entry is not None:
+                opened = _remove_or_open(here, entry, inside, seen, kept)
+                if opened is not None:
+                    stack.append((opened, here, entry, _names(opened)))
+                continue
+            stack.pop()
+            os.close(here)
+            try:
+                os.rmdir(own, dir_fd=parent)
+            except OSError:
+                pass
+    finally:
+        for here, _parent, _own, _names_left in stack:
+            os.close(here)
+
+
+def _names(directory: int) -> Iterator[str]:
+    try:
+        return iter(os.listdir(directory))
+    except OSError:
+        return iter(())
+
+
+def _remove_or_open(
+    directory: int,
+    name: str,
+    inside: Mapping[_Inode, int],
+    seen: dict[_Inode, int],
+    kept: dict[_Inode, int],
+) -> int | None:
+    """Unlink what is at ``name`` in ``directory``, or open it if it is a directory."""
+    try:
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        return None
+    flagged = getattr(info, "st_flags", 0) & USER_FLAGS_THAT_KEEP_AN_ENTRY
+    if stat.S_ISDIR(info.st_mode):
+        if flagged:
+            _clear_flags(directory, name, info)
+        return _open_directory(directory, name)
+    inode = (info.st_dev, info.st_ino)
+    if info.st_nlink > 1:
+        seen[inode] = seen.get(inode, 0) + 1
+    if _unlinked(directory, name) or not flagged:
+        return None
+    if info.st_nlink > 1 and info.st_nlink > inside.get(inode, 0):
+        # Another link may be outside the scratch: the flags are that file's too.
+        kept[inode] = info.st_nlink
+        return None
+    _clear_flags(directory, name, info)
+    _unlinked(directory, name)
+    return None
+
+
+def _unlinked(directory: int, name: str) -> bool:
+    try:
+        os.unlink(name, dir_fd=directory)
+    except OSError:
+        return False
+    return True
+
+
+def _open_directory(directory: int, name: str) -> int | None:
+    """Open the directory at ``name`` for its walk and give it to its owner.
+
+    One the role made unreadable is set to ``WORKDIR_MODE`` first, by name and
+    told not to follow a link (``_chmod_at``). If what is there is no longer a
+    directory (a process swapped it), it is unlinked rather than opened.
+    """
+    try:
+        opened = os.open(name, _OPEN_A_DIRECTORY, dir_fd=directory)
+    except PermissionError:
+        if not _chmod_at(directory, name):
+            return None
+        try:
+            opened = os.open(name, _OPEN_A_DIRECTORY, dir_fd=directory)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                _unlinked(directory, name)
+            return None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            _unlinked(directory, name)
+        return None
+    try:
+        os.fchmod(opened, WORKDIR_MODE)
+    except OSError:
+        pass
+    return opened
+
+
+def _chmod_at(directory: int, name: str) -> bool:
+    """Set ``name`` in ``directory`` to ``WORKDIR_MODE`` without following a link.
+
+    Where the C library cannot refuse to follow (``fchmodat`` without a working
+    ``AT_SYMLINK_NOFOLLOW``, as on Linux before glibc 2.32 or without ``/proc``,
+    and for a link on any Linux), CPython raises ``ValueError`` here, given a
+    directory descriptor, or ``NotImplementedError``; the mode is then not set at
+    all, since setting it by name would follow a link swapped in at that moment,
+    and the directory stays, as it did before.
+    """
+    try:
+        os.chmod(name, WORKDIR_MODE, dir_fd=directory, follow_symlinks=False)
+    except (OSError, NotImplementedError, ValueError):
+        return False
+    return True
+
+
+#: How the working directory is held while a flag is cleared from inside a
+#: directory of the scratch.
+_OPEN_HERE = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+
+
+def _clear_flags(directory: int, name: str, info: os.stat_result) -> None:
+    """Clear the flags that keep ``name`` in ``directory``, never through a link.
+
+    ``chflags`` takes no directory descriptor, so it is asked by the bare name
+    from inside that directory (``fchdir``), and ``lchflags`` does not follow the
+    name; the working directory is given back at once. Platforms without user
+    flags (Linux) have no ``lchflags``, and nothing is asked.
+    """
+    lchflags = getattr(os, "lchflags", None)
+    if lchflags is None:
+        return
+    try:
+        back = os.open(".", _OPEN_HERE)
+    except OSError:
+        return
+    try:
+        os.fchdir(directory)
+        lchflags(name, getattr(info, "st_flags", 0) & ~USER_FLAGS_THAT_KEEP_AN_ENTRY)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.fchdir(back)
+        finally:
+            os.close(back)
 
 
 class Isolation(Protocol):
@@ -262,8 +474,8 @@ class CommandModelRunner:
         finally:
             # The scratch directory does not outlive the call, so one role cannot
             # leave private residue for the next one -- or for anything that
-            # later walks the state tree.
-            shutil.rmtree(workdir, ignore_errors=True)
+            # later walks the state tree -- whatever it did to its modes or flags.
+            remove_scratch(workdir)
         if result.returncode != 0:
             tail = quotable(
                 result.stderr_tail.decode("utf-8", errors="replace").strip(),
