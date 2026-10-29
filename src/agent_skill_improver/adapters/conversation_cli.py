@@ -479,8 +479,13 @@ class ConversationCliSource:
         for program in dict.fromkeys((exe, self.export_argv[0])):
             problem = program_problem(program)
             if problem:
+                # Masked and cut as the start refusal names it (``_run``):
+                # measured before, a key-shaped directory in the path was
+                # printed raw, twice by ``doctor``, and a path of 874
+                # characters made a ``doctor`` line of 1,076.
+                named = quoted_value(program, limit=NAMED_PATH_CHARS)
                 raise SourceUnavailable(
-                    f"conversation command {program!r} {problem}; set [source].discovery_argv "
+                    f"conversation command {named} {problem}; set [source].discovery_argv "
                     "and [source].export_argv in your config"
                 )
 

@@ -57,7 +57,7 @@ from typing import Any, Iterator, Mapping, Protocol, Sequence
 
 from .. import SCHEMA_MODEL_REQUEST
 from ..domain.isolation import ENV_ALLOWLIST, dropped_env_count, minimal_env
-from ..domain.redaction import quoted_value, redact
+from ..domain.redaction import NAMED_PATH_CHARS, quoted_value, redact
 from ..errors import MalformedModelOutput, TransientFailure
 from ..jsonio import loads_untrusted
 from .bounded_process import (
@@ -415,7 +415,12 @@ class CommandModelRunner:
             program = self._commands[role].argv[0] if self._commands[role].argv else ""
             problem = program_problem(program) if program else "has an empty argv"
             if problem:
-                out.append(f"role {role!r} command {program!r} {problem}")
+                # Masked and cut as the start refusal names it: measured
+                # before, a key-shaped directory in the path was printed raw
+                # by ``doctor`` and by the daily preflight, and a path of 872
+                # characters made a line of 1,008.
+                named = quoted_value(program, limit=NAMED_PATH_CHARS)
+                out.append(f"role {role!r} command {named} {problem}")
         return out
 
     def command_id(self, role: str) -> str:
