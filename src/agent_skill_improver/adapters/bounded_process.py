@@ -295,13 +295,33 @@ def _exited_unreaped(pid: int, timeout: float) -> bool | None:
     failed, and the caller must not signal the group, since once the child is
     reaped its id may be another process's. ``waitid`` with ``WNOWAIT`` where
     there is one (Linux; macOS from Python 3.13), else a kqueue (macOS and the
-    BSDs before that).
+    BSDs before that). None too while SIGCHLD is ignored: set so in the run,
+    the kernel then reaps each child itself as it exits, so an exit seen is no
+    proof the id is still the child's (the kqueue reports that exit all the
+    same). The process's own command puts back an ignore it was started with
+    before it starts any child (``cli._put_sigchld_back``).
     """
+    if _children_reaped_by_the_kernel():
+        return None
     if getattr(os, "waitid", None) is not None and getattr(os, "WNOWAIT", None) is not None:
         return _waitid_exited(pid, timeout)
     if getattr(select, "kqueue", None) is not None:
         return _kqueue_exited(pid, timeout)
     return None
+
+
+def _children_reaped_by_the_kernel() -> bool:
+    """Whether SIGCHLD is ignored, so the kernel may reap each child itself.
+
+    Set so in the run, it does (measured on macOS; Linux from its
+    kernel/signal.c). One a parent left ignored through ``exec`` is reported
+    all the same (measured on 3.11 and 3.13), though macOS does not reap by it;
+    the process's own command puts it back to the default first
+    (``cli._put_sigchld_back``), so only a caller of ``run_bounded`` started so
+    is told the kernel reaps when, on macOS, it does not.
+    """
+    sigchld = getattr(signal, "SIGCHLD", None)
+    return sigchld is not None and signal.getsignal(sigchld) is signal.SIG_IGN
 
 
 def _waitid_exited(pid: int, timeout: float) -> bool | None:

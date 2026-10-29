@@ -15,8 +15,11 @@ so its id cannot have passed to another process.
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import io
 import itertools
+import json
 import os
 import select
 import signal
@@ -239,6 +242,171 @@ class WhatARoleLeavesInItsGroupIsEndedTests(_RoleCase):
         runner.run(role="scorer", system="s", user="u", response_schema="x")
         time.sleep(0.3)
         self.assertNotEqual(_running(token), [], "a process in a session of its own was reached")
+
+
+class AnIgnoredSigchldTests(_RoleCase):
+    """With SIGCHLD ignored in the run, the kernel reaps the role itself as
+    it exits, so its id is free at once and
+    another process may take it. Found by this row's first audit: on 3.11
+    (macOS waits with a kqueue there) the exit was taken for one not yet
+    reaped and the freed id was signalled."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        previous = signal.getsignal(signal.SIGCHLD)
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGCHLD, previous)
+
+    def test_with_sigchld_ignored_a_role_the_kernel_reaped_is_not_signalled(self):
+        sent = []
+        token = _token()
+        _root, runner = self._call(f"(sleep {token}) {QUIET} &\n{REPLY}", token=token)
+        with mock.patch.object(
+            bounded_process.os, "killpg", side_effect=lambda pid, sig: sent.append(pid)
+        ):
+            self.assertEqual(
+                runner.run(role="scorer", system="s", user="u", response_schema="x"), {"x": 1}
+            )
+        self.assertEqual(sent, [], "an id the kernel had already freed was signalled")
+
+    def test_with_sigchld_ignored_no_exit_is_taken_for_one_not_yet_reaped(self):
+        with mock.patch.object(bounded_process, "_waitid_exited", return_value=True):
+            with mock.patch.object(bounded_process, "_kqueue_exited", return_value=True):
+                self.assertIsNone(bounded_process._exited_unreaped(123, 1))
+                signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+                self.assertIs(bounded_process._exited_unreaped(123, 1), True)
+
+
+def _started_ignored(case: str, root: str, token: str) -> None:
+    """Run in a process its parent started with SIGCHLD ignored: ``case`` as
+    the process's own command (``cli.entry``) or, for ``library``, as a call of
+    ``cli.main``; then one line of JSON on stdout."""
+    from agent_skill_improver import cli
+
+    started = signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN
+
+    def runner(script: str) -> CommandModelRunner:
+        where = Path(root) / f"state-{next(_SERIAL)}"
+        where.mkdir()
+        return CommandModelRunner(
+            {
+                "scorer": RoleCommand(
+                    role="scorer", argv=("/bin/sh", "-c", script), timeout_seconds=20
+                )
+            },
+            isolation=NoSandbox(),
+            workdir_root=where,
+            parent_env={"PATH": "/usr/bin:/bin"},
+        )
+
+    def report(**found: object) -> None:
+        print(json.dumps({"started_ignored": started, **found}), flush=True)
+
+    if case == "library":
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cli.main(["scheduler-template", "cron"])
+        report(rc=rc, ignored_after=signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN)
+        return
+
+    def work(argv: object, *, exiting: bool) -> int:
+        found: dict[str, object] = {
+            "ignored_in_the_command": signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN
+        }
+        if case == "left":
+            checked: dict[int, str] = {}
+            real = os.killpg
+
+            def killpg(pid: int, sig: int) -> None:
+                # A real signal only to a group whose leader is this process's
+                # child, exited and not yet reaped; anything else is refused.
+                if pid not in checked:
+                    checked[pid] = subprocess.run(
+                        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+                    ).stdout.strip()
+                if not checked[pid].startswith("Z"):
+                    raise ProcessLookupError(pid)
+                real(pid, sig)
+
+            answers = 0
+            with mock.patch.object(bounded_process.os, "killpg", side_effect=killpg):
+                for _ in range(3):
+                    reply = runner(f"(sleep {token}) {QUIET} &\n{REPLY}").run(
+                        role="scorer", system="s", user="u", response_schema="x"
+                    )
+                    answers += reply == {"x": 1}
+            found["answers"] = answers
+            found["groups_ended"] = sum(stat.startswith("Z") for stat in checked.values())
+            found["refused"] = sum(not stat.startswith("Z") for stat in checked.values())
+        if case == "exit":
+            try:
+                runner(f"{REPLY}; exit 3").run(
+                    role="scorer", system="s", user="u", response_schema="x"
+                )
+                found["failure"] = ""
+            except TransientFailure as exc:
+                found["failure"] = str(exc)
+        report(**found)
+        return 0
+
+    with mock.patch.object(cli, "_main", work):
+        cli.entry()
+
+
+class ARunStartedWithSigchldIgnoredTests(unittest.TestCase):
+    """A parent can leave SIGCHLD ignored through ``exec``, and Python does not
+    reset it. macOS does not reap the children of a process started so, yet
+    ``getsignal`` reports the ignore, so the runner took the role for one the
+    kernel had reaped and left what it started running (measured: 5 calls of
+    5, both Pythons). Linux does reap them then, and each child's exit reads
+    as 0 (its kernel/signal.c; this module's ``exit`` case passed on macOS
+    before too). The process's own command puts SIGCHLD back first."""
+
+    def _start(self, case: str, token: str = "") -> dict:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(root)])
+        if token:
+            self.addCleanup(_end, token)
+        here = Path(__file__).resolve()
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env["PYTHONPATH"] = os.pathsep.join([str(here.parents[1] / "src"), str(here.parents[1])])
+        code = f"import sys\nfrom tests.{here.stem} import _started_ignored\n"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                code + "_started_ignored(*sys.argv[1:])",
+                case,
+                str(root),
+                token,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+            preexec_fn=lambda: signal.signal(signal.SIGCHLD, signal.SIG_IGN),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        found = json.loads(proc.stdout.splitlines()[-1])
+        self.assertTrue(found["started_ignored"], "the run was not started with SIGCHLD ignored")
+        return found
+
+    def test_a_run_started_with_sigchld_ignored_puts_it_back_to_the_default(self):
+        self.assertFalse(self._start("disposition")["ignored_in_the_command"])
+
+    def test_a_run_started_with_sigchld_ignored_leaves_nothing_running_in_the_role_group(self):
+        token = _token()
+        found = self._start("left", token)
+        self.assertEqual(found["answers"], 3)
+        self.assertEqual(_still_running(token), [], "what the role started outlived the call")
+        self.assertEqual((found["groups_ended"], found["refused"]), (3, 0))
+
+    def test_a_run_started_with_sigchld_ignored_reads_a_role_exit_as_it_is(self):
+        self.assertIn("exited 3", self._start("exit")["failure"])
+
+    def test_a_call_of_main_keeps_the_sigchld_its_caller_left(self):
+        found = self._start("library")
+        self.assertEqual(found["rc"], 0)
+        self.assertTrue(found["ignored_after"], "a caller of main had its SIGCHLD changed")
 
 
 class TheConversationCommandKeepsWhatItStartsTests(unittest.TestCase):

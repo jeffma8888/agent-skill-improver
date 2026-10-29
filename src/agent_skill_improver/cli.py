@@ -2287,8 +2287,31 @@ def main(argv: Sequence[str] | None = None) -> int:
 def entry() -> NoReturn:
     """``asi`` and ``python -m agent_skill_improver``: run the process's own
     command line and exit with its status. After a stop the stop signals stay
-    ignored until the process has exited (``_stop_signals_unwind``)."""
+    ignored until the process has exited (``_stop_signals_unwind``). SIGCHLD
+    is put back to its default first (``_put_sigchld_back``)."""
+    _put_sigchld_back()
     sys.exit(_main(None, exiting=True))
+
+
+def _put_sigchld_back() -> None:
+    """Put SIGCHLD back to its default action, so each child is left for this
+    process to reap and its exit status is read.
+
+    A parent can leave SIGCHLD ignored through ``exec``, and Python does not
+    reset it. Measured before, started so on macOS (3.11 and 3.13): the kernel
+    did not reap the children then, yet ``getsignal`` reported the ignore, so
+    the model runner took a role for one the kernel had reaped and left what it
+    started running, 5 calls of 5. Linux keeps the ignore through ``exec`` and
+    then does reap each child as it exits (its kernel/signal.c, not run here),
+    as macOS does with SIGCHLD ignored in the run, where every child's exit
+    then read as 0 (measured: 5 of 5 role answers that exited 3 taken, 5 of 5
+    exports that exited 1). The commands the run starts then start with it at
+    the default too. Only the process's own command does this: a caller of
+    :func:`main` keeps the disposition it has.
+    """
+    sigchld = getattr(signal, "SIGCHLD", None)
+    if sigchld is not None and threading.current_thread() is threading.main_thread():
+        signal.signal(sigchld, signal.SIG_DFL)
 
 
 def _main(argv: Sequence[str] | None, *, exiting: bool) -> int:
