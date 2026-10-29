@@ -66,6 +66,7 @@ from .bounded_process import (
     QUOTED_TAIL_CHARS,
     OutputOverflow,
     RunTimedOut,
+    not_started_reason,
     program_problem,
     quotable,
     run_bounded,
@@ -465,8 +466,11 @@ class CommandModelRunner:
             # the command could not be started. Measured before: only
             # not-found was caught, and a role command at mode 644 ended the
             # run as an internal error with a traceback after ``doctor`` had
-            # said ready.
-            raise TransientFailure(f"role {role!r} command cannot be started: {exc}") from exc
+            # said ready. The program the error names is masked and cut: raw,
+            # a key in its path reached the receipt and the state records.
+            raise TransientFailure(
+                f"role {role!r} command cannot be started: {not_started_reason(exc)}"
+            ) from exc
         except RunTimedOut as exc:
             raise TransientFailure(f"role {role!r} timed out after {cmd.timeout_seconds}s") from exc
         except OutputOverflow as exc:

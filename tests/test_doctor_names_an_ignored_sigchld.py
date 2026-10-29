@@ -74,7 +74,7 @@ class DoctorNamesAnIgnoredSigchldTests(unittest.TestCase):
 
     def test_it_is_named_after_a_daily_has_made_its_state_tree(self):
         # The fresh tree above has no state directory yet; the check must not
-        # hang on that. A daily at the default makes it, and scores.
+        # depend on that. A daily at the default makes it.
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             rc = cli.main(["--config", self.config, "daily", "--commit", "--day", "2026-01-02"])
@@ -86,8 +86,8 @@ class DoctorNamesAnIgnoredSigchldTests(unittest.TestCase):
         self.assertEqual(sum(1 for line in text.splitlines() if NAMED in line), 1, text)
 
     def test_it_is_named_with_a_role_unconfigured_as_well(self):
-        # A missing role is a problem of its own; the check must not hang on
-        # every role being there.
+        # A missing role is a problem of its own; the check must not depend
+        # on every role being there.
         config = Path(self.config)
         text = config.read_text(encoding="utf-8")
         start = text.index("\n[model.judge]\n")

@@ -50,7 +50,7 @@ from ..domain.discovery import (
     is_safe_thread_id,
     page_from_threads,
 )
-from ..domain.redaction import quoted_value, redact
+from ..domain.redaction import NAMED_PATH_CHARS, quoted_value, redact
 from ..errors import RecordDefect, SourceUnavailable
 from ..jsonio import loads_untrusted
 from .bounded_process import (
@@ -60,6 +60,7 @@ from .bounded_process import (
     RunTimedOut,
     quotable,
     run_bounded,
+    why_not_started,
 )
 
 __all__ = [
@@ -507,8 +508,10 @@ class ConversationCliSource:
             # program could not be started, which is the source, not a record,
             # and not a bug in this tool. Measured before: a configured command
             # at mode 644 passed preflight (the file exists) and then ended the
-            # run as an internal error with a traceback.
-            raise SourceUnavailable(f"cannot execute {argv[0]!r}: {exc}") from exc
+            # run as an internal error with a traceback. The program is named
+            # once, masked and cut: the error's own text named it again, raw.
+            program = quoted_value(argv[0], limit=NAMED_PATH_CHARS)
+            raise SourceUnavailable(f"cannot execute {program}: {why_not_started(exc)}") from exc
         except RunTimedOut as exc:
             raise SourceUnavailable(f"{shown} timed out after {self.timeout_seconds}s") from exc
         except OutputOverflow as exc:

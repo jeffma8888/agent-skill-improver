@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from ..domain.redaction import redact
+from ..domain.redaction import NAMED_PATH_CHARS, quoted_value, redact, why_unreadable
 
 #: How much of the child's stderr is kept for the failure message.
 STDERR_TAIL_BYTES = 4096
@@ -133,6 +133,39 @@ class ExitUnreadable(OSError):
     each. An ``OSError``, so a caller that reports a command it cannot start
     reports this one so too.
     """
+
+
+def why_not_started(exc: OSError) -> str:
+    """Why a child could not be started, without the program the error names.
+
+    ``str(exc)`` of a failed start ends with the program it was given, which a
+    refusal quoting it raw printed whole and unmasked. Measured before (3.11
+    and 3.13): a conversation command that could not be started was named
+    twice, the refusal 1,788 characters long for a path of 859; and a role
+    command that passed the preflight and failed to start (a wrong binary
+    format) under a directory named like a key put that key raw in five lines
+    of a daily run's output and five times under each of its receipts,
+    deferred and checkpoints, with ``redact_secrets`` on. :class:`ExitUnreadable`
+    names no program and is its own text; any other error is shown as
+    ``why_unreadable`` shows it, by its number and the system's words.
+    """
+    if isinstance(exc, ExitUnreadable):
+        return str(exc)
+    return why_unreadable(exc)
+
+
+def not_started_reason(exc: OSError) -> str:
+    """:func:`why_not_started`, then the program the error names, masked and cut.
+
+    For a refusal that does not name the program itself. For a plain path it
+    reads as ``str(exc)`` did; a key in the path is masked, and a path longer
+    than ``NAMED_PATH_CHARS`` is cut (``quoted_value``). No working directory
+    is passed to the child, so the name the error carries is the program's.
+    """
+    why = why_not_started(exc)
+    if isinstance(exc, ExitUnreadable) or exc.filename is None:
+        return why
+    return f"{why}: {quoted_value(exc.filename, limit=NAMED_PATH_CHARS)}"
 
 
 def program_problem(program: str) -> str:
