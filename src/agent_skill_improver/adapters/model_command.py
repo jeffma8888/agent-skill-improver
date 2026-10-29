@@ -456,6 +456,9 @@ class CommandModelRunner:
                 env=env,
                 timeout_seconds=cmd.timeout_seconds,
                 max_output_bytes=cmd.max_output_bytes,
+                # A role is untrusted: nothing it started in its process group
+                # may outlive the call, nor write to its scratch once removed.
+                end_group_on_exit=True,
             )
         except OSError as exc:
             # Not found, not executable, a directory, a wrong binary format:

@@ -151,7 +151,11 @@ pipes:
 - the child is started in its own session and stopped as a process group. A
   role command is routinely a wrapper (a shell, a launcher, an isolation tool)
   whose real worker is a grandchild; killing the wrapper alone left that worker
-  running past the deadline, one more each time a scheduled run timed out;
+  running past the deadline, one more each time a scheduled run timed out. A
+  model role's group is ended when the role exits on its own as well, before
+  the role is reaped (so its id cannot have passed to another process), and
+  in rounds, since one signal misses a child forked as it arrives; a process
+  that moved to a group of its own is not reached;
 - stdin is fed from a helper thread, so a child that answers before it reads
   cannot wedge the parent on a full pipe;
 - stderr is drained concurrently and only a bounded tail is kept for the

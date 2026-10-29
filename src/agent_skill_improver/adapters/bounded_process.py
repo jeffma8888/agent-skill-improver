@@ -17,6 +17,11 @@ This module is the one place that reads a child's pipes:
   process group: a role command is routinely a wrapper (a shell, a launcher, an
   isolation tool) whose real worker is a grandchild, and killing the wrapper
   alone would leave that worker running past the deadline or the cap;
+* a caller that asks (``end_group_on_exit``, each model role) has that group
+  ended when the child exits on its own too, so nothing the child started in
+  it outlives the call: the exit is waited for without reaping the child, so
+  its id still names its group and no other process can have taken it when
+  the group is signalled, and only then is it reaped;
 * stdin is fed from a helper thread so a child that answers before it reads,
   or never reads, cannot wedge the parent on a full pipe;
 * stderr is drained concurrently and only a bounded tail is kept, because it is
@@ -31,11 +36,14 @@ knows nothing about records, roles or sources.
 
 from __future__ import annotations
 
+import errno
 import os
+import select
 import selectors
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -78,6 +86,20 @@ def quotable(text: str, *, limit: int, from_end: bool) -> str:
 #: Pipe read size. Small enough that the overshoot past ``max_output_bytes``
 #: before the kill is at most one chunk.
 READ_CHUNK = 64 * 1024
+
+#: How long a child's process group is signalled again while something in it
+#: still runs (``_end_group``). Rounds stop as soon as nothing does, which is
+#: at once when nothing was left; this bounds only a process the kernel cannot
+#: end at once.
+GROUP_END_SECONDS = 1.0
+
+#: Linux gives a signal sent to a group while one of its processes forks to the
+#: new child too (kernel/fork.c and kernel/signal.c: "Let multiprocess signals
+#: appear after on-going forks"), and reports a signal to a member that exited
+#: but is not yet reaped as sent, so there one round reaches every process and
+#: further rounds could not tell when nothing was left (they would run out
+#: ``GROUP_END_SECONDS`` on every call).
+ONE_ROUND_ENDS_A_GROUP = sys.platform.startswith("linux")
 
 #: The longest wait a configured ``timeout_seconds`` may ask for: seven days.
 #: The platform's timer bounds the wait on the child's pipes, and a wait past
@@ -137,6 +159,7 @@ def run_bounded(
     env: Mapping[str, str] | None = None,
     timeout_seconds: float,
     max_output_bytes: int,
+    end_group_on_exit: bool = False,
 ) -> BoundedResult:
     """Run ``argv`` with bounded output and a wall-clock deadline.
 
@@ -145,9 +168,13 @@ def run_bounded(
     model role gets the allowlisted minimum). The POSIX session is never
     inherited: the child leads its own, with no controlling terminal, so a tool
     that opened ``/dev/tty`` to prompt would fail at once rather than wait for
-    an answer nobody can give through these pipes. Raises ``FileNotFoundError``
-    if the executable is missing, :class:`RunTimedOut` or :class:`OutputOverflow`
-    as described above.
+    an answer nobody can give through these pipes. With ``end_group_on_exit``,
+    whatever is left in the child's process group when the child exits is
+    killed before this returns, whatever the exit code (a model role is
+    untrusted; the conversation CLI is the operator's own and keeps what it
+    starts); a process that moved to a group of its own is not reached.
+    Raises ``FileNotFoundError`` if the executable is missing,
+    :class:`RunTimedOut` or :class:`OutputOverflow` as described above.
     """
     deadline = time.monotonic() + timeout_seconds
     proc = subprocess.Popen(  # noqa: S603 - argv is constructed by the caller, never shell
@@ -159,7 +186,9 @@ def run_bounded(
         start_new_session=True,
     )
     try:
-        return _read_bounded(proc, stdin, deadline, timeout_seconds, max_output_bytes)
+        return _read_bounded(
+            proc, stdin, deadline, timeout_seconds, max_output_bytes, end_group_on_exit
+        )
     except BaseException:
         # Whatever ends this call before the loop's own ``finally`` is set up
         # (a stop signal, a thread that cannot start) ends the child too.
@@ -174,6 +203,7 @@ def _read_bounded(
     deadline: float,
     timeout_seconds: float,
     max_output_bytes: int,
+    end_group_on_exit: bool,
 ) -> BoundedResult:
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     stdin_pipe, stdout_pipe, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
@@ -229,6 +259,15 @@ def _read_bounded(
             _kill(proc)
             raise failure
         remaining = max(0.0, deadline - time.monotonic())
+        if end_group_on_exit:
+            exited = _exited_unreaped(proc.pid, remaining)
+            if exited is False:
+                _kill(proc)
+                raise RunTimedOut(f"timed out after {timeout_seconds:g}s")
+            if exited:
+                # Not yet reaped, so the id is still this group's and no other's.
+                _end_group(proc.pid)
+            remaining = max(0.0, deadline - time.monotonic())
         try:
             returncode = proc.wait(timeout=remaining)
         except subprocess.TimeoutExpired as exc:
@@ -247,17 +286,107 @@ def _read_bounded(
     return BoundedResult(stdout=bytes(out), stderr_tail=bytes(err), returncode=returncode)
 
 
+def _exited_unreaped(pid: int, timeout: float) -> bool | None:
+    """Whether the child ``pid`` exits within ``timeout``, left unreaped.
+
+    True: it has exited and is not reaped, since only ``proc.wait`` reaps it
+    here, so its id still names its process group; False: it still runs at the
+    timeout; None: this platform cannot wait without reaping, or the wait
+    failed, and the caller must not signal the group, since once the child is
+    reaped its id may be another process's. ``waitid`` with ``WNOWAIT`` where
+    there is one (Linux; macOS from Python 3.13), else a kqueue (macOS and the
+    BSDs before that).
+    """
+    if getattr(os, "waitid", None) is not None and getattr(os, "WNOWAIT", None) is not None:
+        return _waitid_exited(pid, timeout)
+    if getattr(select, "kqueue", None) is not None:
+        return _kqueue_exited(pid, timeout)
+    return None
+
+
+def _waitid_exited(pid: int, timeout: float) -> bool | None:
+    waitid = getattr(os, "waitid")
+    how = getattr(os, "WEXITED") | os.WNOHANG | getattr(os, "WNOWAIT")
+    end = time.monotonic() + timeout
+    pause = 0.001
+    while True:
+        try:
+            if waitid(getattr(os, "P_PID"), pid, how) is not None:
+                return True
+        except OSError:
+            return None
+        left = end - time.monotonic()
+        if left <= 0:
+            return False
+        time.sleep(min(pause, left))
+        pause = min(pause * 2, 0.05)
+
+
+def _kqueue_exited(pid: int, timeout: float) -> bool | None:
+    try:
+        queue = select.kqueue()
+    except OSError:
+        return None
+    try:
+        watch = select.kevent(
+            pid,
+            filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+            fflags=select.KQ_NOTE_EXIT,
+        )
+        events = queue.control([watch], 1, timeout)
+    except OSError as exc:
+        return True if exc.errno == errno.ESRCH else None
+    finally:
+        queue.close()
+    if not events:
+        return False
+    event = events[0]
+    if event.flags & select.KQ_EV_ERROR:
+        # A child that has already exited cannot be watched (measured on macOS:
+        # ESRCH, reported as the event); it is still unreaped, as above.
+        return True if event.data == errno.ESRCH else None
+    return bool(event.fflags & select.KQ_NOTE_EXIT)
+
+
+def _end_group(pid: int) -> bool:
+    """SIGKILL what runs in the group ``pid`` leads, again until nothing does.
+
+    One signal is not enough: a process forking as it arrives can leave a child
+    the signal missed, and the next round reaches it (measured on macOS: a
+    shell starting a background job, or a loop of 200, as the role exited left
+    a process running in the group in 19 to 37 runs of 40 with one signal, and
+    in none of 40 with the rounds). The rounds end when the group can no
+    longer be signalled (no process of it left but the unreaped child and the
+    killed, which macOS reports as an error), or after ``GROUP_END_SECONDS``;
+    on Linux there is one (``ONE_ROUND_ENDS_A_GROUP``). False when the group
+    could not be signalled at all.
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        return False
+    if ONE_ROUND_ENDS_A_GROUP:
+        return True
+    end = time.monotonic() + GROUP_END_SECONDS
+    while time.monotonic() < end:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            break
+        time.sleep(0.0005)
+    return True
+
+
 def _kill(proc: subprocess.Popen[bytes]) -> None:
     """Stop the child and everything it started, then reap it.
 
     The child leads its own process group (``start_new_session``), so the
-    signal goes to the group: the wrapper and every worker it spawned. The
-    direct kill is kept as the fallback for a platform without process groups
-    or a child that already changed group.
+    signal goes to the group, in rounds (``_end_group``): the wrapper and every
+    worker it spawned. The direct kill is kept as the fallback for a platform
+    without process groups or a child that already changed group.
     """
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (AttributeError, OSError):
+    if not _end_group(proc.pid):
         try:
             proc.kill()
         except OSError:
