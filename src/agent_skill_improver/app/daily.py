@@ -65,6 +65,7 @@ from ..domain.conversation import NormalizedConversation
 from ..domain.discovery import error_page, merge_pages, passed_over_note, shown_workspace
 from ..domain.failure import FailureCase
 from ..domain.isolation import decide as decide_isolation
+from ..domain.redaction import redact
 from ..domain.rubric import Rubric
 from ..domain.selection import bucket_coverage, bucket_key, select_fair
 from ..domain.skills import (
@@ -304,9 +305,13 @@ def run_daily(
         day=run_day,
         started_at=iso(started),
         dry_run=dry_run,
-        config_path=str(config.config_path),
+        # The receipt only records where the config and the state tree are; it
+        # never reads them back, so each is masked, as the source block masks the
+        # fixtures directory. Measured before: a key-shaped directory above both
+        # was raw in the receipt as each, and as each candidate's skill file.
+        config_path=redact(str(config.config_path)).text,
         seed=run_seed,
-        state_dir=str(state.root),
+        state_dir=redact(str(state.root)).text,
     )
     receipt.source = config.source.to_dict()
     receipt.caps = config.caps.to_dict()
@@ -848,7 +853,9 @@ def _propose_and_validate(
         entry = {
             "candidate_id": candidate.id,
             "skill_id": candidate.target.skill_id,
-            "canonical_path": candidate.target.canonical_path,
+            # The candidate record keeps the path as written (``apply`` writes
+            # there); the receipt's copy is only read, so it is masked.
+            "canonical_path": redact(candidate.target.canonical_path).text,
             "base_sha256": candidate.target.base_sha256,
             "status": candidate.status,
             "gate_passed": validation.decision.passed,
@@ -1108,6 +1115,7 @@ def _finish(
         set(checkpoint.get("candidates", [])) | {c["candidate_id"] for c in candidates}
     )
     checkpoint["completed"] = receipt.status != STATUS_STOOD_DOWN
-    checkpoint["last_receipt"] = str(state.receipt_path(run_day, dry_run=False))
+    # Recorded for a reader, never read back: masked as the receipt's own paths are.
+    checkpoint["last_receipt"] = redact(str(state.receipt_path(run_day, dry_run=False))).text
     state.write_checkpoint(run_day, checkpoint)
     return receipt
