@@ -1315,8 +1315,9 @@ LISTED_STAGE_CHARS = 4096
 #: reason is the tool's own words around the values it quotes (each cut at 120
 #: characters, ``QUOTED_VALUE_CHARS``), a child's output tail (cut at 500,
 #: ``QUOTED_TAIL_CHARS``) and the paths it names, which have no bound of their
-#: own, so this one is a choice too: the longest reason the test suite writes
-#: is 464 characters. The record's file keeps a longer one whole.
+#: own, so this one is a choice too: when it was chosen, the longest reason
+#: the test suite wrote was 464 characters; its refusal of a candidate at
+#: validate now writes one of 579. The record's file keeps a longer one whole.
 LISTED_REASON_CHARS = 4096
 
 
@@ -1432,11 +1433,15 @@ def _judgement_lines(judgements: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 def cmd_review(args: argparse.Namespace) -> int:
-    from .app.promote import read_live_base_text, review_report
+    from .app.promote import read_live_base_text, refuse_a_closed_review, review_report
 
     config = _load(args)
     state = _open_state(config)
     candidate = state.read_candidate(args.candidate_id)
+    # Its status first, before its file is read, as `apply` asks it: read first,
+    # a closed candidate whose skill folder had moved was refused as a base
+    # mismatch, whose advice is to delete the record `rollback` restores from.
+    refuse_a_closed_review(candidate)
     # A review-only command still resolves the candidate against a real store:
     # read-only, never writable, but reading the LIVE configured canonical
     # snapshot rather than trusting anything the candidate record asserts about

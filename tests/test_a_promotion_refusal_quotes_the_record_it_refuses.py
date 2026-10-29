@@ -257,7 +257,10 @@ class APathIsNamedBareOnlyWhenPlainTests(_Refusals):
                 self.assertLess(len(shown[action]), 1_500)
 
     def test_a_path_holding_a_nul_is_refused_not_fallen_over(self):
-        hint = "re-run `asi daily --commit` to propose against the configured tree."
+        hint = (
+            f"To propose against the configured tree, delete its record ({_ENV['cid']}.json in "
+            "the state directory's candidates/)"
+        )
         in_folder = self.refusals(_in_folder("tdd\x00" + PLANTED))
         # Past the 512 characters a path is named in, too.
         far_in = self.refusals(_in_folder("d" * 1_000 + "\x00"))

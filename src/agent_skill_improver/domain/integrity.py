@@ -190,21 +190,77 @@ def derived_field_mismatches(candidate: Candidate, *, base_text: str | None = No
     return problems
 
 
+def repropose_advice(candidate_id: str) -> str:
+    """What proposing a refused candidate's change again takes.
+
+    Every ``review`` or ``apply`` refusal that sends the operator back to
+    ``daily`` says it in these words. "Re-run ``asi daily --commit``" alone was
+    untrue twice over. Both commands refuse a candidate that is not
+    ``validated`` before any check that gives this advice, so the record refused
+    is still open and counts against its skill's
+    ``caps.max_open_candidates_per_skill``: a run for another day refuses that
+    skill ("review or close them"), and review refuses the record again with the
+    same advice. And a day never re-scores a conversation it has already scored,
+    so a run for the same day does not look at the ones behind the candidate.
+    Deleting the record is how a candidate review refuses is closed. A candidate
+    ``daily`` refuses at validate has no record to delete: ``set_aside_advice``
+    is what that refusal says.
+    """
+    return (
+        f"delete its record ({candidate_id}.json in the state directory's candidates/), "
+        "which counts against its skill's open-candidate cap while it exists, then run "
+        "`asi daily --commit` for another day: a run for the same day skips every "
+        "conversation that day already scored, the ones behind this candidate included"
+    )
+
+
+def set_aside_advice() -> str:
+    """What proposing again takes after ``daily`` refuses a candidate at validate.
+
+    ``validate_candidate`` checks a candidate ``daily`` has just built, before
+    ``daily`` writes its record, and ``daily`` sets the skill aside (deferred,
+    or quarantined once deferral is exhausted) when the check refuses. There is
+    no record to delete or to review, and nothing counts against the skill's
+    open-candidate cap: measured, a run for the same day stood down and a run
+    for the next day proposed the change again. The record advice of
+    ``repropose_advice`` named a file that was never written. A dry run marks
+    no conversation as scored, so after one a committed run for the same day
+    would propose again too; another day still does.
+    """
+    return (
+        "No record of it was written, since `daily` writes one only after validating it, so "
+        "there is nothing to delete or to review. This run sets its skill aside; to propose "
+        "again, run `asi daily --commit` for another day, because a run for the same day skips "
+        "every conversation that day already scored, the ones behind this candidate included"
+    )
+
+
 def verify_candidate_integrity(
     candidate: Candidate, *, base_text: str | None = None, action: str
 ) -> None:
-    """Refuse ``action`` unless every derived field recomputes to what is stored."""
+    """Refuse ``action`` unless every derived field recomputes to what is stored.
+
+    ``daily`` calls it with ``action="validate"``, on a candidate whose record it
+    has not written yet; that refusal says so rather than describe a record.
+    """
     problems = derived_field_mismatches(candidate, base_text=base_text)
     if not problems:
         return
+    if action == "validate":
+        raise CandidateTampered(
+            f"refusing to validate candidate {candidate.id}: {len(problems)} derived field(s) "
+            "do not match a fresh recomputation.\n"
+            + "\n".join(f"  - {p}" for p in problems)
+            + f"\n  {set_aside_advice()}. Nothing has been written to any skill file."
+        )
     raise CandidateTampered(
         f"refusing to {action} candidate {candidate.id}: {len(problems)} derived field(s) do not "
         "match a fresh recomputation, so the record has changed since it was written.\n"
         + "\n".join(f"  - {p}" for p in problems)
         + "\n  An approval token is derived from the candidate's content, so a record edited "
-        "after review must never be authorised by the token printed before it. Delete this "
-        "candidate and re-run `asi daily --commit` to propose and validate the change again; "
-        "nothing has been written to any skill file."
+        "after review must never be authorised by the token printed before it. To propose and "
+        f"validate the change again, {repropose_advice(candidate.id)}; nothing has been "
+        "written to any skill file."
     )
 
 
@@ -407,7 +463,7 @@ def verify_full_integrity(
         "match a fresh recomputation, so the record has changed since it was written.\n"
         + "\n".join(listed)
         + "\n  An approval token is derived from the candidate's content, so a record edited "
-        "after review must never be authorised by the token printed before it. Delete this "
-        "candidate and re-run `asi daily --commit` to propose and validate the change again; "
-        "nothing has been written to any skill file."
+        "after review must never be authorised by the token printed before it. To propose and "
+        f"validate the change again, {repropose_advice(candidate.id)}; nothing has been "
+        "written to any skill file."
     )

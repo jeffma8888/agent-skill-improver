@@ -44,7 +44,7 @@ from pathlib import Path
 from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
-from ..domain.integrity import verify_full_integrity
+from ..domain.integrity import repropose_advice, verify_full_integrity
 from ..domain.redaction import named_path, quoted_value, quoted_values, why_unreadable
 from ..domain.validation import ValidationRecord
 from ..errors import (
@@ -70,6 +70,28 @@ APPLY_ENV_HINT = (
     "Promotion is a human action. Run it from an interactive shell: "
     "asi review <candidate-id> then asi apply <candidate-id> --approve <token> --i-reviewed-this"
 )
+
+
+def refuse_a_closed_review(candidate: Candidate) -> None:
+    """Refuse to review a candidate whose status is anything but exactly ``validated``.
+
+    ``review`` asks this before it reads the candidate's file, as ``apply`` asks
+    its status first. Measured before, with the file read first: an ``applied``
+    or ``rolled-back`` candidate whose skill folder had moved was refused as a
+    base mismatch rather than as closed, told to propose again; with the record
+    advice of ``repropose_advice`` that refusal would say to delete the record,
+    and an applied candidate's record is what ``rollback`` restores from.
+    ``review_report`` asks it too, for a caller that reads first.
+    """
+    if candidate.status != STATUS_VALIDATED:
+        raise GateFailed(
+            f"refusing to review candidate {candidate.id}: status is "
+            f"{quoted_value(candidate.status)}, not "
+            f"{STATUS_VALIDATED!r}. Only a validated candidate may expose a review token or an "
+            "apply command; a closed candidate (applied, rolled-back, gate-failed or blocked-run) "
+            "never does, "
+            "regardless of what its recorded gate says."
+        )
 
 
 def review_report(
@@ -102,15 +124,7 @@ def review_report(
       expose a token or an apply command again, no matter what the recorded
       gate says.
     """
-    if candidate.status != STATUS_VALIDATED:
-        raise GateFailed(
-            f"refusing to review candidate {candidate.id}: status is "
-            f"{quoted_value(candidate.status)}, not "
-            f"{STATUS_VALIDATED!r}. Only a validated candidate may expose a review token or an "
-            "apply command; a closed candidate (applied, rolled-back, gate-failed or blocked-run) "
-            "never does, "
-            "regardless of what its recorded gate says."
-        )
+    refuse_a_closed_review(candidate)
     verify_full_integrity(candidate, rubrics=rubrics, action="review")
     live_sha = sha256_text(base_text)
     if live_sha != candidate.target.base_sha256:
@@ -119,8 +133,8 @@ def review_report(
             "now hashes "
             f"{short(live_sha)} but the candidate was written against "
             f"{short(candidate.target.base_sha256)}. The skill changed since the proposal was "
-            "made, so the diff and the token would describe a file that no longer exists -- "
-            "re-run `asi daily --commit` to propose and validate against the new base."
+            "made, so the diff and the token would describe a file that no longer exists. To "
+            f"propose and validate against the new base, {repropose_advice(candidate.id)}."
         )
     verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="review")
     gate = (candidate.validation or {}).get("gate") or {}
@@ -249,7 +263,8 @@ def apply_candidate(
                 f"{named_path(candidate.target.canonical_path)} now hashes "
                 f"{short(live_sha)} but the candidate was written against "
                 f"{short(candidate.target.base_sha256)}. The skill changed since the proposal "
-                "was made -- re-run `asi daily --commit` to validate against the new base."
+                "was made. To propose and validate against the new base, "
+                f"{repropose_advice(candidate.id)}."
             )
         verify_full_integrity(candidate, base_text=base_text, rubrics=rubrics, action="apply")
         approval.verify(expected_token=candidate.required_approval_token)
@@ -431,8 +446,8 @@ def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str =
         raise BaseHashMismatch(
             f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} "
             "holds a NUL character, which no file name can, so it cannot be read and the "
-            "recorded base hash and diff cannot be verified; re-run `asi daily --commit` to "
-            "propose against the configured tree."
+            "recorded base hash and diff cannot be verified. To propose against the configured "
+            f"tree, {repropose_advice(candidate.id)}."
         )
     try:
         return str(skill_store.read_text(path))
@@ -441,8 +456,8 @@ def read_live_base_text(skill_store: Any, candidate: Candidate, *, action: str =
             f"refusing to {action} {candidate.id}: its canonical target {named_path(path)} could "
             f"not be read ({why_unreadable(exc)}), so the recorded base hash and diff cannot be "
             "verified. If the skill root "
-            "was moved or re-pointed, the candidate describes a file at its old path; re-run "
-            "`asi daily --commit` to propose against the configured tree."
+            "was moved or re-pointed, the candidate describes a file at its old path. To propose "
+            f"against the configured tree, {repropose_advice(candidate.id)}."
         ) from exc
 
 
