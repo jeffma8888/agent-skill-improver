@@ -1477,10 +1477,11 @@ class FilesystemSkillStore:
         spelled in another case than discovery's (macOS) is so named none:
         measured (3.11 and 3.13), with the root configured as the alias,
         ``review`` was refused, the path being no skill document of any root.
-        Nor is one named when the judgments' discovery cannot finish: measured
-        (3.11 and 3.13), with another ``SKILL.md`` in the root a link to a file
-        in a directory this process cannot read, it raised ``PermissionError``,
-        and the link is refused without a spelling.
+        Nor is one named when the judgments cannot finish for an error of the
+        system: measured (3.11 and 3.13, before discovery passed over an entry
+        it cannot examine), with another ``SKILL.md`` in the root a link to a
+        file in a directory this process cannot read, their discovery raised
+        ``PermissionError``, and the link was refused without a spelling.
         """
         spelled = spelled if spelled.is_absolute() else spelled.absolute()
         for root in self._roots:
@@ -1521,7 +1522,7 @@ class FilesystemSkillStore:
                     except (NonDocumentWriteRefused, SelfMutationRefused, MirrorEditRefused):
                         as_spelled = None
                     except OSError:
-                        # Discovery that cannot finish names no spelling, and
+                        # Judgments that cannot finish name no spelling, and
                         # the link is refused as it is without one.
                         as_spelled = None
                 raise LinkedTargetRefused(
@@ -1830,19 +1831,39 @@ class FilesystemSkillStore:
             # A path the system will not take is passed over by its length, as a
             # copy of the skill it would be: the listing that found it holds
             # names only, and this ``lstat`` is the first call on the whole path.
-            # Any other refusal of it is raised as before.
+            # Any other refusal of it is passed over too, with the system's
+            # words: an entry in a directory this process may list but not
+            # search. Measured before (3.11 and 3.13): one such entry anywhere
+            # in a root, or a link named like a document to a file in a
+            # directory this process cannot read, ended ``doctor``, ``skills``,
+            # ``review``, ``apply`` and ``daily`` alike with exit 70 and a
+            # PermissionError traceback from here.
             try:
                 is_link = candidate.is_symlink()
             except OSError as exc:
-                if exc.errno != errno.ENAMETOOLONG:
-                    raise
+                if exc.errno == errno.ENAMETOOLONG:
+                    skip(
+                        candidate,
+                        f"a path of {len(os.fsencode(str(candidate)))} bytes, longer than this "
+                        f"system opens ({exc.strerror})",
+                    )
+                else:
+                    skip(
+                        candidate,
+                        f"an entry this process cannot examine ({exc.strerror or exc})",
+                    )
+                continue
+            # ``exists()`` is false for a dangling link or a loop, and raises for
+            # a target this process may not reach.
+            try:
+                reached = not is_link or candidate.exists()
+            except OSError as exc:
                 skip(
                     candidate,
-                    f"a path of {len(os.fsencode(str(candidate)))} bytes, longer than this "
-                    f"system opens ({exc.strerror})",
+                    f"a symlink whose target this process cannot reach ({exc.strerror or exc})",
                 )
                 continue
-            if is_link and not candidate.exists():
+            if not reached:
                 skip(candidate, "a symlink whose target does not exist or cannot be reached")
                 continue
             try:

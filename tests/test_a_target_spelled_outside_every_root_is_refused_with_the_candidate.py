@@ -24,12 +24,13 @@ target check's later judgments take what the path resolves to
 path that gives none, through a link no spelling of the root lies ahead of, is
 given no such advice, and nor is one those judgments refuse, since so
 configured the root's path is refused by them in turn, or one whose
-judgments' discovery cannot finish.
+judgments cannot finish for an error of the system.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -470,16 +471,16 @@ class TheAdviceIsGivenOnlyWhereTheLaterJudgmentsTakeThePathTests(unittest.TestCa
             self.assertIn("it is not a skill document in any configured root", said)
 
     @unittest.skipIf(os.geteuid() == 0, "a directory of mode 000 is read by root")
-    def test_a_path_through_an_alias_names_none_where_discovery_cannot_finish(self) -> None:
+    def test_a_path_through_an_alias_names_it_past_an_entry_discovery_passes_over(self) -> None:
         # Another SKILL.md in the root, a link to a file in a directory this
-        # process cannot read: the judgments' discovery raises PermissionError,
-        # and the link is refused as it is, without a spelling.
+        # process cannot read: discovery passes it over with why (before c226
+        # it raised PermissionError and no spelling was named), the judgments
+        # take the path, and so configured the candidate is reviewed.
         with tempfile.TemporaryDirectory() as tmp:
             case = _Moved(Path(tmp), moved=False)
             alias = case.root.with_name("skills-alias")
             alias.symlink_to(case.root, target_is_directory=True)
-            spelled = alias / case.skill.parent.name / "SKILL.md"
-            case.respell(spelled)
+            case.respell(alias / case.skill.parent.name / "SKILL.md")
             hidden = case.base / "hidden"
             hidden.mkdir()
             (hidden / "notes").write_text("text", encoding="utf-8")
@@ -487,9 +488,34 @@ class TheAdviceIsGivenOnlyWhereTheLaterJudgmentsTakeThePathTests(unittest.TestCa
             (case.root / "bad" / "SKILL.md").symlink_to(hidden / "notes")
             hidden.chmod(0)
             try:
-                self.refused_with_no_root_named(case, spelled, "canonical")
+                rc, said = case.review()
+                self.assertEqual(rc, REFUSED, said)
+                self.assertTrue(
+                    said.endswith(f"through it. {how_to_close(case.cid, alias)}\n"), said
+                )
+                case.configure_root_as(alias)
+                rc, shown = case.review()
+                self.assertEqual(rc, 0, shown)
+                self.assertRegex(shown, r"--approve \S+")
             finally:
                 hidden.chmod(0o700)
+
+    def test_a_path_through_an_alias_names_none_where_the_judgments_cannot_finish(self) -> None:
+        # No entry a walk meets stops discovery now, so the judgments' reading
+        # of the inventory is refused in its place: an error of the system
+        # from them names no spelling, and the link is refused as it is.
+        with tempfile.TemporaryDirectory() as tmp:
+            case = _Moved(Path(tmp), moved=False)
+            alias = case.root.with_name("skills-alias")
+            alias.symlink_to(case.root, target_is_directory=True)
+            spelled = alias / case.skill.parent.name / "SKILL.md"
+            case.respell(spelled)
+            refused = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(case.root))
+            with mock.patch.object(
+                skill_fs.FilesystemSkillStore, "assert_canonical_target", side_effect=refused
+            ) as judged:
+                self.refused_with_no_root_named(case, spelled, "canonical")
+            self.assertEqual(judged.call_count, 1, "asked once, by the advice")
 
 
 class TheOutsideNeighbouringPathsTests(unittest.TestCase):

@@ -104,10 +104,12 @@ class ASkillPathLongerThanTheSystemOpensTests(unittest.TestCase):
         self.assertIn(" 0 passed over", doctor.stdout)
         self.assertNotIn("longer than this system opens", doctor.stdout)
 
-    def test_any_other_refusal_of_that_call_is_raised_as_before(self):
+    def test_any_other_refusal_of_that_call_is_not_taken_for_a_length(self):
         # Only ``File name too long`` is a length. A document the system
         # refuses for another reason, here permission on the way to it, is not
-        # passed over as a long one.
+        # passed over as a long one but in the system's words, as an entry
+        # discovery cannot examine (test_an_entry_discovery_cannot_examine_is_
+        # passed_over_with_why); before c226 it was raised.
         config = load_config(self.config_path)
         store = FilesystemSkillStore(
             config.skill_roots, read_only=True, protected_paths=config.protected_paths
@@ -122,9 +124,21 @@ class ASkillPathLongerThanTheSystemOpensTests(unittest.TestCase):
             return real(path)
 
         with mock.patch.object(Path, "is_symlink", is_symlink):
-            with self.assertRaises(PermissionError):
-                store.known_skill_ids()
-        self.assertEqual(len(refused), 1, "refused once, at the call this change wraps")
+            known = store.known_skill_ids()
+        # Once for each root's copy, at the call this change wraps: the walk
+        # goes on past the first.
+        self.assertEqual(len(refused), 2, refused)
+        self.assertEqual(len(set(refused)), 2, refused)
+        self.assertNotIn("tdd", known)
+        self.assertEqual(
+            sorted(
+                (d.path, d.skill_id, d.reason) for d in store.passed_over() if d.path in refused
+            ),
+            sorted(
+                (path, "tdd", "an entry this process cannot examine (Permission denied)")
+                for path in refused
+            ),
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
