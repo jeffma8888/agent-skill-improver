@@ -26,7 +26,7 @@ import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Callable, Iterable, Literal, Sequence
 
 from ..domain.integrity import repropose_advice
 from ..domain.redaction import named_path, quoted_value, why_unreadable
@@ -447,8 +447,8 @@ def spelled_outside_every_root(
     it deleted the next day ran. With the root and the config put back,
     ``review`` and ``apply`` with the same token took it. With the candidate,
     the refusal now names it, for the command that asked, and says how it is
-    closed; without one (``rollback``, and the write's own check) it is worded
-    as before. ``as_spelled`` is the root as the candidate's path spells it
+    closed; without one (``rollback``) it is worded as before, and the
+    write's own check is given it too. ``as_spelled`` is the root as the candidate's path spells it
     (``_root_as_spelled``), named as the spelling to configure when there is
     one and the target check's later judgments take what the candidate's path
     resolves to; a path with no such spelling (one that reaches the skill
@@ -531,7 +531,8 @@ def canonical_target_refused(
     it deleted the next day ran. With the change undone, ``review`` and
     ``apply`` with the same token took it. With the candidate, the refusal now
     names it, for the command that asked, and says how it is closed; without
-    one (``rollback``, and the write's own check) it is worded as before.
+    one (``rollback``) it is worded as before; the write's own check is
+    given it too.
 
     ``renamed`` is a target that is the canonical copy's file under another
     name (``_canonical_copy_opened_by``): that file already is the canonical
@@ -904,7 +905,7 @@ class FilesystemSkillStore:
         text: str,
         *,
         expected_sha256: str,
-        backup_dir: Path,
+        backup_dir: Path | Callable[[], Path],
         skill_id: str = "",
         actor: str = "human",
         candidate_id: str = "",
@@ -913,7 +914,19 @@ class FilesystemSkillStore:
 
         ``candidate_id`` names the candidate ``apply`` is writing, so a file that
         changed after ``apply`` checked it is refused with that candidate and the
-        advice ``apply``'s own check gives (see ``changed_before_the_write``).
+        advice ``apply``'s own check gives (see ``changed_before_the_write``), and
+        so is a target its own target check refuses. Measured before (3.11 and
+        3.13, a validated candidate, then a second copy of the skill made in the
+        editable root, or the skill removed, at the step ``apply`` takes after
+        its own check): ``apply`` exited 3 with "refusing to write <path>: ...",
+        which named no candidate and no way to close it, where its own check,
+        given the same target a step earlier, names both.
+
+        ``backup_dir`` is the directory the copy goes in, or the call that
+        makes it, which is made only once the target, its read and its hash
+        have passed, as the backup is taken: ``apply`` gives the call, so a
+        write refused before that leaves no directory behind, and a refusal
+        of the making itself comes after the write's own.
         """
         if self.read_only:
             raise ReadOnlyViolation(
@@ -922,7 +935,9 @@ class FilesystemSkillStore:
                 "opens it writable."
             )
         # Every judgement of the target, made where ``review`` makes it too.
-        target = self.assert_write_target(Path(path), action="write", skill_id=skill_id)
+        target = self.assert_write_target(
+            Path(path), action="write", skill_id=skill_id, candidate_id=candidate_id
+        )
         if not target.exists():
             raise BaseHashMismatch(f"refusing to write {named_path(target)}: file does not exist")
         # From here on the document is addressed through a handle on its own
@@ -951,7 +966,7 @@ class FilesystemSkillStore:
             # verification read then failed and apply reported "Nothing was
             # touched" with the text already changed and no manifest written.
             written_mode = target_mode | stat.S_IRUSR
-            backup_dir = Path(backup_dir)
+            backup_dir = Path(backup_dir() if callable(backup_dir) else backup_dir)
             backup_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(backup_dir, 0o700)
             backup_path = backup_dir / f"{target.name}.bak"
@@ -1538,8 +1553,9 @@ class FilesystemSkillStore:
         judged, each with ``lstat`` semantics. Shared by the write and the
         rollback, which are the two places a skill file is ever replaced.
         ``candidate_id`` is the candidate ``review`` or ``apply`` is judging,
-        which both its refusals name; ``rollback`` and the write's own check
-        pass none, and keep the words that name no candidate. ``skill_id`` is
+        which both its refusals name, and which the write's own check passes
+        too; ``rollback`` passes none, and keeps the words that name no
+        candidate. ``skill_id`` is
         the skill the candidate's record names, for the target check's later
         judgments, which a target spelled outside every root is given to
         (``_assert_resolved_target``) before a spelling of the root is named
@@ -1755,8 +1771,8 @@ class FilesystemSkillStore:
 
         ``candidate_id`` is the candidate ``review`` or ``apply`` is judging,
         which ``canonical_target_refused`` names in each refusal here;
-        ``rollback`` and the write's own check pass none, and keep the words
-        that name no candidate.
+        and which the write's own check passes too; ``rollback`` passes none,
+        and keeps the words that name no candidate.
         """
         resolved = Path(target).resolve()
         groups = self.groups(refresh=True)

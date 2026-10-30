@@ -15,7 +15,9 @@ and with the record deleted the next day ran. With the change undone,
 ``review`` and ``apply`` with the same token took it.
 ``canonical_target_refused`` now words the refusal with the candidate, for
 the command that asked, and says how it is closed; without a candidate
-(``rollback``, and the write's own check) the words are as before.
+(``rollback``, or a write given none) the words are as before. ``apply``
+gives its write's own check the candidate too, since the change of the row
+"A refusal at the write names the candidate and leaves no backup directory".
 """
 
 from __future__ import annotations
@@ -271,13 +273,15 @@ class TheCanonicalNeighbouringPathsTests(unittest.TestCase):
             self.assertNotIn("max_open_candidates", said)
             self.assertEqual(case.skill.read_bytes(), written)
 
-    def test_a_second_copy_made_after_applys_own_check_is_refused_by_the_write_as_before(
+    def test_a_second_copy_made_after_applys_own_check_is_refused_by_the_write_with_the_candidate(
         self,
     ) -> None:
-        # The write's own target check is not given the candidate: a second
-        # copy made after `apply` judged the target, and before its write, is
-        # refused in the old words, and the backup directory `apply` made for
-        # the write is left behind, empty.
+        # The write's own target check is given the candidate: a second copy
+        # made after `apply` judged the target, and before its write, is refused
+        # in the words `apply`'s own check gives, and `apply` leaves no backup
+        # directory, which the write makes only as it takes its backup.
+        # Measured before: the old words, naming no candidate, and the
+        # directory left behind, empty.
         with tempfile.TemporaryDirectory() as tmp:
             case = _NoLongerCanonical(Path(tmp))
             before = case.skill.read_bytes()
@@ -295,17 +299,21 @@ class TheCanonicalNeighbouringPathsTests(unittest.TestCase):
             self.assertEqual(rc, REFUSED, said)
             self.assertTrue(
                 said.startswith(
-                    f"MirrorEditRefused: refusing to write {case.skill}: skill 'tdd' has no "
-                    "canonical copy"
+                    f"MirrorEditRefused: refusing to apply {case.cid} at {case.skill}: skill 'tdd' "
+                    "has no canonical copy"
                 ),
                 said,
             )
-            self.assertNotIn(case.cid, said)
+            self.assertIn(f"to close it, delete its record ({case.cid}.json", said)
             self.assertEqual(case.skill.read_bytes(), before)
             record = json.loads(case.record_file.read_text(encoding="utf-8"))
             self.assertEqual(record["status"], "validated")
-            (backup,) = sorted(case.state.glob("backups/*"))
-            self.assertEqual(list(backup.iterdir()), [])
+            self.assertEqual(sorted(case.state.glob("backups/*")), [])
+            case.undo()
+            rc, said = case.apply()
+            self.assertEqual(rc, 0, said)
+            record = json.loads(case.record_file.read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "applied")
 
     def test_an_apply_finishing_an_earlier_write_is_recorded_past_a_second_copy(self) -> None:
         # The words are of `review` and a first `apply`: an apply stopped after

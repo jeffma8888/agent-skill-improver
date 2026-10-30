@@ -1264,7 +1264,7 @@ class StateStore:
         path = self.action_receipt_path(action, candidate_id)
         return self._persist(path, lambda: write_json(path, payload))
 
-    def backup_dir_for(self, candidate_id: str, stamp: str) -> Path:
+    def backup_dir_for(self, candidate_id: str, stamp: str, *, make: bool = True) -> Path:
         """A per-apply backup directory, created only as a direct child.
 
         The name is dynamic, so an attacker who can write into ``backups/`` can
@@ -1272,6 +1272,15 @@ class StateStore:
         such a link without complaint, and the chmod and the backup copy then
         land outside the state tree, so the entry is proven to be a real direct
         child before either happens.
+
+        With ``make=False`` it is refused for each reason it is refused before
+        it is made, and it is not made (the state and backups directories are
+        checked, made if missing and given their modes first, as ever):
+        ``apply`` asks so where it made the directory before, so those refusals
+        come where they came, and the write makes it only as it takes its
+        backup, where a refusal of the making itself now comes. Measured before
+        (3.11 and 3.13), with ``apply`` making it there: each refusal at the
+        write left it behind, empty.
         """
         self._refuse_promotion_when_withholding("backup")
         stem = safe_name(stamp)
@@ -1280,9 +1289,11 @@ class StateStore:
             # at the last ``--`` (see ``latest_backup_manifest``); a stamp that
             # carried one would make the directory look like another candidate's.
             raise ValueError(f"backup stamp {stamp!r} must not contain '--'")
-        return _ensure_child_dir(
-            self.dir("backups"), f"{validate_candidate_id(candidate_id)}--{stem}", self.root
-        )
+        backups = self.dir("backups")
+        name = f"{validate_candidate_id(candidate_id)}--{stem}"
+        if not make:
+            return _judge_child_dir(backups, name, self.root)
+        return _ensure_child_dir(backups, name, self.root)
 
     def latest_backup_manifest(self, candidate_id: str) -> Path | None:
         """The newest ``backup.json`` written by an apply of exactly this candidate.
@@ -1708,13 +1719,8 @@ def _refuse_unless_real_dir(path: Path, root: Path) -> None:
     )
 
 
-def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
-    """Create ``parent/name``, having proven it is a real direct child.
-
-    ``parent`` is a mandatory state directory the caller has already verified.
-    ``name`` must be one path component, the entry must not be a symlink, and
-    the created directory's parent must still be ``parent`` afterwards.
-    """
+def _judge_child_dir(parent: Path, name: str, root: Path) -> Path:
+    """``parent/name``, refused for each reason ``_ensure_child_dir`` refuses it before making it."""
     if name in ("", ".", "..") or name != Path(name).name:
         raise SafetyRefusal(
             f"refusing to create the state directory {name!r} under {_shown(parent)}: "
@@ -1723,6 +1729,17 @@ def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
         )
     path = parent / name
     _refuse_unless_real_dir(path, root)
+    return path
+
+
+def _ensure_child_dir(parent: Path, name: str, root: Path) -> Path:
+    """Create ``parent/name``, having proven it is a real direct child.
+
+    ``parent`` is a mandatory state directory the caller has already verified.
+    ``name`` must be one path component, the entry must not be a symlink, and
+    the created directory's parent must still be ``parent`` afterwards.
+    """
+    path = _judge_child_dir(parent, name, root)
     _mkdir_or_refuse(path, root)
     _chmod_to(path, DIR_MODE)
     if path.is_symlink() or not path.is_dir() or path.parent.resolve() != parent.resolve():

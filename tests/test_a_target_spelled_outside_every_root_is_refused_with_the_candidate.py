@@ -17,7 +17,9 @@ next day stood down on it, and with the record deleted the next day ran. With
 the change undone, ``review`` and ``apply`` with the same token took it.
 ``spelled_outside_every_root`` now words the refusal with the candidate, for
 the command that asked, and says how it is closed; without a candidate
-(``rollback``, and the write's own check) the words are as before. When the
+(``rollback``, or a write given none) the words are as before; ``apply``
+gives its write's own check the candidate too, since the change of the row
+"A refusal at the write names the candidate and leaves no backup directory". When the
 candidate's path gives a spelling of the root (``_root_as_spelled``), and the
 target check's later judgments take what the path resolves to
 (``_assert_resolved_target``), the refusal names it as the one to configure; a
@@ -541,14 +543,16 @@ class TheOutsideNeighbouringPathsTests(unittest.TestCase):
                 (case.main / case.skill.parent.name / "SKILL.md").read_bytes(), written
             )
 
-    def test_a_root_re_pointed_after_applys_own_check_is_refused_by_the_write_as_before(
+    def test_a_root_re_pointed_after_applys_own_check_is_refused_by_the_write_with_the_candidate(
         self,
     ) -> None:
-        # The write's own target check is not given the candidate: a root
+        # The write's own target check is given the candidate: a root
         # configured as a link, re-pointed after `apply` judged the target and
         # before its write (the folder the record spells left as a link to the
-        # new place), is refused in the old words, and the backup directory
-        # `apply` made for the write is left behind, empty.
+        # new place), is refused in the words `apply`'s own check gives, and
+        # `apply` leaves no backup directory, which the write makes only as it
+        # takes its backup. Measured before: the old words, naming no
+        # candidate ("Nothing was touched"), and the directory left behind, empty.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             config = build_env(base / "env", seed="c225")
@@ -588,18 +592,28 @@ class TheOutsideNeighbouringPathsTests(unittest.TestCase):
             self.assertEqual(rc, REFUSED, said)
             self.assertTrue(
                 said.startswith(
-                    f"LinkedTargetRefused: refusing to replace {skill}: it is not spelled under "
-                    "any configured skill root yet resolves to "
+                    f"LinkedTargetRefused: refusing to apply {cid}: its canonical target {skill} "
+                    "is not spelled under any configured skill root, yet resolves to "
                 ),
                 said,
             )
-            self.assertIn("Spell the target as the root does.", said)
-            self.assertNotIn(cid, said)
+            advised = first.parent.resolve() / first.name
+            self.assertIn(
+                f"If root canonical is meant to be configured as {advised}, as the candidate's "
+                "path spells it, configure it so",
+                said,
+            )
             self.assertEqual((second / skill.parent.name / "SKILL.md").read_bytes(), before)
             record = json.loads(record_file.read_text(encoding="utf-8"))
             self.assertEqual(record["status"], "validated")
-            (backup,) = sorted(state.glob("backups/*"))
-            self.assertEqual(list(backup.iterdir()), [])
+            self.assertEqual(sorted(state.glob("backups/*")), [])
+            text = config.read_text(encoding="utf-8")
+            self.assertEqual(text.count(f'"{root}"'), 1)
+            config.write_text(text.replace(f'"{root}"', f'"{advised}"'), encoding="utf-8")
+            rc, said = run(config, "apply", cid, "--approve", found.group(1), "--i-reviewed-this")
+            self.assertEqual(rc, 0, said)
+            record = json.loads(record_file.read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "applied")
 
     def test_an_apply_finishing_an_earlier_write_is_recorded_past_a_moved_root(self) -> None:
         # The words say `apply` does not write through the link, not that the

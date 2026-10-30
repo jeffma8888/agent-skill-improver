@@ -302,12 +302,22 @@ def apply_candidate(
         # write, with no account of the apply on disk.
         _refuse_unwritable_receipt(state, "apply", candidate)
         stamp = iso(clock.now()).replace(":", "").replace("-", "")
-        backup_dir = state.backup_dir_for(candidate.id, stamp)
+        # Judged here, where it was made before, so each refusal of it comes
+        # where it came; the write makes it only as it takes its backup, after
+        # its own target check, its read and the hash check, so a refusal of
+        # the making itself (the mkdir failing, or the directory found not a
+        # real one after it) comes there now, after any refusal of those.
+        # Measured before, with it made here: each refusal at the write left
+        # it behind, empty.
+        # Earlier versions of this change made it here and removed it when the
+        # write refused; each, by its independent review, removed or made a
+        # directory outside the state tree in some window of that removal.
+        state.backup_dir_for(candidate.id, stamp, make=False)
         receipt = skill_store.write_canonical(
             candidate.target.canonical_path,
             candidate.patch.new_text,
             expected_sha256=candidate.target.base_sha256,
-            backup_dir=backup_dir,
+            backup_dir=lambda: state.backup_dir_for(candidate.id, stamp),
             skill_id=candidate.target.skill_id,
             actor=f"human:{operator or 'unspecified'}",
             candidate_id=candidate.id,
