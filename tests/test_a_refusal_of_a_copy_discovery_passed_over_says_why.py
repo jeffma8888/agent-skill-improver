@@ -311,10 +311,17 @@ class EachCommandSaysWhyTests(unittest.TestCase):
                     undo()
                 self.assertEqual(proc.returncode, RC_REFUSED, proc.stderr)
                 self.assertEqual(proc.stderr.count("\n"), 1, proc.stderr)
+                # ``review`` and ``apply`` name the candidate they refuse;
+                # ``rollback`` is worded as before.
+                refused = {
+                    "review": f"review {self.cid} at",
+                    "write": f"apply {self.cid} at",
+                    "roll back": "roll back",
+                }[action]
                 self.assertTrue(
                     proc.stderr.startswith(
-                        f"MirrorEditRefused: refusing to {action} {self.nested / SKILL_FILENAME}: "
-                        f"discovery passed over {expected}"
+                        f"MirrorEditRefused: refusing to {refused} "
+                        f"{self.nested / SKILL_FILENAME}: discovery passed over {expected}"
                     ),
                     proc.stderr,
                 )

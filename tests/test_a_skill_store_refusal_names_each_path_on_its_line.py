@@ -59,7 +59,10 @@ NAMERS = frozenset({"named_path", "quoted_value"})
 #: content; an OS error's number and words, without the file name it carries);
 #: and, in the functions a ``raise`` takes its words from, the command that
 #: asked ("review" or "apply", fixed there), the candidate's id, a fixed phrase
-#: (``itself``) and ``repropose_advice``'s words, which hold the id and no path.
+#: (``itself``) and ``repropose_advice``'s words, which hold the id and no path;
+#: and the reason the target check gives ``canonical_target_refused`` (``why``),
+#: written at each ``raise`` that calls it, where each value it interpolates is
+#: read here (``test_the_reason_a_target_is_refused_for_is_written_at_the_raise``).
 NOT_PATHS = frozenset(
     {
         "verb",
@@ -80,6 +83,7 @@ NOT_PATHS = frozenset(
         "candidate_id",
         "itself",
         "repropose_advice(candidate_id)",
+        "why",
     }
 )
 #: The paths the refusals name, each through ``named_path``: bare when it reads
@@ -101,8 +105,10 @@ PATH_NAMES = (
 #: A short hash, as each hash refusal shows one.
 SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: How many paths the refusals name through ``named_path`` at this change,
-#: counting the module functions a ``raise`` takes its words from.
-NAMED_AT_THIS_CHANGE = 76
+#: counting the module functions a ``raise`` takes its words from. Four
+#: refusals of the target check named their target each; they now name it in
+#: ``canonical_target_refused``, twice, so the count fell from 76 by two.
+NAMED_AT_THIS_CHANGE = 74
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:
@@ -178,6 +184,40 @@ class EveryPathARefusalNamesIsNamedTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(f"named_path({path})", named)
                 self.assertNotIn(path, NOT_PATHS)
+
+    def test_the_reason_a_target_is_refused_for_is_written_at_the_raise(self) -> None:
+        """``why`` is let through as it is only because it is written where it is read.
+
+        Each call of ``canonical_target_refused`` passes its reason as words
+        written there (a literal or an f-string), inside the ``raise``, so
+        each value they interpolate is held by the tests above; a reason held
+        in a variable would carry values neither test reads.
+        """
+        tree = ast.parse(SKILL_FS.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "canonical_target_refused"
+        ]
+        inside_a_raise = {
+            id(sub)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Raise) and node.exc is not None
+            for sub in ast.walk(node.exc)
+        }
+        self.assertEqual(len(calls), 4)
+        for call in calls:
+            with self.subTest(line=call.lineno):
+                self.assertIn(id(call), inside_a_raise)
+                self.assertGreaterEqual(len(call.args), 2)
+                why = call.args[1]
+                self.assertTrue(
+                    isinstance(why, ast.JoinedStr)
+                    or (isinstance(why, ast.Constant) and isinstance(why.value, str)),
+                    ast.unparse(why),
+                )
 
 
 class TheInventoryNamesEachCopyItListsTests(unittest.TestCase):

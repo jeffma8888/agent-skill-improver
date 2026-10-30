@@ -424,6 +424,35 @@ def reached_through_a_link(spelled: Path, cursor: Path, candidate_id: str, verb:
     )
 
 
+def canonical_target_refused(target: Path, why: str, candidate_id: str, action: str) -> str:
+    """The refusal of a target that is not the canonical copy of its skill, for ``why``.
+
+    ``review`` and ``apply`` ask it through the target check, so a candidate
+    whose skill gained a second copy, whose root became a mirror, or whose
+    root was re-pointed after it was validated is refused here. Measured
+    before (3.11 and 3.13): ``review`` and ``apply`` each exited 3 with
+    ``MirrorEditRefused`` "refusing to review <path>: ..." and "refusing to
+    write <path>: ...", which named no candidate and no way to close it. The
+    record stayed ``validated``, so it stayed open: with
+    ``[caps].max_open_candidates`` at 1 the next day stood down on it, and with
+    it deleted the next day ran. With the change undone, ``review`` and
+    ``apply`` with the same token took it. With the candidate, the refusal now
+    names it, for the command that asked, and says how it is closed; without
+    one (``rollback``, and the write's own check) it is worded as before.
+    """
+    if not candidate_id:
+        return f"refusing to {action} {named_path(target)}: {why}"
+    command = "review" if action == "review" else "apply"
+    return (
+        f"refusing to {command} {candidate_id} at {named_path(target)}: {why} The file and "
+        "the candidate are unchanged. The candidate stays open, and counts against "
+        "[caps].max_open_candidates, until it is closed: to close it, delete its record "
+        f"({candidate_id}.json in the state directory's candidates/). If that file is meant "
+        "to be the skill's canonical copy, make it that again: while it holds the text the "
+        "candidate was written against, `review` and `apply` take the candidate as before."
+    )
+
+
 class FilesystemSkillStore:
     """Discovers and (only when explicitly writable) edits skill files."""
 
@@ -1234,8 +1263,9 @@ class FilesystemSkillStore:
         reviewed and written, the list being read only when a proposal is
         made. ``skill_id`` is the skill the caller's
         record names, and ``candidate_id`` the candidate ``review`` or ``apply``
-        is judging, which the refusal of a listed skill (``listed_as_protected``)
-        and of a link below the root (``reached_through_a_link``) name.
+        is judging, which the refusal of a listed skill (``listed_as_protected``),
+        of a link below the root (``reached_through_a_link``) and of a target
+        that is not the canonical copy (``canonical_target_refused``) name.
         Returns the target as the write addresses it: resolved when it exists.
         """
         replace = "replace" if action == "write" else action
@@ -1252,7 +1282,7 @@ class FilesystemSkillStore:
         target = Path(path).resolve() if Path(path).exists() else Path(path)
         self._assert_document(target, verb=write)
         self._assert_not_protected(target, verb=write)
-        group = self.assert_canonical_target(target, action=action)
+        group = self.assert_canonical_target(target, action=action, candidate_id=candidate_id)
         self._assert_not_a_protected_skill(
             target, group, skill_id, verb=write, candidate_id=candidate_id
         )
@@ -1496,7 +1526,9 @@ class FilesystemSkillStore:
             os.close(fd)
         return b"".join(chunks), stat.S_IMODE(info.st_mode)
 
-    def assert_canonical_target(self, target: Path, *, action: str) -> SkillGroup | None:
+    def assert_canonical_target(
+        self, target: Path, *, action: str, candidate_id: str = ""
+    ) -> SkillGroup | None:
         """Refuse a mirror copy, and refuse anything we cannot identify at all.
 
         Resolution happens HERE because this is the adapter layer; the domain
@@ -1514,6 +1546,11 @@ class FilesystemSkillStore:
         before: with the canonical root re-pointed at a copy of the tree, the
         old file still on disk outside every root, ``review`` printed a token
         and an apply command, and ``apply`` refused the unrecognised target.
+
+        ``candidate_id`` is the candidate ``review`` or ``apply`` is judging,
+        which ``canonical_target_refused`` names in each refusal here;
+        ``rollback`` and the write's own check pass none, and keep the words
+        that name no candidate.
         """
         resolved = Path(target).resolve()
         kind, group = classify_target(self.groups(refresh=True), resolved)
@@ -1522,15 +1559,26 @@ class FilesystemSkillStore:
             # mirror, but calling it one, of an unknown source, misdescribes
             # it: the resolver's own reason says what is unsettled.
             raise MirrorEditRefused(
-                f"refusing to {action} {named_path(target)}: skill {quoted_value(group.skill_id)} has no canonical copy "
-                f"({group.canonical_reason}); that must be settled before anything is written."
+                canonical_target_refused(
+                    target,
+                    f"skill {quoted_value(group.skill_id)} has no canonical copy "
+                    f"({group.canonical_reason}); that must be settled before anything is "
+                    "written.",
+                    candidate_id,
+                    action,
+                )
             )
         if kind == "mirror":
             canonical = group.canonical.path if group and group.canonical else "<unknown>"
             raise MirrorEditRefused(
-                f"refusing to {action} {named_path(target)}: it is a mirror copy. The canonical source is "
-                f"{named_path(canonical)}. Editing a mirror either gets overwritten by the next sync or "
-                "never reaches the agent that loads the canonical file."
+                canonical_target_refused(
+                    target,
+                    f"it is a mirror copy. The canonical source is {named_path(canonical)}. "
+                    "Editing a mirror either gets overwritten by the next sync or never reaches "
+                    "the agent that loads the canonical file.",
+                    candidate_id,
+                    action,
+                )
             )
         if kind == "unknown":
             # Discovery says why it did not take a copy it saw; the refusal
@@ -1542,15 +1590,25 @@ class FilesystemSkillStore:
             passed = self._passed_over_on_the_way(target, resolved)
             if passed is not None:
                 raise MirrorEditRefused(
-                    f"refusing to {action} {named_path(target)}: discovery passed over "
-                    f"{named_path(passed.path)}, which is {passed.reason}, so it is not a skill "
-                    "document in any configured root and this tool cannot tell whether it is "
-                    "canonical. An unrecognised target is refused rather than assumed safe."
+                    canonical_target_refused(
+                        target,
+                        f"discovery passed over {named_path(passed.path)}, which is "
+                        f"{passed.reason}, so it is not a skill document in any configured root "
+                        "and this tool cannot tell whether it is canonical. An unrecognised "
+                        "target is refused rather than assumed safe.",
+                        candidate_id,
+                        action,
+                    )
                 )
             raise MirrorEditRefused(
-                f"refusing to {action} {named_path(target)}: it is not a skill document in any configured "
-                "root, so this tool cannot tell whether it is canonical. An unrecognised "
-                "target is refused rather than assumed safe."
+                canonical_target_refused(
+                    target,
+                    "it is not a skill document in any configured root, so this tool cannot "
+                    "tell whether it is canonical. An unrecognised target is refused rather than "
+                    "assumed safe.",
+                    candidate_id,
+                    action,
+                )
             )
         return group
 

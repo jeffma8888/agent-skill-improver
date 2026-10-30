@@ -1413,7 +1413,7 @@ class ReviewAsksTheQuestionTheWriteWillAskTests(unittest.TestCase):
             with self.subTest(json=bool(extra)):
                 proc = self._review(*extra)
                 self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
-                self.assertIn(f"refusing to review {self.old_file}", proc.stderr)
+                self.assertIn(f"refusing to review {self.cid} at {self.old_file}", proc.stderr)
                 self.assertIn("not a skill document in any configured root", proc.stderr)
                 self.assertNotIn("--approve", proc.stdout + proc.stderr)
                 self.assertNotIn("approval_token", proc.stdout)
@@ -1421,7 +1421,7 @@ class ReviewAsksTheQuestionTheWriteWillAskTests(unittest.TestCase):
         # answers it in its own voice: the write refuses, by the same rule.
         applied = run_cli([*self.cfg, "apply", self.cid, "--approve", token, "--i-reviewed-this"])
         self.assertEqual(applied.returncode, RC_REFUSED, applied.stderr)
-        self.assertIn(f"refusing to write {self.old_file}", applied.stderr)
+        self.assertIn(f"refusing to apply {self.cid} at {self.old_file}", applied.stderr)
         self.assertIn("not a skill document in any configured root", applied.stderr)
         self.assertEqual(sha256_file(self.old_file), self.before, "nothing written anywhere")
         self.assertEqual(
@@ -1437,7 +1437,8 @@ class ReviewAsksTheQuestionTheWriteWillAskTests(unittest.TestCase):
         proc = self._review()
         self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
         self.assertIn(
-            f"refusing to review {self.old_file}: skill 'tdd' has no canonical copy", proc.stderr
+            f"refusing to review {self.cid} at {self.old_file}: skill 'tdd' has no canonical copy",
+            proc.stderr,
         )
         self.assertIn("holds 2 copies of this skill", proc.stderr)
         self.assertIn("that must be settled before anything is written", proc.stderr)
@@ -1473,7 +1474,9 @@ class ReviewAsksTheQuestionTheWriteWillAskTests(unittest.TestCase):
         self.config_path.write_text(swapped, encoding="utf-8")
         proc = self._review()
         self.assertEqual(proc.returncode, RC_REFUSED, proc.stdout + proc.stderr)
-        self.assertIn(f"refusing to review {self.old_file}: it is a mirror copy", proc.stderr)
+        self.assertIn(
+            f"refusing to review {self.cid} at {self.old_file}: it is a mirror copy", proc.stderr
+        )
         self.assertIn(str(self.base / "skills-mirror" / "tdd" / "SKILL.md"), proc.stderr)
         self.assertNotIn("--approve", proc.stdout)
 
