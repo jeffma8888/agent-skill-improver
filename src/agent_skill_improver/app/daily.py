@@ -389,8 +389,9 @@ def run_daily(
                 {s.skill_id for s in skill_store.snapshots() if s.payload_files}
             ),
             "executable_payload_files": sum(len(s.payload_files) for s in skill_store.snapshots()),
-            # Directories the payload inventory could not list, by skill: while
-            # this is non-empty the two counts above are a floor, not an inventory.
+            # Directories the payload inventory could not list, or listed but
+            # could not examine an entry of, by skill: while this is non-empty
+            # the two counts above are a floor, not an inventory.
             "skills_with_unlistable_directories": sorted(
                 {s.skill_id for s in skill_store.snapshots() if s.unlistable_dirs}
             ),

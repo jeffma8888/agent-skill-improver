@@ -541,8 +541,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"root {group.ambiguous_copies[0].root_id!r} ({listed}); `daily` refuses to "
                 "propose for it until one copy remains"
             )
-    # A directory inside a skill's directory that the inventory could not list:
-    # what it holds is unknown, so "carry executable payloads" below is a floor.
+    # A directory inside a skill's directory that the inventory could not list,
+    # or listed but could not examine an entry of: what it holds is unknown, so
+    # "carry executable payloads" below is a floor.
     for snapshot in snapshots:
         if snapshot.unlistable_dirs:
             listed = ", ".join(f"{d} ({e})" for d, e in snapshot.unlistable_dirs[:5])
@@ -550,7 +551,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"skill {snapshot.skill_id!r} in root {snapshot.root_id!r} has "
                 f"{len(snapshot.unlistable_dirs)} director"
                 f"{'y' if len(snapshot.unlistable_dirs) == 1 else 'ies'} the payload inventory "
-                f"could not list ({listed}); its payload count is a floor, not an inventory"
+                f"could not list or fully examine ({listed}); its payload count is a floor, not "
+                "an inventory"
             )
     state = _open_state(config)
 

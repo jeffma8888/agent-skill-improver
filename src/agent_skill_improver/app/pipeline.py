@@ -381,7 +381,7 @@ def propose_candidate(
             "ELEVATED REVIEW RISK: "
             f"{len(canonical.unlistable_dirs)} director"
             f"{'y' if len(canonical.unlistable_dirs) == 1 else 'ies'} in this skill's "
-            "directory could not be listed ("
+            "directory could not be listed or fully examined ("
             + ", ".join(f"{d} ({e})" for d, e in canonical.unlistable_dirs[:5])
             + (", ..." if len(canonical.unlistable_dirs) > 5 else "")
             + "), so whether executable payloads live there is unknown and the payload "

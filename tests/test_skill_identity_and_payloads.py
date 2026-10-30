@@ -274,7 +274,7 @@ class PayloadDetectionTests(Harness):
                 warnings = [w for w in snap.warnings if "could not be listed" in w]
                 self.assertEqual(len(warnings), 1, snap.warnings)
                 self.assertIn(
-                    "1 directory in this skill directory could not be listed "
+                    "1 directory in this skill directory could not be listed or fully examined "
                     "(scripts (Permission denied))",
                     warnings[0],
                 )

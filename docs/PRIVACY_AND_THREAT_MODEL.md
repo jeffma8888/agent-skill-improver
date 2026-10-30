@@ -244,7 +244,8 @@ What this repository does about it:
   a check on the extension of a caller-supplied string.
 - A proposal against a skill that carries payload files is annotated
   `ELEVATED REVIEW RISK` so a human reviewer knows the directory is more than
-  prose. A directory inside the skill's directory that the inventory could not list gets
+  prose. A directory inside the skill's directory that the inventory could not list,
+  or listed but could not search (mode 0o444: its names, and no entry examined), gets
   the same annotation, naming the directory and the error: what it holds is
   unknown, so the payload count is a floor, and a reviewer must not read the
   candidate as one for a documentation-only directory.

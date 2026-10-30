@@ -1960,7 +1960,7 @@ class FilesystemSkillStore:
         self, skill_dir: Path
     ) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
         """Enumerate executable payloads beside a skill document, and the
-        directories below it that could not be listed.
+        directories below it that could not be listed or fully examined.
 
         No shell: filenames containing literal backslashes, spaces or quotes
         are common in real skill trees and any shell-based scan mangles them
@@ -1970,9 +1970,25 @@ class FilesystemSkillStore:
         name) made the hook inside it vanish from the inventory, so the
         candidate lost its elevated-risk note and the receipt counted no
         payload. What such a directory holds is unknown; it is named instead.
+
+        A directory this process may list but not search (mode 0o444) gives
+        its names and nothing else: every ``lstat`` of an entry in it is
+        refused. Such a directory is named too, once, with the system's words,
+        and an entry whose name marks it a payload is still counted by that name
+        when the listing itself says it is a file or a link (the type the
+        directory read gives, asked without a ``stat``), as the examined path
+        counts such an entry. Where the listing gives no type (a file system
+        without ``d_type``) the answer needs the refused ``stat``: ``os.walk``
+        then files a directory among the files, and such an entry is not
+        counted, so the count stays a floor. Measured before (3.11 and 3.13, ``tdd``'s
+        ``scripts/`` at 0o444 holding ``hook.sh`` and an executable ``tool``):
+        the inventory said complete with no payload, ``doctor`` counted none
+        and warned of nothing, and the candidate carried no risk note; at mode
+        000 the same directory was named as one that could not be listed.
         """
         found: list[str] = []
         unlistable: list[tuple[str, str]] = []
+        unexamined: dict[str, str] = {}
 
         def could_not_list(error: OSError) -> None:
             where = Path(error.filename) if error.filename else skill_dir
@@ -1983,15 +1999,53 @@ class FilesystemSkillStore:
             unlistable.append((rel or ".", error.strerror or type(error).__name__))
 
         entries: list[Path] = []
+        listings: dict[Path, dict[str, os.DirEntry[str]]] = {}
+
+        def listed_as_file_or_link(entry: Path) -> bool:
+            # The type the listing gave, without a stat: a regular file or a
+            # link. With no type in the listing, or no second listing, the
+            # answer would need a stat this directory refuses, so it is no.
+            if entry.parent not in listings:
+                try:
+                    with os.scandir(entry.parent) as listing:
+                        listings[entry.parent] = {item.name: item for item in listing}
+                except OSError:
+                    listings[entry.parent] = {}
+            item = listings[entry.parent].get(entry.name)
+            if item is None:
+                return False
+            try:
+                return item.is_symlink() or item.is_file(follow_symlinks=False)
+            except OSError:
+                return False
+
         for dirpath, dirnames, filenames in os.walk(
             skill_dir, followlinks=False, onerror=could_not_list
         ):
             entries.extend(Path(dirpath) / name for name in (*dirnames, *filenames))
         entries.sort()
         for entry in entries:
+            if entry.name == SKILL_FILENAME:
+                continue
+            # An entry the listing names but this process cannot examine (its
+            # directory listed but not searched) is an unknown, not an absence:
+            # the directory is named, once, and a file or link named like a
+            # payload is counted by its name, when the listing gave its type.
             try:
-                if entry.name == SKILL_FILENAME:
-                    continue
+                entry.lstat()
+            except FileNotFoundError:
+                # Gone between the listing and this call: nothing is there.
+                continue
+            except OSError as exc:
+                where = entry.parent.relative_to(skill_dir).as_posix()
+                unexamined.setdefault(
+                    where,
+                    f"listed, but an entry in it could not be examined: {exc.strerror or exc}",
+                )
+                if is_payload_name(entry.name) and listed_as_file_or_link(entry):
+                    found.append(entry.relative_to(skill_dir).as_posix())
+                continue
+            try:
                 # A symlink is judged on its own name and on the mode of what it
                 # points to. Skipping links outright made a symlinked launcher
                 # invisible to the inventory, which is the cheapest way to put a
@@ -2013,6 +2067,7 @@ class FilesystemSkillStore:
                     found.append(rel)
             except (OSError, ValueError):
                 continue
+        unlistable.extend(unexamined.items())
         return tuple(found), tuple(unlistable)
 
     def _snapshot(self, root: SkillRoot, base: Path, skill_file: Path, raw: bytes) -> SkillSnapshot:
@@ -2061,7 +2116,7 @@ class FilesystemSkillStore:
         if unlistable:
             warnings = warnings + [
                 f"{len(unlistable)} director{'y' if len(unlistable) == 1 else 'ies'} in this "
-                "skill directory could not be listed ("
+                "skill directory could not be listed or fully examined ("
                 + ", ".join(f"{d} ({e})" for d, e in unlistable[:5])
                 + (", ..." if len(unlistable) > 5 else "")
                 + "): whether executable payloads live there is unknown, so the payload "

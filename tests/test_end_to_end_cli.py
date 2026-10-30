@@ -2210,7 +2210,7 @@ class ADirectoryThePayloadInventoryCannotListIsReportedTests(unittest.TestCase):
             self.assertFalse(group["canonical"]["payload_inventory_complete"])
             text = run_cli([*self.cfg, "skills"])
             self.assertIn(
-                "1 directory in this skill directory could not be listed "
+                "1 directory in this skill directory could not be listed or fully examined "
                 "(scripts (Permission denied))",
                 text.stdout,
             )
@@ -2230,7 +2230,11 @@ class ADirectoryThePayloadInventoryCannotListIsReportedTests(unittest.TestCase):
             self.assertEqual(payload["skills_with_executable_payloads"], [])
             warned = [w for w in payload["warnings"] if "payload inventory could not list" in w]
             self.assertEqual(len(warned), 1, payload["warnings"])
-            self.assertIn("skill 'tdd' in root 'canonical' has 1 directory", warned[0])
+            self.assertIn(
+                "skill 'tdd' in root 'canonical' has 1 directory the payload inventory could not "
+                "list or fully examine (scripts (Permission denied))",
+                warned[0],
+            )
             self.assertIn("a floor, not an inventory", warned[0])
         finally:
             os.chmod(self.hidden, 0o755)

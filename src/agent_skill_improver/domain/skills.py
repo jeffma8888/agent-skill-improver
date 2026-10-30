@@ -121,7 +121,9 @@ class SkillSnapshot:
     #: privileged change, not a docs change.
     payload_files: tuple[str, ...] = ()
     #: Directories inside this skill's directory the inventory could not list,
-    #: each with the error. What they hold is unknown, so the payload list is
+    #: or listed but could not examine an entry of (a directory this process
+    #: may list but not search), each with the error. What they hold is
+    #: unknown, so the payload list is
     #: incomplete while this is non-empty; reported for the same reason the
     #: payloads are.
     unlistable_dirs: tuple[tuple[str, str], ...] = ()
@@ -220,7 +222,7 @@ class SkillGroup:
 
     @property
     def unlistable_dirs(self) -> tuple[str, ...]:
-        """Directories no copy's inventory could list, labelled by root."""
+        """Directories no copy's inventory could list or fully examine, labelled by root."""
         out: list[str] = []
         for copy in self.all_copies:
             for name, _ in copy.unlistable_dirs:

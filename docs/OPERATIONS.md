@@ -18,8 +18,9 @@ whether your skill loader reads past it too is not checked; measured before,
 such a document was reported as one that would never load and every proposal
 against it was quarantined for the same reason), how many carry executable
 payloads (a
-`WARN` names any skill with a directory the payload inventory could not list,
-since its count is then a floor), how
+`WARN` names any skill with a directory the payload inventory could not list
+or fully examine, such as one this process may list but not search (mode
+0o444), since its count is then a floor), how
 many paths discovery **passed over** (each one a `WARN` line naming
 the path and the reason: a dangling link, a link while links are not followed,
 a link that leaves its root, a document deeper than `max_depth`, a `SKILL.md` at
