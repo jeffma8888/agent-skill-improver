@@ -107,8 +107,11 @@ SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: How many paths the refusals name through ``named_path`` at this change,
 #: counting the module functions a ``raise`` takes its words from. Four
 #: refusals of the target check named their target each; they now name it in
-#: ``canonical_target_refused``, twice, so the count fell from 76 by two.
-NAMED_AT_THIS_CHANGE = 74
+#: ``canonical_target_refused``, twice, so the count fell from 76 by two. The
+#: link check's refusal of a target spelled outside every root named two paths;
+#: ``spelled_outside_every_root`` names them in each of its two wordings, and
+#: the root as the candidate's path spells it in one, so the count rose to 77.
+NAMED_AT_THIS_CHANGE = 77
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:

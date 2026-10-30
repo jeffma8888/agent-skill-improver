@@ -424,6 +424,92 @@ def reached_through_a_link(spelled: Path, cursor: Path, candidate_id: str, verb:
     )
 
 
+def spelled_outside_every_root(
+    spelled: Path,
+    resolved: Path,
+    root: SkillRoot,
+    candidate_id: str,
+    verb: str,
+    *,
+    as_spelled: Path | None = None,
+) -> str:
+    """The refusal of a target spelled outside every root that resolves into ``root``.
+
+    ``review`` and ``apply`` ask it through the target check, so a candidate
+    whose root was moved and left behind as a link to its new place, the
+    config re-pointed at that place, is refused here. Measured before (3.11
+    and 3.13): ``review`` and ``apply`` each exited 3 with
+    ``LinkedTargetRefused`` "refusing to review <path>" and "refusing to
+    replace <path>", which named no candidate and told the operator to "Spell
+    the target as the root does", which is the record's to spell, not theirs.
+    The record stayed ``validated``, so it stayed open: with
+    ``[caps].max_open_candidates`` at 1 the next day stood down on it, and with
+    it deleted the next day ran. With the root and the config put back,
+    ``review`` and ``apply`` with the same token took it. With the candidate,
+    the refusal now names it, for the command that asked, and says how it is
+    closed; without one (``rollback``, and the write's own check) it is worded
+    as before. ``as_spelled`` is the root as the candidate's path spells it
+    (``_root_as_spelled``), named as the spelling to configure when there is
+    one and the target check's later judgments take what the candidate's path
+    resolves to; a path with no such spelling (one that reaches the skill
+    through a link no spelling of the root lies ahead of) is given no such
+    advice, since configuring a root there is refused in turn (measured: with
+    the path through a folder outside every root linked into one, the root
+    configured as the folder ahead of that link, and as the link itself, were
+    each refused), and nor is one those judgments refuse (a mirror copy, a
+    skill listed as protected, or, where the filesystem folds case, the
+    skill's folder spelled in another case than discovery's), since configured
+    so the root's path is refused by them in turn.
+    """
+    if not candidate_id:
+        return (
+            f"refusing to {verb} {named_path(spelled)}: it is not spelled under any configured "
+            f"skill root yet resolves to {named_path(resolved)} inside root {root.id}, so it "
+            "reaches the skill through a symbolic link. Spell the target as the root does. "
+            "Nothing was touched."
+        )
+    command = "review" if verb == "review" else "apply"
+    refused = (
+        f"refusing to {command} {candidate_id}: its canonical target {named_path(spelled)} is "
+        f"not spelled under any configured skill root, yet resolves to {named_path(resolved)} "
+        f"inside root {root.id}, so it reaches the skill through a symbolic link, and `apply` "
+        "does not write through it. The skill and the candidate are unchanged. The candidate "
+        "stays open, and counts against [caps].max_open_candidates, until it is closed: to "
+        f"close it, delete its record ({candidate_id}.json in the state directory's "
+        "candidates/)."
+    )
+    if as_spelled is None:
+        return refused
+    # Joined rather than interpolated, so the words the rule over every refusal
+    # reads are the f-strings themselves.
+    return refused + (
+        f" If root {root.id} is meant to be configured as {named_path(as_spelled)}, as the "
+        "candidate's path spells it, configure it so: while the skill file there holds the "
+        "text the candidate was written against, `review` and `apply` take the candidate as "
+        "before."
+    )
+
+
+def _root_as_spelled(spelled: Path, resolved: Path, root_resolved: Path) -> Path | None:
+    """The root as ``spelled`` spells it, when the link check takes ``spelled`` with the root so.
+
+    ``resolved`` is ``spelled`` resolved, and lies in ``root_resolved``. The
+    root as ``spelled`` spells it is ``spelled`` less the parts ``resolved``
+    has below the root, when ``spelled`` ends in those parts and what is left
+    resolves to the root: each part below it is then the root's own, and none
+    is a link (``resolved`` has none), so the link check takes ``spelled``
+    with the root configured so. Otherwise ``None``: ``spelled`` reaches the
+    skill through a link no spelling of the root lies ahead of (a folder
+    outside every root linked into one, or a link named otherwise than the
+    folder it points to).
+    """
+    below = resolved.relative_to(root_resolved).parts
+    if not below or spelled.parts[-len(below) :] != below:
+        return None
+    root = Path(*spelled.parts[: -len(below)])
+    return root if root.resolve() == root_resolved else None
+
+
 def canonical_target_refused(target: Path, why: str, candidate_id: str, action: str) -> str:
     """The refusal of a target that is not the canonical copy of its skill, for ``why``.
 
@@ -1264,29 +1350,47 @@ class FilesystemSkillStore:
         made. ``skill_id`` is the skill the caller's
         record names, and ``candidate_id`` the candidate ``review`` or ``apply``
         is judging, which the refusal of a listed skill (``listed_as_protected``),
-        of a link below the root (``reached_through_a_link``) and of a target
-        that is not the canonical copy (``canonical_target_refused``) name.
+        of a link below the root (``reached_through_a_link``), of a target
+        spelled outside every root that resolves into one
+        (``spelled_outside_every_root``) and of a target that is not the
+        canonical copy (``canonical_target_refused``) name.
         Returns the target as the write addresses it: resolved when it exists.
         """
         replace = "replace" if action == "write" else action
-        write = "write" if action == "write" else action
         # Judged on the path as spelled, with lstat semantics, before anything
         # resolves it: a link planted below the root between proposal and apply
         # would otherwise be followed to a twin with the same text, and the
         # hash check would pass while the write landed on the wrong skill.
-        self._assert_no_link_below_root(Path(path), verb=replace, candidate_id=candidate_id)
+        self._assert_no_link_below_root(
+            Path(path), verb=replace, candidate_id=candidate_id, skill_id=skill_id
+        )
         # Resolved once, so every later step (hash, backup, manifest, verify)
         # describes the same file even when the caller spelled the path
         # differently. Two spellings of one path is how a check and the write it
         # guards end up looking at different things.
         target = Path(path).resolve() if Path(path).exists() else Path(path)
+        self._assert_resolved_target(
+            target, action=action, skill_id=skill_id, candidate_id=candidate_id
+        )
+        return target
+
+    def _assert_resolved_target(
+        self, target: Path, *, action: str, skill_id: str, candidate_id: str = ""
+    ) -> None:
+        """The judgments ``assert_write_target`` makes after its link check, in its order.
+
+        Made on the target as the write addresses it, so they are the same
+        whatever spelling of a root the path was reached through. The link
+        check asks them too, of a target spelled outside every root, before it
+        names a spelling of the root to configure (``_root_as_spelled``).
+        """
+        write = "write" if action == "write" else action
         self._assert_document(target, verb=write)
         self._assert_not_protected(target, verb=write)
         group = self.assert_canonical_target(target, action=action, candidate_id=candidate_id)
         self._assert_not_a_protected_skill(
             target, group, skill_id, verb=write, candidate_id=candidate_id
         )
-        return target
 
     def mirror_paths_of(self, path: Path) -> tuple[str, ...]:
         """The mirror copies the live inventory holds of the skill whose canonical copy is ``path``.
@@ -1352,7 +1456,7 @@ class FilesystemSkillStore:
                 )
 
     def _assert_no_link_below_root(
-        self, spelled: Path, *, verb: str = "replace", candidate_id: str = ""
+        self, spelled: Path, *, verb: str = "replace", candidate_id: str = "", skill_id: str = ""
     ) -> None:
         """Refuse a target reached through a symbolic link below its root.
 
@@ -1360,6 +1464,23 @@ class FilesystemSkillStore:
         at a checkout), so only the components beneath the configured root are
         judged, each with ``lstat`` semantics. Shared by the write and the
         rollback, which are the two places a skill file is ever replaced.
+        ``candidate_id`` is the candidate ``review`` or ``apply`` is judging,
+        which both its refusals name; ``rollback`` and the write's own check
+        pass none, and keep the words that name no candidate. ``skill_id`` is
+        the skill the candidate's record names, for the target check's later
+        judgments, which a target spelled outside every root is given to
+        (``_assert_resolved_target``) before a spelling of the root is named
+        as the one to configure: it is named only when they take the path the
+        target resolves to, which they judge again once the root is configured
+        so, the path resolving there still and discovery's paths being
+        resolved. A path through an alias of the root to the skill's folder
+        spelled in another case than discovery's (macOS) is so named none:
+        measured (3.11 and 3.13), with the root configured as the alias,
+        ``review`` was refused, the path being no skill document of any root.
+        Nor is one named when the judgments' discovery cannot finish: measured
+        (3.11 and 3.13), with another ``SKILL.md`` in the root a link to a file
+        in a directory this process cannot read, it raised ``PermissionError``,
+        and the link is refused without a spelling.
         """
         spelled = spelled if spelled.is_absolute() else spelled.absolute()
         for root in self._roots:
@@ -1391,11 +1512,22 @@ class FilesystemSkillStore:
                 continue
             root_resolved = Path(root.path).resolve()
             if resolved == root_resolved or root_resolved in resolved.parents:
+                as_spelled = _root_as_spelled(spelled, resolved, root_resolved)
+                if as_spelled is not None and candidate_id:
+                    # Without a candidate no spelling is named, so the
+                    # inventory is not read again for one.
+                    try:
+                        self._assert_resolved_target(resolved, action=verb, skill_id=skill_id)
+                    except (NonDocumentWriteRefused, SelfMutationRefused, MirrorEditRefused):
+                        as_spelled = None
+                    except OSError:
+                        # Discovery that cannot finish names no spelling, and
+                        # the link is refused as it is without one.
+                        as_spelled = None
                 raise LinkedTargetRefused(
-                    f"refusing to {verb} {named_path(spelled)}: it is not spelled under any configured skill "
-                    f"root yet resolves to {named_path(resolved)} inside root {root.id}, so it reaches the "
-                    f"skill through a symbolic link. Spell the target as the root does. Nothing "
-                    f"was touched."
+                    spelled_outside_every_root(
+                        spelled, resolved, root, candidate_id, verb, as_spelled=as_spelled
+                    )
                 )
 
     def _open_parent_pinned(self, spelled: Path, *, verb: str) -> tuple[int, str]:

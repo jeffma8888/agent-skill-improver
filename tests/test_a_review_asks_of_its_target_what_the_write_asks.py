@@ -127,12 +127,12 @@ class AReviewAsksOfALinkWhatTheWriteAsksTests(_Target):
         (self.base / "outside").mkdir()
         os.symlink(self.root / "tdd", self.base / "outside" / "x")
         self.spelled(self.base / "outside" / "x" / "SKILL.md", "x")
-        self.assert_both_refuse("LinkedTargetRefused", "review", "replace")
+        self.assert_both_refuse("LinkedTargetRefused", f"review {self.cid}:", f"apply {self.cid}:")
 
     def test_an_alias_of_the_root_gets_no_token(self):
         os.symlink(self.root, self.base / "alias")
         self.spelled(self.base / "alias" / "tdd" / "SKILL.md", "tdd")
-        self.assert_both_refuse("LinkedTargetRefused", "review", "replace")
+        self.assert_both_refuse("LinkedTargetRefused", f"review {self.cid}:", f"apply {self.cid}:")
 
 
 class AProtectedPathIsRefusedAsProtectedByBothTests(_Target):
