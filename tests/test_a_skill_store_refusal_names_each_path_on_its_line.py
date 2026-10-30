@@ -56,7 +56,10 @@ NAMERS = frozenset({"named_path", "quoted_value"})
 #: ``test_a_refusal_of_a_copy_discovery_passed_over_says_why`` holds), the
 #: manifest fields found missing (a fixed list), and ``read_json``'s own error
 #: as ``why_unreadable`` gives it (a decode error's text, which names no
-#: content; an OS error's number and words, without the file name it carries).
+#: content; an OS error's number and words, without the file name it carries);
+#: and, in the functions a ``raise`` takes its words from, the command that
+#: asked ("review" or "apply", fixed there), the candidate's id, a fixed phrase
+#: (``itself``) and ``repropose_advice``'s words, which hold the id and no path.
 NOT_PATHS = frozenset(
     {
         "verb",
@@ -73,6 +76,10 @@ NOT_PATHS = frozenset(
         "passed.reason",
         "', '.join(missing)",
         "why_unreadable(exc)",
+        "command",
+        "candidate_id",
+        "itself",
+        "repropose_advice(candidate_id)",
     }
 )
 #: The paths the refusals name, each through ``named_path``: bare when it reads
@@ -93,18 +100,41 @@ PATH_NAMES = (
 )
 #: A short hash, as each hash refusal shows one.
 SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
-#: How many paths the refusals name through ``named_path`` at this change.
-NAMED_AT_THIS_CHANGE = 69
+#: How many paths the refusals name through ``named_path`` at this change,
+#: counting the module functions a ``raise`` takes its words from.
+NAMED_AT_THIS_CHANGE = 76
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:
-    """Every value an f-string inside a ``raise`` in the skill store interpolates."""
+    """Every value the words of a ``raise`` in the skill store interpolate.
+
+    The f-strings inside the ``raise``, and those inside a module function the
+    ``raise`` takes its message from (its first argument a call of one, as
+    ``listed_as_protected``). Measured before: only the ``raise`` itself was
+    read, so the words of three refusals moved into such functions
+    (``changed_before_the_write``, ``listed_as_protected``,
+    ``reached_through_a_link``) were held to neither test here.
+    """
+    tree = ast.parse(SKILL_FS.read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     found = []
-    for node in ast.walk(ast.parse(SKILL_FS.read_text(encoding="utf-8"))):
+    worded_by: set[str] = set()
+    for node in ast.walk(tree):
         if isinstance(node, ast.Raise) and node.exc is not None:
             for sub in ast.walk(node.exc):
                 if isinstance(sub, ast.FormattedValue):
                     found.append((sub.lineno, ast.unparse(sub.value), sub))
+            message = node.exc.args[0] if isinstance(node.exc, ast.Call) and node.exc.args else None
+            if (
+                isinstance(message, ast.Call)
+                and isinstance(message.func, ast.Name)
+                and message.func.id in functions
+            ):
+                worded_by.add(message.func.id)
+    for name in sorted(worded_by):
+        for sub in ast.walk(functions[name]):
+            if isinstance(sub, ast.FormattedValue):
+                found.append((sub.lineno, ast.unparse(sub.value), sub))
     return found
 
 

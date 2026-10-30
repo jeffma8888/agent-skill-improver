@@ -383,6 +383,47 @@ def listed_as_protected(target: Path, named: str, candidate_id: str, verb: str) 
     )
 
 
+def reached_through_a_link(spelled: Path, cursor: Path, candidate_id: str, verb: str) -> str:
+    """The refusal of a target reached through ``cursor``, a symbolic link below its root.
+
+    ``review`` and ``apply`` ask it through the target check, so a candidate
+    whose skill folder became a link after it was validated is refused here.
+    Measured before (3.11 and 3.13, the skill folder replaced by a link to an
+    identical copy, beside it in the root or outside every root): ``review``
+    and ``apply`` each exited 3 with ``LinkedTargetRefused`` "refusing to review
+    <path>" and "refusing to replace <path>", which named no candidate and no
+    way to close it. The record stayed ``validated``, so it stayed open: with
+    ``[caps].max_open_candidates`` at 1 the next day stood down on it, and with
+    it deleted the next day ran. With the folder put back in place of the link,
+    ``review`` and ``apply`` with the same token took it. With the candidate,
+    the refusal now names it, for the command that asked, and says how it is
+    closed; without one (``rollback``) it is worded as before. It says
+    ``apply`` does not write through the link: an ``apply`` that finishes an
+    earlier run of itself records that write before this check is asked, and
+    writes nothing.
+    """
+    if not candidate_id:
+        return (
+            f"refusing to {verb} {named_path(spelled)}: {named_path(cursor)} is a symbolic link, "
+            "so the replacement would land wherever it points rather than on the skill the "
+            "candidate was reviewed against. Neither the link nor its target was touched."
+        )
+    command = "review" if verb == "review" else "apply"
+    itself = "the file itself" if cursor == spelled else "the directory itself"
+    return (
+        f"refusing to {command} {candidate_id}: its canonical target {named_path(spelled)} is "
+        f"reached through {named_path(cursor)}, a symbolic link, so `apply` does not write "
+        "through it: the replacement would land wherever the link points rather than on the "
+        "skill the candidate was reviewed against. The link, what it points to and the "
+        "candidate are unchanged. The candidate stays open, and counts against "
+        "[caps].max_open_candidates, until it is closed: to close it, delete its record "
+        f"({candidate_id}.json in the state directory's candidates/). If the link is not "
+        f"meant to be there, put {itself} in its place: while the skill file there holds the "
+        "text the candidate was written against, `review` and `apply` take the candidate as "
+        "before."
+    )
+
+
 class FilesystemSkillStore:
     """Discovers and (only when explicitly writable) edits skill files."""
 
@@ -1193,7 +1234,8 @@ class FilesystemSkillStore:
         reviewed and written, the list being read only when a proposal is
         made. ``skill_id`` is the skill the caller's
         record names, and ``candidate_id`` the candidate ``review`` or ``apply``
-        is judging, which the refusal of a listed skill names (``listed_as_protected``).
+        is judging, which the refusal of a listed skill (``listed_as_protected``)
+        and of a link below the root (``reached_through_a_link``) name.
         Returns the target as the write addresses it: resolved when it exists.
         """
         replace = "replace" if action == "write" else action
@@ -1202,7 +1244,7 @@ class FilesystemSkillStore:
         # resolves it: a link planted below the root between proposal and apply
         # would otherwise be followed to a twin with the same text, and the
         # hash check would pass while the write landed on the wrong skill.
-        self._assert_no_link_below_root(Path(path), verb=replace)
+        self._assert_no_link_below_root(Path(path), verb=replace, candidate_id=candidate_id)
         # Resolved once, so every later step (hash, backup, manifest, verify)
         # describes the same file even when the caller spelled the path
         # differently. Two spellings of one path is how a check and the write it
@@ -1279,7 +1321,9 @@ class FilesystemSkillStore:
                     "can rewrite its own scoring criteria has no gate at all."
                 )
 
-    def _assert_no_link_below_root(self, spelled: Path, *, verb: str = "replace") -> None:
+    def _assert_no_link_below_root(
+        self, spelled: Path, *, verb: str = "replace", candidate_id: str = ""
+    ) -> None:
         """Refuse a target reached through a symbolic link below its root.
 
         The root itself may legitimately be a link (a skills directory pointing
@@ -1299,10 +1343,7 @@ class FilesystemSkillStore:
                     cursor = cursor / part
                     if cursor.is_symlink():
                         raise LinkedTargetRefused(
-                            f"refusing to {verb} {named_path(spelled)}: {named_path(cursor)} is a symbolic link, so the "
-                            f"replacement would land wherever it points rather than on the skill the "
-                            f"candidate was reviewed against. Neither the link nor its target "
-                            f"was touched."
+                            reached_through_a_link(spelled, cursor, candidate_id, verb)
                         )
                 return
         # No root form is a prefix of the spelling, yet it may still resolve into

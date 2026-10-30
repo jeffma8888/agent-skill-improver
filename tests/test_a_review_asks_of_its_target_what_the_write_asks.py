@@ -121,7 +121,7 @@ class AReviewAsksOfALinkWhatTheWriteAsksTests(_Target):
     def test_a_skill_folder_that_is_a_link_below_its_root_gets_no_token(self):
         os.symlink(self.root / "tdd", self.root / "y")
         self.spelled(self.root / "y" / "SKILL.md", "y")
-        self.assert_both_refuse("LinkedTargetRefused", "review", "replace")
+        self.assert_both_refuse("LinkedTargetRefused", f"review {self.cid}:", f"apply {self.cid}:")
 
     def test_a_folder_outside_every_root_that_links_into_one_gets_no_token(self):
         (self.base / "outside").mkdir()
