@@ -26,7 +26,7 @@ import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
 from ..domain.integrity import repropose_advice
 from ..domain.redaction import named_path, quoted_value, why_unreadable
@@ -510,7 +510,14 @@ def _root_as_spelled(spelled: Path, resolved: Path, root_resolved: Path) -> Path
     return root if root.resolve() == root_resolved else None
 
 
-def canonical_target_refused(target: Path, why: str, candidate_id: str, action: str) -> str:
+def canonical_target_refused(
+    target: Path,
+    why: str,
+    candidate_id: str,
+    action: str,
+    *,
+    renamed: Literal["", "in case", "otherwise"] = "",
+) -> str:
     """The refusal of a target that is not the canonical copy of its skill, for ``why``.
 
     ``review`` and ``apply`` ask it through the target check, so a candidate
@@ -525,18 +532,84 @@ def canonical_target_refused(target: Path, why: str, candidate_id: str, action: 
     ``apply`` with the same token took it. With the candidate, the refusal now
     names it, for the command that asked, and says how it is closed; without
     one (``rollback``, and the write's own check) it is worded as before.
+
+    ``renamed`` is a target that is the canonical copy's file under another
+    name (``_canonical_copy_opened_by``): that file already is the canonical
+    copy, so "make it that again" asks for what is so. What lets the candidate
+    be taken is discovery taking the file by the name the candidate holds.
+    ``"in case"``: the two names differ only in letter case, and that is the
+    spelling given back, in the config's root or on disk. ``"otherwise"``:
+    they differ by more, as for a hard link outside every root, where the file
+    already has the candidate's name, so giving it back asks for what is so
+    too. Measured (3.11
+    and 3.13, a validated candidate, its canonical root re-pointed at a copy of
+    the tree whose ``tdd/SKILL.md`` is a hard link to the old one): ``review``
+    and ``apply`` exited 3 asking that the file be made the canonical copy
+    again, which it was (and, in this change's first form, that the name be
+    given back, which it had); with the root pointed back, both took it.
     """
     if not candidate_id:
         return f"refusing to {action} {named_path(target)}: {why}"
     command = "review" if action == "review" else "apply"
+    if renamed == "in case":
+        take_it = (
+            "The name the candidate holds and the copy's differ only in letter case. To take it "
+            "instead, give the file back the spelling the candidate holds, in the config's root "
+            "or the names on disk"
+        )
+    elif renamed == "otherwise":
+        take_it = (
+            "The name the candidate holds and the copy's differ by more than letter case, and a "
+            "second name does not make a file the canonical copy. To take it instead, have "
+            "discovery take the file by the name the candidate holds again, as it did when the "
+            "candidate was written (a root re-pointed since then, pointed back)"
+        )
+    else:
+        take_it = "If that file is meant to be the skill's canonical copy, make it that again"
     return (
         f"refusing to {command} {candidate_id} at {named_path(target)}: {why} The file and "
         "the candidate are unchanged. The candidate stays open, and counts against "
         "[caps].max_open_candidates, until it is closed: to close it, delete its record "
-        f"({candidate_id}.json in the state directory's candidates/). If that file is meant "
-        "to be the skill's canonical copy, make it that again: while it holds the text the "
-        "candidate was written against, `review` and `apply` take the candidate as before."
+        f"({candidate_id}.json in the state directory's candidates/). {take_it}: while it "
+        "holds the text the candidate was written against, `review` and `apply` take the "
+        "candidate as before."
     )
+
+
+def _in_letter_case_only(name: Path, other: Path) -> bool:
+    """Whether ``name`` and ``other`` are one spelling but for letter case.
+
+    ``str.casefold``, so "Straße" and "STRASSE" are one spelling too.
+    """
+    return str(name).casefold() == str(other).casefold()
+
+
+def _canonical_copy_opened_by(groups: Sequence[SkillGroup], resolved: Path) -> SkillSnapshot | None:
+    """The canonical copy whose file ``resolved`` opens, when discovery names it otherwise.
+
+    One file can carry more than one name: on a case-insensitive volume
+    ``skills-canonical/tdd/SKILL.md`` and ``Skills-Canonical/tdd/SKILL.md`` open
+    the same file, as two hard links do. The target check judges a target by
+    its name, so such a target is refused as one no root holds; this is only
+    the words of that refusal. The same file is the same device and inode;
+    any ``stat`` that fails gives no answer, so the refusal keeps its plain
+    words rather than name a copy it could not compare.
+    """
+    try:
+        opened = os.stat(resolved)
+    except OSError:
+        return None
+    for group in groups:
+        copy = group.canonical
+        if copy is None:
+            continue
+        try:
+            found = os.stat(copy.path)
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == (opened.st_dev, opened.st_ino):
+            return copy
+    return None
 
 
 class FilesystemSkillStore:
@@ -1686,7 +1759,8 @@ class FilesystemSkillStore:
         that name no candidate.
         """
         resolved = Path(target).resolve()
-        kind, group = classify_target(self.groups(refresh=True), resolved)
+        groups = self.groups(refresh=True)
+        kind, group = classify_target(groups, resolved)
         if kind == "mirror" and group is not None and group.canonical is None:
             # Every copy of a skill with no canonical copy classifies as a
             # mirror, but calling it one, of an unknown source, misdescribes
@@ -1731,6 +1805,37 @@ class FilesystemSkillStore:
                         "target is refused rather than assumed safe.",
                         candidate_id,
                         action,
+                    )
+                )
+            # The canonical copy's file under a name discovery does not give
+            # it. Measured before (3.11 and 3.13, a validated candidate, then the
+            # config's canonical root spelled ``Skills-Canonical`` or the skill's
+            # directory renamed ``TDD``, on a case-insensitive volume): ``review``
+            # and ``apply`` refused it as "not a skill document in any configured
+            # root" and asked that the file be made the canonical copy again,
+            # which it was; giving the old name back let both take it. A hard
+            # link outside every root (the root re-pointed at a copy of the
+            # tree that links the old file) differs by more than case, and the
+            # file already has the candidate's name: pointing the root back
+            # let both take it.
+            opened = _canonical_copy_opened_by(groups, resolved)
+            if opened is not None:
+                raise MirrorEditRefused(
+                    canonical_target_refused(
+                        target,
+                        f"it opens the file discovery takes as the canonical copy of skill "
+                        f"{quoted_value(opened.skill_id)}, {named_path(opened.path)}, under "
+                        "another name (a case-insensitive volume, or a hard link, gives one "
+                        "file more than one), and the target check judges a target by its "
+                        "name, so it is not a skill document in any configured root. An "
+                        "unrecognised target is refused rather than assumed safe.",
+                        candidate_id,
+                        action,
+                        renamed=(
+                            "in case"
+                            if _in_letter_case_only(resolved, opened.path)
+                            else "otherwise"
+                        ),
                     )
                 )
             raise MirrorEditRefused(

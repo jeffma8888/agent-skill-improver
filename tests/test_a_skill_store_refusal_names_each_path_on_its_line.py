@@ -62,7 +62,8 @@ NAMERS = frozenset({"named_path", "quoted_value"})
 #: (``itself``) and ``repropose_advice``'s words, which hold the id and no path;
 #: and the reason the target check gives ``canonical_target_refused`` (``why``),
 #: written at each ``raise`` that calls it, where each value it interpolates is
-#: read here (``test_the_reason_a_target_is_refused_for_is_written_at_the_raise``).
+#: read here (``test_the_reason_a_target_is_refused_for_is_written_at_the_raise``),
+#: and which of its three fixed ways to take the candidate it gives (``take_it``).
 NOT_PATHS = frozenset(
     {
         "verb",
@@ -84,6 +85,7 @@ NOT_PATHS = frozenset(
         "itself",
         "repropose_advice(candidate_id)",
         "why",
+        "take_it",
     }
 )
 #: The paths the refusals name, each through ``named_path``: bare when it reads
@@ -101,6 +103,7 @@ PATH_NAMES = (
     "guard",
     "canonical",
     "passed.path",
+    "opened.path",
 )
 #: A short hash, as each hash refusal shows one.
 SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
@@ -111,7 +114,9 @@ SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: link check's refusal of a target spelled outside every root named two paths;
 #: ``spelled_outside_every_root`` names them in each of its two wordings, and
 #: the root as the candidate's path spells it in one, so the count rose to 77.
-NAMED_AT_THIS_CHANGE = 77
+#: The target check's refusal of a target that opens the canonical copy's
+#: file under another name names that copy, so it rose to 78.
+NAMED_AT_THIS_CHANGE = 78
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:
@@ -210,7 +215,7 @@ class EveryPathARefusalNamesIsNamedTests(unittest.TestCase):
             if isinstance(node, ast.Raise) and node.exc is not None
             for sub in ast.walk(node.exc)
         }
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         for call in calls:
             with self.subTest(line=call.lineno):
                 self.assertIn(id(call), inside_a_raise)
