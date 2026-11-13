@@ -126,9 +126,14 @@ meant to be: it is a deterministic function of the candidate id, the base hash a
 the patch hash, derived with no secret, so anyone who can run the tool can derive
 one. It is a **review interlock** — an approval cannot outlive an edit to the base
 or the patch — and `docs/ACCEPTANCE.md`, `docs/ARCHITECTURE.md` and
-`docs/PRIVACY_AND_THREAT_MODEL.md` now say so. The things that actually stop an
-automated apply are structural: `daily` does not import `promote`, `daily` refuses
-a writable skill store, and the automation marker makes `from_cli` refuse.
+`docs/PRIVACY_AND_THREAT_MODEL.md` now say so. The daily path cannot promote:
+`daily` does not import `promote` and refuses a writable skill store. Its marker
+is process-local, not an environment change for a later process. The scheduler
+templates now set the marker for their whole job command, so an apply step
+appended to that command is refused (later cron lines are covered on cronie,
+Vixie and OpenBSD; BusyBox needs the export prefix on each command). Apply does
+not authenticate its caller: a separate unmarked job can still apply with a
+token and acknowledgement. Do not schedule apply.
 
 ## The approval token was not bound to the text it approved
 

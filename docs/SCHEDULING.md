@@ -15,10 +15,22 @@ every night at 03:00, which nobody reads.
 
 ## What may not, ever
 
-`apply`. Not because it is discouraged, but because it does not work from a
-scheduled run: the daily driver sets `ASI_AUTOMATED_RUN`, and the approval
-interlock refuses while that marker is present, even with a valid token. Adding an
-apply step to a scheduler template fails by design.
+Do not schedule `apply`. Both templates set `ASI_AUTOMATED_RUN=1` for their job,
+so apply appended to that job's command is refused, even with a valid token and
+acknowledgement. The launchd plist uses `EnvironmentVariables`. The cron template
+sets an environment line before its jobs: cronie, Vixie and OpenBSD honor it for
+later lines, unless it is overridden. BusyBox crond does not honor arbitrary
+environment lines, so every template command also begins with
+`export ASI_AUTOMATED_RUN=1;`; that marks the whole shell command, including an
+appended apply step. A separate line added on BusyBox needs that prefix too.
+
+The daily driver's own marker is process-local and restored when its context
+exits; it cannot mark a separate process after daily exits. Apply does not
+authenticate its caller: the token and acknowledgement are review interlocks,
+not a security boundary. A separate process without the marker, including a job
+a person writes without it, can still run apply with a valid token and
+acknowledgement. The templates prevent that accidental addition within the
+marked job, not deliberate removal or omission of the marker.
 
 The reason is worth stating rather than asserting. The value of this loop is not
 the edits, it is that a human read the argument for each edit. An unattended apply
@@ -59,7 +71,8 @@ run happens is a `ConfigError` naming the variable, not a directory called
 `$VARIABLE`: before this check a scheduled run with `state_dir = "$ASI_HOME/state"`
 and no `ASI_HOME` created a second private state tree, holding candidates that
 `asi review` from a shell never saw. Set the variable in the job (launchd
-`EnvironmentVariables`, a cron `NAME=value` line) or write the path out. Only the
+`EnvironmentVariables`, a cron `NAME=value` line on cronie, Vixie or OpenBSD;
+BusyBox needs an export prefix on each command) or write the path out. Only the
 plain `$NAME` and `${NAME}` forms expand; `${NAME:-default}` and the other shell
 modifiers are refused outright. The `--config` argument itself is not expanded at
 all: a literal `$NAME` there is a missing config file, exit 3.

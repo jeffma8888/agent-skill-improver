@@ -4,10 +4,12 @@ Be precise about what this is and is not.
 
 It is **not** a security boundary. Any process that can read a candidate file
 can compute its token, and nothing here defends against a determined local
-attacker; it does not try to.
+attacker; it does not try to. Apply does not authenticate its caller: a separate
+process without the marker can still apply with a token and acknowledgement.
+Do not schedule apply.
 
-It **is** a set of interlocks that make an automated promotion impossible by
-accident and make every promotion auditable:
+It **is** a set of review interlocks that refuse promotion in a marked context
+and make every promotion auditable:
 
 1. ``apply`` requires a token derived from the candidate's *content*, with the
    patch hash recomputed from the patch text rather than read from the field
@@ -15,8 +17,10 @@ accident and make every promotion auditable:
    file changes, including an edit to the patch text alone;
 2. ``apply`` requires an explicit acknowledgement flag, so the intent is in the
    command line and therefore in the shell history and the receipt;
-3. ``apply`` refuses outright when the automation marker is set in the
-   environment, which the daily driver always sets;
+3. ``apply`` refuses outright when the automation marker is active in the
+   environment. The daily driver sets it only inside its own process; the
+   scheduler templates set it for their whole job command (and later cron lines
+   where cron supports environment assignments);
 4. the daily driver never imports the apply path at all -- enforced by a test
    that reads the module source.
 
@@ -32,7 +36,7 @@ from typing import Any
 
 from ..errors import ApprovalRequired, AutomationRefused
 
-#: Set by the daily driver for the lifetime of an automated run.
+#: Set by the daily driver in-process and by scheduler templates for their jobs.
 AUTOMATION_ENV_VAR = "ASI_AUTOMATED_RUN"
 ORIGIN_CLI = "cli"
 
@@ -62,7 +66,7 @@ class AutomationMarker:
 
 @dataclass(frozen=True)
 class HumanApproval:
-    """Evidence that a human asked for this specific promotion.
+    """Recorded review interlocks for this promotion, not caller authentication.
 
     Constructible only through :meth:`from_cli`. There is no default
     constructor path that produces an approval without a token, which is what
@@ -86,8 +90,9 @@ class HumanApproval:
         if automation_active():
             raise AutomationRefused(
                 "promotion refused: the automation marker "
-                f"({AUTOMATION_ENV_VAR}) is set. Promotion is a human action and "
-                "must be run from an interactive shell, never from the daily driver."
+                f"({AUTOMATION_ENV_VAR}) is set. After review, run apply from an "
+                "unmarked interactive shell; do not schedule apply. This marker is "
+                "an interlock, not caller authentication."
             )
         if not token or not token.strip():
             raise ApprovalRequired(

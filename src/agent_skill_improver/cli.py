@@ -15,9 +15,11 @@ Command surface, and which of them can change anything on disk:
     scheduler-template  prints a launchd or cron template. Installs nothing.
     selftest            re-checks the structural safety invariants on this checkout.
 
-``apply`` refuses to run when the automation marker is set, which the daily driver
-always sets, and it needs both a content-derived token and an explicit
-acknowledgement flag.
+``apply`` refuses while the automation marker is active. The daily driver sets it
+only inside its own process; the scheduler templates set it for their whole job
+command (cron also marks later lines on crons supporting environment assignments).
+Apply needs a content-derived token and acknowledgement but does not authenticate
+its caller: a separate unmarked process can still apply. Do not schedule apply.
 """
 
 from __future__ import annotations
@@ -2184,8 +2186,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _EscapingParser(
         prog="asi",
         description=(
-            "Safe, human-gated daily self-improvement loop for agent skills. "
-            "Automation scores, isolates, proposes and validates; only a human promotes."
+            "Proposal-only daily self-improvement loop for agent skills. "
+            "Automation scores, isolates, proposes and validates; apply is separate "
+            "with review interlocks, not caller authentication."
         ),
     )
     parser.add_argument(
@@ -2297,7 +2300,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_rollback.add_argument("candidate_id")
     p_rollback.set_defaults(func=cmd_rollback)
 
-    p_sched = add("scheduler-template", "print a launchd or cron template (installs nothing)")
+    p_sched = add(
+        "scheduler-template",
+        "print a marked launchd or cron job (installs nothing; do not schedule apply)",
+    )
     p_sched.add_argument("flavor", choices=("launchd", "cron"))
     p_sched.set_defaults(func=cmd_scheduler_template)
 

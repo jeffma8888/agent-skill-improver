@@ -122,17 +122,21 @@ Each asi property is stated once, here, with the code that does it.
   ([correlated evaluators](PRIVACY_AND_THREAT_MODEL.md#correlated-evaluators)).
 - **Apply and rollback.** The daily driver does not import the promotion module
   and refuses a writable skill store ([`app/daily.py`]). Apply is a separate
-  command, `asi apply`, that refuses while the automation marker is set and
-  needs a validated candidate whose record passes an integrity check and whose
-  gate passed, the candidate's review token, the `--i-reviewed-this` flag, and a
+  command, `asi apply`, that refuses while the automation marker is active. Daily
+  sets it only inside its own process; the templates set it for their whole job
+  command (the cron environment line also covers later lines on cronie, Vixie and
+  OpenBSD; BusyBox needs each command's export prefix). Apply needs a validated
+  candidate whose record passes an integrity check and whose gate passed, the
+  candidate's review token, the `--i-reviewed-this` flag, and a
   live file whose hash equals the candidate's base hash, unless the live file is
   the candidate's own replacement from an earlier run of this apply that stopped
   before recording it, which apply then records without writing again
   ([`app/promote.py`], [`domain/approval.py`]). It does not authenticate who
   runs it: any process
   that can read a candidate can compute its token, and the approval module says
-  it is not a security boundary ([`domain/approval.py`]). Apply writes a
-  hash-verified backup and a manifest before it replaces the file, and
+  it is not a security boundary ([`domain/approval.py`]). A separate unmarked job
+  can still apply with a token and acknowledgement; do not schedule apply. Apply
+  writes a hash-verified backup and a manifest before it replaces the file, and
   `asi rollback` checks the backup and its manifest before it writes, then reads
   the restored file back and compares it ([`adapters/skill_fs.py`]). asi has no
   decline command and no declined status ([`cli.py`], [`domain/candidate.py`]).

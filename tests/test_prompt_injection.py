@@ -152,7 +152,8 @@ class DefenceInDepthTests(unittest.TestCase):
     scorecard contract (tested in test_scoring_trust) refuses a verdict whose
     citation does not resolve, refuses a scorecard for the wrong conversation, and
     turns silence into INSUFFICIENT rather than PASS. Nothing in the model's reply
-    can reach a skill file, because the only write path needs a human.
+    can write a skill through daily, whose skill store is read-only and which
+    never calls promotion.
     """
 
     def test_the_untrusted_rule_forbids_changing_the_output_schema(self):

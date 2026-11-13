@@ -57,9 +57,23 @@ class ABackslashPathIsNamedAsItselfOnEveryCronTests(unittest.TestCase):
     def assert_every_cron_runs_the_job(self, crons: tuple[str, ...], **how: str) -> str:
         code, out, err, paths = render("cron", **how)
         self.assertEqual(code, 0, err)
-        (job,) = [line for line in out.splitlines() if line.strip() and not line.startswith("#")]
+        (job,) = [
+            line
+            for line in out.splitlines()
+            if line.strip() and not line.startswith("#") and "daily --commit" in line
+        ]
         command = job.split(None, 5)[5]
-        want = ["cd", paths["repo"], "&&", paths["python"], "-m", "agent_skill_improver"]
+        want = [
+            "export",
+            "ASI_AUTOMATED_RUN=1",
+            ";",
+            "cd",
+            paths["repo"],
+            "&&",
+            paths["python"],
+            "-m",
+            "agent_skill_improver",
+        ]
         want += ["--config", paths["config"], "daily", "--commit"]
         want += [
             ">>",

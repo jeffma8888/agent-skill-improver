@@ -1,13 +1,15 @@
-"""Promotion: the only path that writes a live skill file, and it needs a human.
+"""Promotion: the skill writer, intended for a person after review.
 
 Deliberately isolated in its own module so that the structural guarantee is
 checkable: :mod:`agent_skill_improver.app.daily` does not import this module, and
 a test asserts that by reading the source. Every other interlock here is a belt
-on top of that.
+on top of that. Apply does not authenticate its caller: a separate unmarked
+process can still apply with a token and acknowledgement. Do not schedule apply.
 
 The interlocks, in the order they fire:
 
-1. the automation marker must be absent (the daily driver always sets it);
+1. the automation marker must be inactive (daily sets it only in-process;
+   scheduler templates set it for their whole job command);
 2. the candidate must have passed validation, with the gate decision recorded;
 3. every derived field, and the persisted validation itself, must recompute to
    the value the record stores --

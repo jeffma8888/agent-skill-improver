@@ -50,7 +50,7 @@ def _token() -> str:
 def _running(token: str) -> list[int]:
     """The live processes whose command line holds ``token`` (zombies are not)."""
     listing = subprocess.run(
-        ["ps", "-A", "-o", "pid=,stat=,args="], capture_output=True, text=True
+        ["ps", "-A", "-o", "pid=,stat=,args="], capture_output=True, text=True, errors="replace"
     ).stdout
     found = []
     for line in listing.splitlines():

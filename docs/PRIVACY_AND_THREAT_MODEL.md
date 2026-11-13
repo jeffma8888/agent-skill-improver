@@ -206,7 +206,9 @@ The defences, in order of how much they matter:
    is checked against the rubric's criterion ids, checked against the conversation
    id, and every decided verdict must cite a turn that resolves. A model persuaded
    to declare a skill broken cannot make that stick without a resolvable citation,
-   and it cannot cause a write at all, because the write path needs a human.
+   and the daily path cannot turn that verdict into a skill write: it never calls
+   promotion and uses a read-only skill store. Apply is a separate command with
+   review interlocks, not caller authentication; do not schedule apply.
 
 5. **The reviewer sees what applies.** The human is the gate, so what the human
    reads has to be what the file will hold. A proposal whose prose or replacement

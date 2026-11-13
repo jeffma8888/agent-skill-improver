@@ -4,8 +4,8 @@
 
 The loop edits the instructions an agent obeys. That single fact decides the whole
 design: every component is arranged so that the automated half can *argue* for a
-change and only a human can *make* one, and so that the automated half cannot
-quietly widen its own authority.
+change and leave applying it to a person's separate review command, and so that
+the automated half cannot quietly widen its own authority.
 
 Three things follow, and they are worth stating before any module names.
 
@@ -369,9 +369,13 @@ The interlock is structural, not a flag:
   to a *different* skill. The status is distinct from `gate-failed` so the
   recorded verdict can stay as measured without the integrity checker reading
   the record as tampered.
-- `daily` sets `ASI_AUTOMATED_RUN`, and `approval.HumanApproval.from_cli` refuses
-  when that marker is present. An apply reached from inside a scheduled run fails
-  even with a valid token.
+- `daily` sets `ASI_AUTOMATED_RUN` only inside its own process and restores the
+  previous value on context exit. Both scheduler templates set it for their whole
+  job command, so an apply step appended to it refuses even with a valid token
+  and acknowledgement. The cron environment line also marks later lines on cronie,
+  Vixie and OpenBSD; BusyBox needs the export prefix on each command. Apply does
+  not authenticate its caller: a separate unmarked process, including a job
+  written without the marker, can still apply. Do not schedule apply.
 - The only filesystem write path for a skill is `skill_fs.write_canonical`.
   After the read-only check, and before the path is resolved or a byte is read,
   `_assert_no_link_below_root` judges every component beneath the configured
@@ -478,9 +482,10 @@ candidate whose base file has changed since it was proposed, so a stale approval
 fails and a silent edit underneath a pending review is caught. It is **not** a
 security boundary and must not be described as one — anyone who can run this tool
 can derive it, because the derivation is in the source and takes no secret. The
-things that actually stop an automated apply are structural: `daily` never
-imports `promote`, `daily` refuses a writable skill store, and the automation
-marker in the environment makes `from_cli` refuse outright.
+daily path cannot promote: `daily` never imports `promote` and refuses a writable
+skill store. The templates' job marker makes `from_cli` refuse, but no caller is
+authenticated; a separate unmarked process can apply with a token and
+acknowledgement. Do not schedule apply.
 
 ## State
 

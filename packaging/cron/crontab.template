@@ -8,9 +8,13 @@
 #
 # The job runs `asi daily --commit`: ingest, score, isolate, propose, validate.
 # It writes only under the configured state directory and can never modify a
-# skill file. Promotion is intentionally not here -- `asi apply` refuses to run
-# under the automation marker that the daily driver always sets, so adding it
-# would not work anyway.
+# skill file. Promotion is intentionally not here. This template sets the
+# automation marker for the whole command: an apply step appended to it refuses.
+# cronie, Vixie and OpenBSD also mark later lines with the environment line below.
+# BusyBox ignores arbitrary environment lines, so each command exports the marker;
+# a separate line you add needs that prefix too. A job without the marker can run
+# apply with a token and acknowledgement: they do not authenticate its caller.
+# Do not schedule apply.
 #
 # Four practical notes, each earned the hard way:
 #
@@ -34,14 +38,16 @@
 #     it, not this crontab, says whether the schedule fires.
 # ---------------------------------------------------------------------------
 
+ASI_AUTOMATED_RUN=1
+
 # m  h  dom mon dow   command
- 17  3   *   *   *    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ daily --commit >> __STATE__/daily.out.log 2>> __STATE__/daily.err.log
+ 17  3   *   *   *    export ASI_AUTOMATED_RUN=1; cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ daily --commit >> __STATE__/daily.out.log 2>> __STATE__/daily.err.log
 
 # Weekly reminder to review the queue. The loop deliberately cannot promote
 # anything; if nobody runs `asi candidates` and `asi review`, nothing ever ships,
 # and that is the intended failure mode rather than an accident.
-#  0  9   *   *   1    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ candidates
+#  0  9   *   *   1    export ASI_AUTOMATED_RUN=1; cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ candidates
 
 # Weekly health check. The `last run` line answers whether this schedule fired,
 # whether the last run saw the skill tree change, and under what confinement.
-#  5  9   *   *   1    cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ doctor
+#  5  9   *   *   1    export ASI_AUTOMATED_RUN=1; cd __REPO__ && __PYTHON__ -m agent_skill_improver --config __CONFIG__ doctor

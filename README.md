@@ -52,7 +52,7 @@ version:
 | Private artifacts are world-readable on a shared machine | The state root and every subdirectory are 0700 and every artifact is 0600, set explicitly rather than left to the umask. Existing state is repaired and then re-measured; a repair that did not take effect is a refusal. A state directory that is really a symlink is refused *before* anything follows or chmods it, so the tree that gets made private is the tree that was configured. |
 | The judge agrees with the improver because it *is* the improver | By default the gate refuses when the judge's command matches the improver's; daily receipts record the command-independence check. |
 | A candidate is applied against a changed file | Apply recomputes the base hash and refuses on mismatch, unless the live file is the candidate's own replacement from an earlier run of this apply that stopped before recording it, which apply then records without writing again. |
-| An apply goes wrong | Every apply writes a backup first; `asi rollback` restores it and verifies the restored hash. The backup and its manifest are verified *before* the restore overwrites anything, so an unusable backup is a refusal with the live file intact rather than a lost original. Rollback only ever overwrites the text its own apply wrote: a skill edited since is refused, not clobbered. |
+| An apply goes wrong | Before replacing a skill file, apply writes a backup, checks its hash, and writes a manifest; an apply that only records an earlier interrupted write reuses the backup and manifest that write left, once the manifest is checked to record this write; `asi rollback` verifies the backup and manifest before it restores, then verifies the restored hash. The backup and its manifest are verified *before* the restore overwrites anything, so an unusable backup is a refusal with the live file intact rather than a lost original. Rollback only ever overwrites the text its own apply wrote: a skill edited since is refused, not clobbered. |
 
 ## How this differs from other self-improving agent projects
 
@@ -222,8 +222,11 @@ asi apply CAND-... \
    The one exception is the candidate's own replacement, written by an earlier
    run of this apply that stopped before recording it: apply then records that
    write and does not write again.
-4. **No automation marker.** The daily driver always sets `ASI_AUTOMATED_RUN`, so
-   an apply invoked from inside a scheduled run refuses even with a valid token.
+4. **No active automation marker.** The daily driver sets `ASI_AUTOMATED_RUN`
+   only inside its own process; the scheduler templates set it for their job.
+   Apply refuses while it is active, even with a valid token. Apply does not
+   authenticate its caller: the token and acknowledgement are review interlocks,
+   not a security boundary, and a separate unmarked process can still apply.
 
 Apply also refuses a candidate that did not pass the gate, refuses a
 non-canonical (mirror) root, refuses a protected skill, and refuses to write
@@ -233,8 +236,11 @@ anything other than `SKILL.md`.
 
 `asi scheduler-template launchd` and `... cron` print a template and install
 nothing. Read [`docs/SCHEDULING.md`](docs/SCHEDULING.md) first. The scheduled job
-runs the daily pass in commit mode; there is no way to add an apply step to it
-that works, and that is by design.
+runs the daily pass in commit mode and sets the automation marker for its whole
+command, so an apply step appended to that command is refused. On cronie, Vixie and
+OpenBSD, the cron environment line also marks later lines; BusyBox needs the
+export prefix on each line. A separate job without the marker can still run
+apply with a token and acknowledgement. **Do not schedule apply.**
 
 ## Verification
 

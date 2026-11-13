@@ -106,12 +106,24 @@ class EachMarkerIsFilledOnceTests(unittest.TestCase):
         argv += ["daily", "--commit"]
         if flavor == "cron":
             (job,) = [
-                line for line in out.splitlines() if line.strip() and not line.startswith("#")
+                line
+                for line in out.splitlines()
+                if line.strip() and not line.startswith("#") and "daily --commit" in line
             ]
             words = shell_words(cron_command(job))
             self.assertEqual(
                 words,
-                ["cd", paths["repo"], "&&", *argv, ">>", paths["state"] + "/daily.out.log"]
+                [
+                    "export",
+                    "ASI_AUTOMATED_RUN=1",
+                    ";",
+                    "cd",
+                    paths["repo"],
+                    "&&",
+                    *argv,
+                    ">>",
+                    paths["state"] + "/daily.out.log",
+                ]
                 + ["2", ">>", paths["state"] + "/daily.err.log"],
             )
             return words
@@ -149,7 +161,7 @@ class EachMarkerIsFilledOnceTests(unittest.TestCase):
 
     def test_a_marker_in_the_config_path_cannot_add_a_shell_command(self) -> None:
         words = self.assert_runs_exactly("cron", config_name=INJECTING)
-        self.assertNotIn(";", words)
+        self.assertEqual(words.count(";"), 1)  # Only the deliberate export prefix.
         self.assertEqual(words.count("&&"), 1)
         argv = self.assert_runs_exactly("launchd", config_name=INJECTING)
         self.assertTrue(argv[4].endswith(f"/{INJECTING}/config/config.toml"), argv[4])

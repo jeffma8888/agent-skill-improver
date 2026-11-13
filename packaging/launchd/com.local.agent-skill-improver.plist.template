@@ -17,9 +17,10 @@
   skill tree before and after so a mutation from any source is visible in the
   receipt.
 
-  Promotion is deliberately absent from this file. The apply command refuses to
-  run when the automation marker is set, and the daily driver always sets it.
-  Adding an apply step here does not work, and that is by design.
+  Promotion is deliberately absent from this file. EnvironmentVariables sets the
+  automation marker for this whole job, so an apply step added to it refuses.
+  A separate job without the marker can still run apply with a token and
+  acknowledgement: apply does not authenticate its caller. Do not schedule apply.
 
   Note on XML: comments in a property list may not contain a double hyphen, so
   flags are named in prose here rather than typed literally.
@@ -28,6 +29,12 @@
 <dict>
   <key>Label</key>
   <string>com.local.agent-skill-improver</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ASI_AUTOMATED_RUN</key>
+    <string>1</string>
+  </dict>
 
   <key>ProgramArguments</key>
   <array>
