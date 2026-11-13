@@ -24,7 +24,9 @@ so each refusal of it comes where it came, and gives the write the call that
 makes it, which the write makes only as it takes its backup, after its target
 check, its read and its hash check, so a refusal of the making itself (the
 mkdir failing, or the directory found not a real one after it) comes there
-now, after the write's own. Nothing is removed.
+now, after the write's own. Nothing is removed. Since then the bytes made other
+than UTF-8 are refused naming the candidate too (the module
+``test_a_skill_made_other_than_utf8_while_apply_runs_is_refused_with_the_candidate``).
 """
 
 from __future__ import annotations
@@ -222,21 +224,22 @@ class TheBackupDirectoryTests(unittest.TestCase):
             self.assertEqual(case.status(), "validated")
             self.assertEqual(case.backups(), [])
 
-    def test_bytes_made_other_than_utf8_after_applys_own_check_name_none_and_leave_no_backup(
+    def test_bytes_made_other_than_utf8_after_applys_own_check_name_it_and_leave_no_backup(
         self,
     ) -> None:
-        # Not covered: the write's read refuses them as before, naming no candidate.
+        # The write's read words them with the candidate; its words are
+        # test_a_skill_made_other_than_utf8_while_apply_runs_is_refused_with_the_candidate's.
         with tempfile.TemporaryDirectory() as tmp:
             case = Validated(Path(tmp))
             rc, said = case.apply_after(lambda: case.skill.write_bytes(b"\xff" + case.original))
             self.assertEqual(rc, REFUSED, said)
             self.assertTrue(
                 first_line(said).startswith(
-                    f"UndecodableDocument: skill document {case.skill} is not valid UTF-8 at byte 0"
+                    f"UndecodableDocument: refusing to apply {CID}: its canonical target "
+                    f"{case.skill} is not valid UTF-8 at byte 0"
                 ),
                 said,
             )
-            self.assertNotIn(CID, said)
             self.assertEqual(case.status(), "validated")
             self.assertEqual(case.backups(), [])
             case.put_back()

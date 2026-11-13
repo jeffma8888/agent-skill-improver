@@ -346,6 +346,30 @@ def changed_before_the_write(target: Path, current: str, expected: str, candidat
     )
 
 
+def undecodable_before_the_write(target: Path, exc: UnicodeDecodeError, candidate_id: str) -> str:
+    """The refusal of a write whose file is no longer UTF-8 when it reads it.
+
+    ``apply``'s own check reads the file first and refuses bytes that are not
+    UTF-8 with the candidate (``no_document_to_read`` in ``app/promote.py``), so
+    a file this read refuses changed while ``apply`` ran: after its check and
+    before this read. Measured before (3.11 and 3.13), this read refused it as
+    "skill document <path> is not valid UTF-8 ... fix the encoding and run the
+    command again", naming no candidate, where only the text the candidate was
+    written against, put back, let the same token through. With the candidate
+    it now names it and gives the two ways on ``apply``'s own check gives; the
+    backup is taken only after this read, so nothing was backed up.
+    """
+    return (
+        f"refusing to apply {candidate_id}: its canonical target {named_path(target)} is not "
+        f"valid UTF-8 at byte {exc.start} ({exc.reason}), so there is no base text to verify "
+        "against. The skill changed while this apply ran, after it checked the file and "
+        "before it wrote, and the skill was not written, nor anything backed up: with a "
+        "regular UTF-8 file holding the text it was written against back at that path, it "
+        "is reviewed and applied as before. To propose against other text instead, put a "
+        f"regular UTF-8 file there first, then {repropose_advice(candidate_id)}."
+    )
+
+
 def listed_as_protected(target: Path, named: str, candidate_id: str, verb: str) -> str:
     """The refusal of a skill listed in ``[guard].protected_skill_ids``.
 
@@ -915,7 +939,9 @@ class FilesystemSkillStore:
         ``candidate_id`` names the candidate ``apply`` is writing, so a file that
         changed after ``apply`` checked it is refused with that candidate and the
         advice ``apply``'s own check gives (see ``changed_before_the_write``), and
-        so is a target its own target check refuses. Measured before (3.11 and
+        so are a file whose bytes are no longer UTF-8 when it reads it (see
+        ``undecodable_before_the_write``) and a target its own target check
+        refuses. Measured before (3.11 and
         3.13, a validated candidate, then a second copy of the skill made in the
         editable root, or the skill removed, at the step ``apply`` takes after
         its own check): ``apply`` exited 3 with "refusing to write <path>: ...",
@@ -948,7 +974,18 @@ class FilesystemSkillStore:
         parent_fd, leaf = self._open_parent_pinned(Path(path), verb="write")
         try:
             data, target_mode = self._read_pinned(parent_fd, leaf, target, verb="write")
-            current = self._document_sha256(data, target)
+            try:
+                current = self._document_sha256(data, target)
+            except UndecodableDocument as undecodable:
+                # Given the candidate, the read words it as ``apply``'s own check
+                # does; without one (a direct write) as before.
+                cause = undecodable.__cause__
+                if not candidate_id or not isinstance(cause, UnicodeDecodeError):
+                    raise
+                raise UndecodableDocument(
+                    undecodable_before_the_write(target, cause, candidate_id),
+                    record_id=undecodable.record_id,
+                ) from undecodable
             if current != expected_sha256:
                 raise BaseHashMismatch(
                     changed_before_the_write(target, current, expected_sha256, candidate_id)

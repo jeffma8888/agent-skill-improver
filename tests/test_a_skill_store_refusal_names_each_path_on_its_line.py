@@ -116,7 +116,7 @@ SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: the root as the candidate's path spells it in one, so the count rose to 77.
 #: The target check's refusal of a target that opens the canonical copy's
 #: file under another name names that copy, so it rose to 78.
-NAMED_AT_THIS_CHANGE = 78
+NAMED_AT_THIS_CHANGE = 79
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:
