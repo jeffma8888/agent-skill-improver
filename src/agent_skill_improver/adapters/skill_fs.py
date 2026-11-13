@@ -39,6 +39,7 @@ from ..domain.skills import (
     classify_target,
     is_payload_name,
     parse_frontmatter,
+    protected_dir_holding,
     resolve_groups,
     tree_digest_of,
 )
@@ -1617,14 +1618,13 @@ class FilesystemSkillStore:
             )
 
     def _assert_not_protected(self, target: Path, *, verb: str = "write") -> None:
-        resolved = target.resolve()
-        for guard in self._protected:
-            if resolved == guard or guard in resolved.parents:
-                raise SelfMutationRefused(
-                    f"refusing to {verb} {named_path(target)}: it is inside a protected path ({named_path(guard)}). "
-                    "This tool never edits its own source, config, or rubrics -- a loop that "
-                    "can rewrite its own scoring criteria has no gate at all."
-                )
+        guard = protected_dir_holding(target.resolve(), self._protected)
+        if guard is not None:
+            raise SelfMutationRefused(
+                f"refusing to {verb} {named_path(target)}: it is inside a protected path ({named_path(guard)}). "
+                "This tool never edits its own source, config, or rubrics -- a loop that "
+                "can rewrite its own scoring criteria has no gate at all."
+            )
 
     def _assert_no_link_below_root(
         self, spelled: Path, *, verb: str = "replace", candidate_id: str = "", skill_id: str = ""

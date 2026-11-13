@@ -188,28 +188,36 @@ class ApplyRefusesTests(unittest.TestCase):
             raise cli.Stopped(signal.SIGTERM)
 
         moment = datetime.datetime(2026, 2, 1, 9, 0, 0, tzinfo=datetime.timezone.utc)
-        with tempfile.TemporaryDirectory() as tmp:
-            case = Validated(Path(tmp))
-            with mock.patch.object(cli, "SystemClock", return_value=FrozenClock(moment)):
-                rc, said = case.apply_with("_write_pinned", stopped)
-                self.assertEqual(rc, 128 + signal.SIGTERM, said)
-                (manifest,) = case.state.glob("backups/*/backup.json")
-                written = manifest.read_bytes()
-                after_the_stop = run(case.config, "rollback", CID)
-                rc, said = case.apply_with("write_bytes_atomic", no_space)
-            self.assertEqual(rc, REFUSED, said)
-            self.assertEqual(case.backups(), [manifest.parent])
-            self.assertEqual(
-                first_line(said), refused_with_the_candidate(case.skill, manifest.parent, NO_SPACE)
-            )
-            self.assertEqual(manifest.read_bytes(), written)
-            self.assertEqual(run(case.config, "rollback", CID), after_the_stop)
-            self.assertIn(f"{CID} was never applied", after_the_stop[1])
-            self.assertEqual(case.status(), "validated")
-            self.assertEqual(case.skill.read_bytes(), case.original)
-            rc, said = case.apply()
-            self.assertEqual(rc, 0, said)
-            self.assertEqual(case.status(), "applied")
+        # The retry's copy fails, or its copy is taken and its manifest fails:
+        # either way the stopped apply's backup.json is the same file after it,
+        # not removed and not written again, even with the same bytes.
+        for failing in ("write_bytes_atomic", "write_json"):
+            with self.subTest(failing=failing), tempfile.TemporaryDirectory() as tmp:
+                case = Validated(Path(tmp))
+                with mock.patch.object(cli, "SystemClock", return_value=FrozenClock(moment)):
+                    rc, said = case.apply_with("_write_pinned", stopped)
+                    self.assertEqual(rc, 128 + signal.SIGTERM, said)
+                    (manifest,) = case.state.glob("backups/*/backup.json")
+                    written = manifest.read_bytes()
+                    after_the_stop = run(case.config, "rollback", CID)
+                    kept = manifest.stat()
+                    rc, said = case.apply_with(failing, no_space)
+                self.assertEqual(rc, REFUSED, said)
+                self.assertEqual(case.backups(), [manifest.parent])
+                self.assertEqual(
+                    first_line(said),
+                    refused_with_the_candidate(case.skill, manifest.parent, NO_SPACE),
+                )
+                self.assertEqual(manifest.read_bytes(), written)
+                now = manifest.stat()
+                self.assertEqual((now.st_ino, now.st_mtime_ns), (kept.st_ino, kept.st_mtime_ns))
+                self.assertEqual(run(case.config, "rollback", CID), after_the_stop)
+                self.assertIn(f"{CID} was never applied", after_the_stop[1])
+                self.assertEqual(case.status(), "validated")
+                self.assertEqual(case.skill.read_bytes(), case.original)
+                rc, said = case.apply()
+                self.assertEqual(rc, 0, said)
+                self.assertEqual(case.status(), "applied")
 
 
 class TheWriteRefusesTests(unittest.TestCase):

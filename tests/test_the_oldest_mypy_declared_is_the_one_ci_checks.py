@@ -24,8 +24,9 @@ bash: a step is a line ``- <key>:`` at the steps' indent, and the text of a
 ``|`` or ``>`` block is passed over when they find the steps (so a step written
 inside another step's script is not taken for one). They hold that form, not its
 meaning: the same step in another of YAML's forms (a flow mapping, a merge key)
-fails them, and a check spelled other than a line ``mypy`` or ``mypy ...``
-(``python -m mypy``, a line of a heredoc, which bash does not run) is not seen.
+fails them, a check spelled other than a line ``mypy`` or ``mypy ...``
+(``python -m mypy``) is not seen, and a line ``mypy`` that bash does not run (one
+of a heredoc's) is taken for one.
 """
 
 from __future__ import annotations

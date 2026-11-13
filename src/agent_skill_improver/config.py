@@ -1181,7 +1181,8 @@ def _assert_editable_roots_outside_protected(
     canonical one for every skill. A read-only mirror inside a protected path
     is fine, since nothing is ever written to it,
     and a root that CONTAINS the config or state directory is fine too: only the
-    skills under those directories are unwritable, and the write path says so.
+    skills under those directories are unwritable, ``daily`` does not propose
+    them (``propose_candidate``), and the write path refuses them.
     """
     for root in roots:
         if not root.editable:

@@ -528,6 +528,21 @@ def classify_target(groups: Sequence[SkillGroup], path: Path) -> tuple[str, Skil
     return "unknown", None
 
 
+def protected_dir_holding(path: Path, protected: Sequence[Path]) -> Path | None:
+    """The protected path ``path`` is, or lies inside, if any; else None.
+
+    Pure, as the rest of this module: ``path`` and ``protected`` must already be
+    resolved (the snapshots carry resolved paths, and so do the config's
+    protected paths). The write path (``_assert_not_protected`` in
+    adapters/skill_fs.py) and the proposal (``propose_candidate`` in
+    app/pipeline.py) both ask it, so a skill the write refuses is not proposed.
+    """
+    for guard in protected:
+        if path == guard or guard in path.parents:
+            return guard
+    return None
+
+
 #: The UTF-8 byte-order mark as a character, where an editor may leave it.
 BOM = "\ufeff"
 

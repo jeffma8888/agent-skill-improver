@@ -798,6 +798,7 @@ def _propose_and_validate(
                 candidate_id=candidate_id,
                 created_at=iso(_now(state)),
                 protected_skill_ids=config.protected_skill_ids,
+                protected_paths=config.protected_paths,
                 max_cases=config.caps.max_failures_per_candidate,
                 read_text=skill_store.read_text,
             )

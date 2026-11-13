@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ..config import ROLE_IMPROVER, ROLE_SCORER, PromptConfig
-from ..domain.redaction import credential_labels, quoted_value
+from ..domain.redaction import credential_labels, named_path, quoted_value
 from ..domain.candidate import (
     Candidate,
     STATUS_PROPOSED,
@@ -28,7 +28,7 @@ from ..domain.conversation import NormalizedConversation
 from ..domain.failure import FailureCase, isolate_failures, passing_cases
 from ..domain.rubric import Rubric
 from ..domain.scoring import ScoreCard, parse_scorecard
-from ..domain.skills import BOM, SkillGroup, parse_frontmatter
+from ..domain.skills import BOM, SkillGroup, parse_frontmatter, protected_dir_holding
 from ..errors import CredentialInSkill, MalformedModelOutput, RecordDefect, SelfMutationRefused
 from ..hashing import normalize_text, sha256_text
 from ..ports import ModelRunner
@@ -233,6 +233,7 @@ def propose_candidate(
     candidate_id: str,
     created_at: str,
     protected_skill_ids: Sequence[str] = (),
+    protected_paths: Sequence[Path] = (),
     max_cases: int = 6,
     read_text: Callable[[Path], str] | None = None,
 ) -> Candidate:
@@ -241,6 +242,17 @@ def propose_candidate(
     ``read_text`` is the skill store's read when the caller has one, so the
     base the improver sees is read with the same refusals (a link, a fifo) as
     the base ``review`` and ``apply`` check against later.
+
+    ``protected_paths`` are the config's (this tool's package, the config file
+    and its directory, the state directory, the rubrics directory): a skill whose
+    canonical copy lies inside one is refused before the improver is asked, as
+    the write would refuse it. The config refuses an editable root inside one,
+    not a root holding one. Measured before (3.11 and 3.13, the config file, or
+    the rubrics directory, in the folder of the skill the fixtures fail): ``doctor``
+    said ready, ``daily --commit`` proposed it and paid the improver and the
+    judge, ``review`` refused it (``SelfMutationRefused``, naming no candidate),
+    no token could be had, and the record stayed ``validated`` and open until it
+    was deleted or the path was moved apart from the skill.
     """
     if group.canonical is None:
         raise RecordDefect(
@@ -254,6 +266,14 @@ def propose_candidate(
             "a proposal target"
         )
     canonical = group.canonical
+    held_by = protected_dir_holding(Path(canonical.path), protected_paths)
+    if held_by is not None:
+        raise SelfMutationRefused(
+            f"skill {group.skill_id!r} at {named_path(canonical.path)} lies inside a protected "
+            f"path ({named_path(held_by)}), so it is never a proposal target: this tool never "
+            "edits its own source, config, state or rubrics, and `apply` would refuse it. To "
+            "have it proposed, keep the skill's folder and that path apart."
+        )
     base_text = read_canonical_text(read_text, Path(canonical.path), skill_id=group.skill_id)
     found = credential_labels(base_text)
     if found:
