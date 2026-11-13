@@ -29,7 +29,7 @@ from typing import Any
 
 from ..adapters.conversation_cli import ConversationCliSource
 from ..adapters.fixture_source import FixtureConversationSource
-from ..adapters.model_command import CommandModelRunner
+from ..adapters.model_command import CommandModelRunner, Isolation
 from ..adapters.sandbox import NoSandbox, OsSandbox, detect, verify
 from ..adapters.skill_fs import FilesystemSkillStore
 from ..config import SOURCE_FIXTURES, Config
@@ -96,9 +96,15 @@ def build_runner(config: Config, state: StateStore | None = None) -> CommandMode
         )
     sandbox = OsSandbox(mechanism)
     report = verify(sandbox, workdir_root=workdir_root)
+    # An if, not a conditional expression: mypy before 1.12 joins the two arms
+    # to ``object``, and the type gate holds to the oldest mypy the project
+    # declares (``mypy>=1.8`` in pyproject.toml).
+    isolation: Isolation = sandbox
+    if not report.get("ok"):
+        isolation = NoSandbox()
     return CommandModelRunner(
         config.model_roles,
-        isolation=sandbox if report.get("ok") else NoSandbox(),
+        isolation=isolation,
         workdir_root=workdir_root,
         verification=report,
     )

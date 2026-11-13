@@ -84,6 +84,17 @@ jobs:
       - name: Type gate as on macOS
         run: mypy --platform darwin
 
+      # The oldest mypy pyproject.toml declares checks the source as well, on
+      # both platforms, so the floor a contributor may install cannot go stale:
+      # before this step mypy 1.8.0 to 1.11.2 failed on app/wiring.py while
+      # the newest passed. tests/test_the_oldest_mypy_declared_is_the_one_ci_checks.py
+      # holds this pin to the declared floor.
+      - name: Type gate at the declared floor
+        run: |
+          python -m pip install "mypy==1.8.0"
+          mypy
+          mypy --platform darwin
+
       - name: Fixture drift check
         run: python examples/build_fixtures.py --check
 
