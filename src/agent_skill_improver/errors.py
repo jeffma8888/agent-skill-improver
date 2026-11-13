@@ -148,6 +148,17 @@ class BackupUnusable(SafetyRefusal):
     """
 
 
+class BackupNotTaken(SafetyRefusal):
+    """The copy ``apply`` takes of a skill before it writes it could not be taken.
+
+    The copy and its manifest are written under the state tree before the skill
+    is touched, so a failure to make the backup directory or set its mode, to
+    write the copy or read its hash back, or to write the manifest (a full disk,
+    a backup directory this process can no longer write) leaves the skill as it
+    was and the candidate ``validated``, its token still good.
+    """
+
+
 class SkillWriteFailed(SafetyRefusal):
     """The platform refused the write of a skill document, which is unchanged.
 

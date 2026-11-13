@@ -115,8 +115,12 @@ SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: ``spelled_outside_every_root`` names them in each of its two wordings, and
 #: the root as the candidate's path spells it in one, so the count rose to 77.
 #: The target check's refusal of a target that opens the canonical copy's
-#: file under another name names that copy, so it rose to 78.
-NAMED_AT_THIS_CHANGE = 79
+#: file under another name names that copy, so it rose to 78. The write's
+#: refusal of bytes that are not UTF-8, worded with the candidate, names its
+#: target, so it rose to 79. The refusal of a backup that cannot be taken
+#: names the target and the backup directory in each of its two wordings,
+#: so it rose to 83.
+NAMED_AT_THIS_CHANGE = 83
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:

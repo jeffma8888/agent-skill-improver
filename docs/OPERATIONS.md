@@ -443,6 +443,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `BlockedRunUnreviewed` (`daily`, exit 5) | the newest daily receipt recorded a skill tree mutation and no run since has stated it was reviewed. Read `skill_tree.changes` in the receipt the message names, find out what wrote to the tree, then run once with `--commit --mutation-reviewed 2026-01-01` naming that run's day (only a committed run clears the block) |
 | `BackupUnusable` | rollback's backup or manifest does not verify (a field missing or not text, a backup whose hash differs, a backup that is a link, not in its manifest's directory or not UTF-8, a recorded path the platform cannot judge, a manifest that does not record this candidate's own apply, of its document from its base to its replacement), or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
 | `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |
+| `BackupNotTaken` | on `apply`: the backup taken before the write (the copy of the skill under `state/backups/<candidate>--<stamp>/` and its `backup.json`) could not be written (a full disk, a backup directory this process can no longer write). Both are written before the skill is, so the skill is unchanged and the record stays `validated`, its token still good: make room or fix the directory and run the same `apply` again. Whatever was written of the backup (an empty directory, or the copy with no `backup.json`) is left where it is, and `rollback` passes over a directory with no `backup.json`. The directory is named for the candidate and the second, so after an `apply` stopped before its skill write and run again within that second, a refused one leaves the stopped one's `backup.json` as it was: `rollback` reads it and answers that the candidate was never applied |
 | `SkillWriteFailed` | on `apply` or `rollback`: the platform refused the write of the skill document (a skill directory this process cannot write, a full disk). The replacement is written beside the document and renamed over it, so the document is unchanged: after `apply` it still holds the base text and the backup taken first is kept, after `rollback` it still holds the applied text. Fix the permission or the space and run the command again |
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config or rubrics). Never a proposal target and never written, by design. The list is read again by `review` and `apply`, so a skill listed after its candidate was validated gets no token from `review` and is not written by `apply`; `rollback` does not read it, so a skill listed after its apply can still be restored. On `review` and `apply`, the refusal for a listed skill names the candidate and says how it is closed: it stays open, and counts against `[caps].max_open_candidates`, until its record is deleted (measured: with the cap at 1, the next day stood down on it, and with the record deleted the next day ran); with the skill taken off the list, `review` and `apply` with the same token take it. An `apply` that finishes an earlier run of itself (see Recovery) records the write that run made before the list is asked, as before, so it marks a listed skill's candidate applied while writing nothing to the skill |
 | `ReadOnlyViolation` | something tried to write through a skill store opened read-only. The daily driver always opens it that way; only `apply` and `rollback` open it writable, so seeing this outside them is a bug report |
@@ -465,11 +466,14 @@ The backup and its manifest are verified before anything is written, so a
 `BackupUnusable` refusal means the applied file is still exactly as it was and
 you can try a different backup directory under `state/backups/`. Each directory
 there is named `<candidate id>--<stamp>`, and rollback uses only the newest one
-whose candidate id is exactly the one you named. The write makes the backup
+holding a `backup.json` whose candidate id is exactly the one you named. The write makes the backup
 directory only as it takes its backup, so an `apply` refused at its write, or
 stopped there by SIGINT, SIGHUP or SIGTERM, before that leaves no directory
 there; one whose write failed after that keeps the directory, with the copy in
-it once the copy was taken.
+it once the copy was taken, and with no `backup.json` of its own when the backup
+could not be taken (`BackupNotTaken`), so rollback passes over it unless an
+earlier apply of the candidate, stopped in the same second, left one there (see
+`BackupNotTaken` above).
 
 Rollback restores only from the record of this candidate's own apply: a
 manifest naming another document, or any write other than this candidate's

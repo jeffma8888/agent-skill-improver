@@ -27,8 +27,8 @@ def _close_quietly(fd: int) -> OSError | None:
     Every close here comes after the lock's outcome is settled: a refusal about
     to be raised, or the work done under the lock. Closing the descriptor ends
     the lock whatever the close reports (Linux's close(2) frees the descriptor
-    even when it returns an error, and so does macOS's, read from their manuals
-    and macOS's source, not measured here; and the ``asi`` program exits at the
+    even when it returns an error, and so does macOS's, read from Linux's manual
+    and macOS's (XNU) source, not measured here; and the ``asi`` program exits at the
     end of each command, which frees it in any case, though a caller of
     ``cli.main`` may go on), so the outcome, not the close, is what the operator
     is told. Only an ``OSError`` is returned; anything else (a stop signal's

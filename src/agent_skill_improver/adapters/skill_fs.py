@@ -43,6 +43,7 @@ from ..domain.skills import (
     tree_digest_of,
 )
 from ..errors import (
+    BackupNotTaken,
     BackupUnusable,
     BaseHashMismatch,
     LinkedTargetRefused,
@@ -319,6 +320,41 @@ def _root_shape_problem(path: Path) -> str | None:
     if stat.S_ISREG(st.st_mode):
         return "a regular file, not a directory"
     return f"{_entry_kind(path)}, not a directory"
+
+
+def backup_not_taken(target: Path, backup_dir: Path, exc: OSError, candidate_id: str) -> str:
+    """The refusal of a write whose backup could not be taken.
+
+    The copy and its manifest go under the state tree before the skill is
+    written, so the skill is as it was. Measured before (3.11 and 3.13, a
+    validated candidate, its token taken, the copy's write or the manifest's
+    raising ENOSPC): ``apply`` exited 70, "internal error: this is a bug in
+    asi", the record ``validated``, the skill unchanged, and under ``backups/``
+    an empty directory (the copy) or one holding only the copy (the manifest);
+    with the space back, ``apply`` with the same token applied the candidate.
+    Nothing is removed, and the words say only that this apply (or write) made
+    no ``backup.json`` there: ``rollback`` passes over a directory with none,
+    but the directory is named for the candidate and the second, so an earlier
+    apply of the candidate stopped before its skill write within the same
+    second has left its own there, which is kept, and which ``rollback`` reads
+    as that apply's (the skill still holds its base, so it answers that the
+    candidate was never applied).
+    """
+    if not candidate_id:
+        return (
+            f"refusing to write {named_path(target)}: its backup (the copy and its manifest) "
+            f"could not be written before the write ({why_unreadable(exc)}), so the skill was "
+            f"not written. Whatever was written of the backup stays under "
+            f"{named_path(backup_dir)}, and this write made no backup.json there."
+        )
+    return (
+        f"refusing to apply {candidate_id}: the backup of its canonical target "
+        f"{named_path(target)} (the copy and its manifest) could not be written before the "
+        f"write ({why_unreadable(exc)}), so the skill was not written and the candidate is as "
+        "it was. Make room for the backup, or make the backup directory writable again, then "
+        "run the same apply: its token still holds. Whatever was written of the backup stays "
+        f"under {named_path(backup_dir)}, and this apply wrote no backup.json there."
+    )
 
 
 def changed_before_the_write(target: Path, current: str, expected: str, candidate_id: str) -> str:
@@ -1004,16 +1040,21 @@ class FilesystemSkillStore:
             # touched" with the text already changed and no manifest written.
             written_mode = target_mode | stat.S_IRUSR
             backup_dir = Path(backup_dir() if callable(backup_dir) else backup_dir)
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            os.chmod(backup_dir, 0o700)
             backup_path = backup_dir / f"{target.name}.bak"
-            # Written as a fresh regular file at 0600, atomically. The backup
-            # lives under the owner-only state tree, so it must not inherit a
-            # world-readable skill's mode; and ``os.replace`` swaps the directory
-            # entry, so a link planted at this path is replaced rather than
-            # written through to wherever it pointed.
-            write_bytes_atomic(backup_path, data, mode=BACKUP_FILE_MODE)
-            backup_sha = sha256_file(backup_path)
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(backup_dir, 0o700)
+                # Written as a fresh regular file at 0600, atomically. The backup
+                # lives under the owner-only state tree, so it must not inherit a
+                # world-readable skill's mode; and ``os.replace`` swaps the
+                # directory entry, so a link planted at this path is replaced
+                # rather than written through to wherever it pointed.
+                write_bytes_atomic(backup_path, data, mode=BACKUP_FILE_MODE)
+                backup_sha = sha256_file(backup_path)
+            except OSError as exc:
+                raise BackupNotTaken(
+                    backup_not_taken(target, backup_dir, exc, candidate_id)
+                ) from exc
             if backup_sha != current:
                 raise BaseHashMismatch(
                     f"backup verification failed for {named_path(target)}: copy hashes {backup_sha[:12]} "
@@ -1030,20 +1071,25 @@ class FilesystemSkillStore:
             # after: an apply stopped as the write returned left the skill
             # changed, the candidate ``validated`` and no manifest, and
             # ``rollback`` answered that the candidate was never applied.
-            write_json(
-                manifest_path,
-                {
-                    "schema": "asi.backup.v1",
-                    "target_path": str(target),
-                    "skill_id": skill_id,
-                    "actor": actor,
-                    "previous_sha256": current,
-                    "new_sha256": new_sha,
-                    "backup_path": str(backup_path),
-                    "target_mode": oct(written_mode),
-                    "rollback_command": rollback,
-                },
-            )
+            try:
+                write_json(
+                    manifest_path,
+                    {
+                        "schema": "asi.backup.v1",
+                        "target_path": str(target),
+                        "skill_id": skill_id,
+                        "actor": actor,
+                        "previous_sha256": current,
+                        "new_sha256": new_sha,
+                        "backup_path": str(backup_path),
+                        "target_mode": oct(written_mode),
+                        "rollback_command": rollback,
+                    },
+                )
+            except OSError as exc:
+                raise BackupNotTaken(
+                    backup_not_taken(target, backup_dir, exc, candidate_id)
+                ) from exc
             try:
                 _write_pinned(
                     parent_fd, leaf, self._in_document_convention(text, data), mode=written_mode

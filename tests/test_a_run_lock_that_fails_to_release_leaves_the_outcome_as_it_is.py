@@ -372,6 +372,7 @@ class TheLockKeepsWhatItsReleaseReportedTests(unittest.TestCase):
                     with lock:
                         pass
                 self.assertIsInstance(lock.release_error, OSError)
+                assert lock.release_error is not None
                 self.assertEqual(lock.release_error.errno, errno.EIO)
                 with RunLock(path, owner="pid=2 the next one"):
                     self.assertEqual(path.read_text(encoding="utf-8"), "pid=2 the next one\n")
