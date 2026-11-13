@@ -21,11 +21,37 @@ from ..domain.redaction import why_unreadable
 from ..errors import LockHeld, SafetyRefusal
 
 
+def _close_quietly(fd: int) -> OSError | None:
+    """Close ``fd``, returning an error the close reports rather than raising it.
+
+    Every close here comes after the lock's outcome is settled: a refusal about
+    to be raised, or the work done under the lock. Closing the descriptor ends
+    the lock whatever the close reports (Linux's close(2) frees the descriptor
+    even when it returns an error, and so does macOS's, read from their manuals
+    and macOS's source, not measured here; and the ``asi`` program exits at the
+    end of each command, which frees it in any case, though a caller of
+    ``cli.main`` may go on), so the outcome, not the close, is what the operator
+    is told. Only an ``OSError`` is returned; anything else (a stop signal's
+    exception) is raised as it is, the close done. Measured
+    before (3.11 and 3.13, the close made to report EIO after closing the
+    descriptor): ``apply`` and ``daily`` refused while another holder had the
+    lock exited 70, "internal error", with the holder's name lost.
+    """
+    try:
+        os.close(fd)
+    except OSError as exc:
+        return exc
+    return None
+
+
 class RunLock:
     def __init__(self, path: Path, *, owner: str = "") -> None:
         self.path = Path(path)
         self.owner = owner or f"pid={os.getpid()}"
         self._fd: int | None = None
+        # What the latest release of the lock reported as an OSError, kept and
+        # never raised; None after a release that reported nothing (see __exit__).
+        self.release_error: OSError | None = None
 
     @property
     def _shown(self) -> str:
@@ -76,13 +102,13 @@ class RunLock:
         try:
             kind = os.fstat(fd).st_mode
         except OSError as exc:
-            os.close(fd)
+            _close_quietly(fd)
             raise SafetyRefusal(
                 f"refusing to use {self._shown} as a run lock: cannot stat it "
                 f"({why_unreadable(exc)})"
             ) from exc
         if not stat.S_ISREG(kind):
-            os.close(fd)
+            _close_quietly(fd)
             raise SafetyRefusal(
                 f"refusing to use {self._shown} as a run lock: the lock leaf is not a regular "
                 "file. Remove the entry at that path if you did not put it there."
@@ -96,13 +122,13 @@ class RunLock:
             os.fchmod(fd, 0o600)
             actual_mode = os.fstat(fd).st_mode & 0o777
         except OSError as exc:
-            os.close(fd)
+            _close_quietly(fd)
             raise SafetyRefusal(
                 f"refusing to use {self._shown} as a run lock: cannot enforce mode 0600 "
                 f"({why_unreadable(exc)})"
             ) from exc
         if actual_mode != 0o600:
-            os.close(fd)
+            _close_quietly(fd)
             raise SafetyRefusal(
                 f"refusing to use {self._shown} as a run lock: mode is {oct(actual_mode)}, want 0600"
             )
@@ -113,7 +139,7 @@ class RunLock:
                 held = os.read(fd, 400).decode("utf-8", errors="replace").strip()
             except OSError:
                 held = ""
-            os.close(fd)
+            _close_quietly(fd)
             # The holder is a run or a promotion; its owner line says which.
             # Spelled onto one line: it is read back from a file.
             raise LockHeld(
@@ -127,7 +153,7 @@ class RunLock:
             os.write(fd, f"{self.owner}\n".encode("utf-8"))
             os.fsync(fd)
         except BaseException:
-            os.close(fd)
+            _close_quietly(fd)
             raise
         self._fd = fd
         return self
@@ -138,12 +164,36 @@ class RunLock:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self._fd is not None:
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-            finally:
-                os.close(self._fd)
-                self._fd = None
+        """Release the lock; an ``OSError`` the release reports is kept, never raised.
+
+        The unlock and the close come after the work under the lock is done or
+        refused, and the close ends the lock (see ``_close_quietly``) after an
+        unlock that failed in any way, so neither replaces that outcome; the
+        error is kept in ``release_error``, the unlock's if both fail, and each
+        release starts it again at None. Anything raised that is no ``OSError``
+        (a stop signal's exception, during the unlock or the close) is raised as
+        it is, after the close: measured with the first form of this change (3.11
+        and 3.13), a SIGTERM during the unlock in ``cli.main`` left the descriptor
+        open and the next ``daily`` in that process refused ``LockHeld``, where
+        before it took the lock. Measured before (3.11 and 3.13, the unlock or the
+        close made to report EIO, the descriptor closed all the same): an
+        ``apply`` refused at the write exited 70, "internal error", with its
+        refusal lost; an ``apply`` that applied the candidate (record applied,
+        skill written, backup taken) exited 70 too, and so did a ``rollback``
+        that rolled it back and a committed ``daily`` that had written its
+        receipt; the lock was free after each (the next command took it).
+        """
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        self.release_error = None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError as exc:
+            self.release_error = exc
+        finally:
+            closed = _close_quietly(fd)
+            self.release_error = self.release_error or closed
 
     def to_dict(self) -> dict[str, Any]:
         return {"path": str(self.path), "owner": self.owner}
