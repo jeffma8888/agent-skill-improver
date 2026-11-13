@@ -72,8 +72,12 @@ FINISHING_NOTE = (
 )
 
 APPLY_ENV_HINT = (
-    "Promotion is a human action. Run it from an interactive shell: "
-    "asi review <candidate-id> then asi apply <candidate-id> --approve <token> --i-reviewed-this"
+    "After review, run apply from an unmarked interactive shell; do not schedule apply. "
+    "This marker is an interlock, not caller authentication."
+)
+ROLLBACK_ENV_HINT = (
+    "Run rollback from an unmarked interactive shell; do not schedule rollback. "
+    "This marker is an interlock, not caller authentication."
 )
 
 
@@ -239,7 +243,7 @@ def apply_candidate(
     operator: str = "",
     rubrics: Any = None,
 ) -> dict[str, Any]:
-    """Write the candidate's text to the canonical skill file. Human-gated."""
+    """Write the candidate's text to the canonical skill file. Review-gated."""
     if automation_active():
         raise AutomationRefused("promotion refused: automation marker is set. " + APPLY_ENV_HINT)
     if candidate.status != STATUS_VALIDATED:
@@ -555,9 +559,9 @@ def rollback_candidate(
     state: StateStore,
     clock: Clock,
 ) -> dict[str, Any]:
-    """Restore the file this candidate overwrote, from its verified backup. Human-gated."""
+    """Restore the file this candidate overwrote, from its verified backup. Review-gated."""
     if automation_active():
-        raise AutomationRefused("rollback refused: automation marker is set. " + APPLY_ENV_HINT)
+        raise AutomationRefused("rollback refused: automation marker is set. " + ROLLBACK_ENV_HINT)
     # The manifest is chosen under the lock too: chosen before it, a rollback
     # waiting on an apply would restore from the backup that apply then made
     # obsolete.

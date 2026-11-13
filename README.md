@@ -53,7 +53,7 @@ version:
 | Private artifacts are world-readable on a shared machine | The state root and every subdirectory are 0700 and every artifact is 0600, set explicitly rather than left to the umask. Existing state is repaired and then re-measured; a repair that did not take effect is a refusal. A state directory that is really a symlink is refused *before* anything follows or chmods it, so the tree that gets made private is the tree that was configured. |
 | The judge agrees with the improver because it *is* the improver | By default the gate refuses when the judge's command matches the improver's; daily receipts record the command-independence check. |
 | A candidate is applied against a changed file | Apply recomputes the base hash and refuses on mismatch, unless the live file is the candidate's own replacement from an earlier run of this apply that stopped before recording it, which apply then records without writing again. |
-| An apply goes wrong | Before replacing a skill file, apply writes a backup, checks its hash, and writes a manifest; an apply that only records an earlier interrupted write reuses the backup and manifest that write left, once the manifest is checked to record this write; `asi rollback` verifies the backup and manifest before it restores, then verifies the restored hash. The backup and its manifest are verified *before* the restore overwrites anything, so an unusable backup is a refusal with the live file intact rather than a lost original. Rollback only ever overwrites the text its own apply wrote: a skill edited since is refused, not clobbered. |
+| An apply goes wrong | Before replacing a skill file, apply writes a backup, checks its hash, and writes a manifest; an apply that only records an earlier interrupted write reuses the backup and manifest that write left, once the manifest is checked to record this write; `asi rollback` verifies the restored hash. The backup and its manifest are verified *before* the restore overwrites anything, so an unusable backup is a refusal with the live file intact rather than a lost original. Rollback only ever overwrites the text its own apply wrote: a skill edited since is refused, not clobbered. |
 
 ## How this differs from other self-improving agent projects
 
@@ -196,7 +196,7 @@ hosted-model option for a private source, are in
 | `candidates` | `state/` directory modes only (created empty and owner-only if absent) | the review queue |
 | `review` | as `candidates` | a candidate's full argument, diff, validation evidence (per replayed case and judgement) and approval token |
 | `set-aside` | as `candidates` | what runs set aside: quarantined, refused and deferred records, newest first, with stage and reason |
-| `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | the only skill writer. Human-gated, see below |
+| `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | the only skill writer. Review-gated, see below |
 | `rollback` | a skill file, plus `state/` (candidate status, receipt) | restores a backup and verifies the hash |
 | `scheduler-template` | nothing | prints a launchd or cron template. Installs nothing |
 | `selftest` | nothing | re-checks the structural safety invariants on the deployed source |

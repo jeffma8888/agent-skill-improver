@@ -10,14 +10,14 @@ Command surface, and which of them can change anything on disk:
                         DRY RUN BY DEFAULT: nothing under state/ is written; --commit persists.
     candidates          read-only.
     review              read-only. Prints the argument, the diff, and the approval token.
-    apply               THE ONLY command that writes a skill file. Human-gated.
+    apply               THE ONLY command that writes a skill file. Review-gated.
     rollback            restores a previously applied candidate from its backup.
     scheduler-template  prints a launchd or cron template. Installs nothing.
     selftest            re-checks the structural safety invariants on this checkout.
 
 ``apply`` refuses while the automation marker is active. The daily driver sets it
 only inside its own process; the scheduler templates set it for their whole job
-command (cron also marks later lines on crons supporting environment assignments).
+command (cron also marks later lines on cronie, Vixie and OpenBSD cron).
 Apply needs a content-derived token and acknowledgement but does not authenticate
 its caller: a separate unmarked process can still apply. Do not schedule apply.
 """
@@ -2342,7 +2342,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("candidate_id")
     p_review.set_defaults(func=cmd_review)
 
-    p_apply = add("apply", "THE ONLY command that writes a skill file (human-gated)")
+    p_apply = add("apply", "THE ONLY command that writes a skill file (review-gated)")
     p_apply.add_argument("candidate_id")
     p_apply.add_argument("--approve", help="approval token printed by `asi review`")
     p_apply.add_argument(

@@ -431,7 +431,7 @@ class DocumentedRefusalsExist(unittest.TestCase):
     ERRORS = REPO / "src" / "agent_skill_improver" / "errors.py"
     SRC = REPO / "src" / "agent_skill_improver"
     OPERATIONS = REPO / "docs" / "OPERATIONS.md"
-    #: Operator-facing: refusals the human-gated paths raise, and the daily lock.
+    #: Operator-facing: refusals the review-gated paths raise, and the daily lock.
     #: ``RecordDefect``/``TransientFailure`` subclasses are per-record outcomes
     #: that land in quarantine or deferral files, not on stderr, and
     #: ``ConfigError`` is covered by ``asi doctor``.

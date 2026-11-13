@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-skill-improver"
 version = "0.1.0"
-description = "Safe, human-gated daily self-improvement loop for agent skills, grounded in a conversation CLI."
+description = "Safe, review-gated daily self-improvement loop for agent skills, grounded in a conversation CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

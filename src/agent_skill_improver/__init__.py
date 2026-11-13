@@ -1,8 +1,9 @@
-"""agent-skill-improver: a safe, human-gated daily self-improvement loop for agent skills.
+"""agent-skill-improver: a safe, review-gated daily self-improvement loop for agent skills.
 
 Design rule that governs the whole package: automation may *observe, score,
 isolate, propose and validate*. It may never mutate a live skill and it may
-never promote its own rubric. Promotion is a separate, explicitly human command.
+never promote its own rubric. Promotion is separate, with review interlocks,
+not caller authentication.
 """
 
 __version__ = "0.1.0"

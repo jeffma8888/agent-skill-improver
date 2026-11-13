@@ -160,7 +160,7 @@ class LeakScannerRulesAreSound(unittest.TestCase):
     def test_d5_the_title_rule_does_not_fire_on_the_words_apart(self) -> None:
         for benign in (
             "an agent that runs one bounded pass",
-            "the review workflow is human-gated",
+            "the review workflow is review-gated",
             "agent, then workflow",
         ):
             with self.subTest(benign=benign):

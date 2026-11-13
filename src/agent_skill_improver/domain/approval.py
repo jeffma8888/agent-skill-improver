@@ -20,7 +20,7 @@ and make every promotion auditable:
 3. ``apply`` refuses outright when the automation marker is active in the
    environment. The daily driver sets it only inside its own process; the
    scheduler templates set it for their whole job command (and later cron lines
-   where cron supports environment assignments);
+   on cronie, Vixie and OpenBSD cron);
 4. the daily driver never imports the apply path at all -- enforced by a test
    that reads the module source.
 
