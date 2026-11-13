@@ -119,8 +119,11 @@ SHORT_HASH = re.compile(r"[a-z_0-9]+\[:12\]")
 #: refusal of bytes that are not UTF-8, worded with the candidate, names its
 #: target, so it rose to 79. The refusal of a backup that cannot be taken
 #: names the target and the backup directory in each of its two wordings,
-#: so it rose to 83.
-NAMED_AT_THIS_CHANGE = 83
+#: so it rose to 83. The refusal of a target inside a protected path, its
+#: words moved into ``inside_a_protected_path``, names the target and the
+#: protected path in each of its two wordings where its ``raise`` named them
+#: once, so it rose to 85.
+NAMED_AT_THIS_CHANGE = 85
 
 
 def _interpolations() -> list[tuple[int, str, ast.FormattedValue]]:

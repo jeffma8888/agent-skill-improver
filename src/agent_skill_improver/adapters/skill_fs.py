@@ -444,6 +444,46 @@ def listed_as_protected(target: Path, named: str, candidate_id: str, verb: str) 
     )
 
 
+def inside_a_protected_path(target: Path, guard: Path, candidate_id: str, verb: str) -> str:
+    """The refusal of a target that is, or lies inside, a protected path.
+
+    The protected paths are this tool's package, the config file and its
+    directory, the state directory and the rubrics directory, as the config
+    names them when ``review`` or ``apply`` runs, so a candidate validated
+    before one of them came to hold its skill is refused here. Measured before
+    (3.11 and 3.13, a committed run with one validated candidate, its token
+    taken, then the config file moved into the skill's folder, or the rubrics
+    directory pointed at it): ``review`` and ``apply`` each exited 3 with
+    ``SelfMutationRefused`` "refusing to review <path>: it is inside a protected
+    path (<dir>)" and "refusing to write <path>: ...", which named no candidate
+    and no way on; the record stayed ``validated``, open, counting against
+    ``[caps].max_open_candidates``, the skill unchanged and no backup taken.
+    With the candidate the refusal now names it, for the command that asked,
+    and says how it is closed; without one (``rollback``, the write's own
+    check of a target no candidate names) it is worded as before. It says
+    "its target", not its canonical copy: the check is asked before the target
+    is judged canonical.
+    """
+    if not candidate_id:
+        return (
+            f"refusing to {verb} {named_path(target)}: it is inside a protected path "
+            f"({named_path(guard)}). This tool never edits its own source, config, or "
+            "rubrics -- a loop that can rewrite its own scoring criteria has no gate at all."
+        )
+    command = "review" if verb == "review" else "apply"
+    return (
+        f"refusing to {command} {candidate_id}: its target {named_path(target)} lies inside "
+        f"a protected path ({named_path(guard)}), so `apply` does not write it: this tool "
+        "never edits its own source, config, state or rubrics. The skill and the candidate "
+        "are unchanged. The candidate stays open, and counts against "
+        "[caps].max_open_candidates, until it is closed: to close it, delete its record "
+        f"({candidate_id}.json in the state directory's candidates/). If that protected "
+        "path is not meant to be where the skill is (a config file or a rubrics directory "
+        "placed in the skill's folder), move it out, and `review` and `apply` take the "
+        "candidate as before."
+    )
+
+
 def reached_through_a_link(spelled: Path, cursor: Path, candidate_id: str, verb: str) -> str:
     """The refusal of a target reached through ``cursor``, a symbolic link below its root.
 
@@ -1522,6 +1562,7 @@ class FilesystemSkillStore:
         made. ``skill_id`` is the skill the caller's
         record names, and ``candidate_id`` the candidate ``review`` or ``apply``
         is judging, which the refusal of a listed skill (``listed_as_protected``),
+        of a target inside a protected path (``inside_a_protected_path``),
         of a link below the root (``reached_through_a_link``), of a target
         spelled outside every root that resolves into one
         (``spelled_outside_every_root``) and of a target that is not the
@@ -1558,7 +1599,7 @@ class FilesystemSkillStore:
         """
         write = "write" if action == "write" else action
         self._assert_document(target, verb=write)
-        self._assert_not_protected(target, verb=write)
+        self._assert_not_protected(target, verb=write, candidate_id=candidate_id)
         group = self.assert_canonical_target(target, action=action, candidate_id=candidate_id)
         self._assert_not_a_protected_skill(
             target, group, skill_id, verb=write, candidate_id=candidate_id
@@ -1617,14 +1658,12 @@ class FilesystemSkillStore:
                 "privileged code and are never edited by an automated proposal."
             )
 
-    def _assert_not_protected(self, target: Path, *, verb: str = "write") -> None:
+    def _assert_not_protected(
+        self, target: Path, *, verb: str = "write", candidate_id: str = ""
+    ) -> None:
         guard = protected_dir_holding(target.resolve(), self._protected)
         if guard is not None:
-            raise SelfMutationRefused(
-                f"refusing to {verb} {named_path(target)}: it is inside a protected path ({named_path(guard)}). "
-                "This tool never edits its own source, config, or rubrics -- a loop that "
-                "can rewrite its own scoring criteria has no gate at all."
-            )
+            raise SelfMutationRefused(inside_a_protected_path(target, guard, candidate_id, verb))
 
     def _assert_no_link_below_root(
         self, spelled: Path, *, verb: str = "replace", candidate_id: str = "", skill_id: str = ""

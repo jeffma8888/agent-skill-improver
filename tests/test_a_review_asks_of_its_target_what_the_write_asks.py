@@ -141,8 +141,10 @@ class AProtectedPathIsRefusedAsProtectedByBothTests(_Target):
         inside.mkdir(parents=True)
         shutil.copy(self.skill, inside / "SKILL.md")
         self.spelled(inside / "SKILL.md", "tdd")
-        for proc in self.assert_both_refuse("SelfMutationRefused", "review", "write"):
-            self.assertIn("it is inside a protected path", proc.stderr)
+        for proc in self.assert_both_refuse(
+            "SelfMutationRefused", f"review {self.cid}:", f"apply {self.cid}:"
+        ):
+            self.assertIn(" lies inside a protected path ", proc.stderr)
 
 
 class AWriteTargetJudgedAsTheWriteJudgesItTests(unittest.TestCase):
