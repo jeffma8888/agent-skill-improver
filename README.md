@@ -4,11 +4,19 @@ A daily loop that reads your own agent conversations, finds places where a
 **skill** (a Markdown instruction file an agent loads) actually mis-served you,
 proposes a concrete edit, and then **stops and waits for a human**.
 
-The automated half can ingest, score, isolate, propose and validate. It cannot
-change a skill file, and it cannot change the rubric it is graded against.
+The automated half can ingest, score, isolate, propose and validate. The daily
+driver does not import the promotion module and refuses a writable skill store,
+so it does not write a skill file, and a rubric is outside the candidate write
+path. The model commands it runs are separate processes: with a private source
+the daily run refuses to start unless they run in a verified OS sandbox, and
+with the synthetic fixture source they run unconfined
+([what asi does, exactly](docs/PRIOR_ART.md#what-asi-does-exactly)).
 Applying a change is a separate command that requires a typed acknowledgement, a
-per-candidate approval token, an unchanged base hash, and validation evidence
-that the change fixed something without breaking anything.
+per-candidate approval token, an unchanged base hash (one exception is in
+[Applying a change](#applying-a-change)), and a passed gate. By
+default the gate needs at least one fix on a failure the improver was shown, no
+regressions, no holdout degradations, at least one holdout, and a blind judge
+preference for the candidate in at least half of the decided cases.
 
 ```
                          AUTOMATED (safe to schedule)                    HUMAN ONLY
@@ -32,19 +40,84 @@ version:
 
 | Risk | What stops it |
 | --- | --- |
-| The improver rewrites its own examiner | Rubrics are versioned files, loaded read-only, hashed onto every scorecard. The tool's own source, config and rubric directory are protected unconditionally and that list is **not** configurable. |
+| The improver rewrites its own examiner | Rubrics are versioned files, loaded read-only, hashed onto every scorecard. The candidate write path refuses any target inside the tool's package, the config file and its directory, the state directory or the rubrics directory; that list is built in code and is **not** configurable. This protects asi's write path; it does not confine model commands (see the private-transcript row below). |
 | A scheduled run edits a skill | The daily driver does not import the promotion module at all (asserted structurally), refuses a writable skill store, and hashes the whole skill tree before and after so any mutation is visible in the receipt. |
-| A skill ships executable code | Only a file named `SKILL.md` is ever writable. Scripts, hooks and binaries inside a skill directory are inventoried, reported, and refused as write targets. |
+| A skill ships executable code | The candidate write path replaces a file only if it is named `SKILL.md`, so scripts, hooks and binaries inside a skill directory are refused as write targets. When asi finds executable files in the skill's directory, or directories there it could not fully examine, a candidate's notes say how many, with up to five names each; with any such directory, the count of executable files is a floor. |
 | One bad record blocks everything | Records are quarantined or deferred **individually**. There is no whole-batch veto, because a batch veto turns a filter into a ratchet where one unresolved item blocks all progress for ever. |
 | Machine traffic drowns human sessions | Selection is round-robin across authorship classes, never a sorted prefix. In an orchestrated environment, generated threads can be the overwhelming majority of the corpus. |
-| A pasted credential rides along to the model | Transcripts are redacted for known credential shapes before any role sees them (the same shapes the repo's own leak scanner bans). A skill file that itself holds a token or key block is refused as a proposal target outright, because the improver would hand it straight back inside the new file. |
+| A pasted credential rides along to the model | When `redact_secrets` is set, which is the default, transcript text is masked for known credential shapes before it goes into a prompt (the same shapes the repo's own leak scanner bans); it can be turned off, and matching known shapes is best-effort. A skill file that itself holds a token or key block is refused as a proposal target outright, because the improver would hand it straight back inside the new file. |
 | A conversation tells the agent what to do | Captured text is fenced as quoted data, forged delimiters are neutralized, and the model is told the block is evidence rather than instruction. This reduces the chance of a wrong verdict; it is **not** what stops exfiltration. |
-| Private transcript text reaches a subprocess that can phone home | A private source refuses to run unless every model role is confined to a verified OS no-egress sandbox with a minimal environment. The exception for the synthetic fixture corpus is derived from the source kind, and `[source]` is a closed schema so no trust label can be typed into it. |
+| Private transcript text reaches a subprocess that can phone home | With a private source, the daily run refuses to start unless the model runner reports an OS sandbox that a probe verified on this host, every model role inside it, and an environment allowlist; the sandbox removes network access and does not restrict reads. The commands that list and export conversations are not model roles and run outside the sandbox. The exception for the synthetic fixture corpus is derived from the source kind, and `[source]` is a closed schema so no trust label can be typed into it. |
 | A credential in the operator's shell reaches the model child | The child environment is built from a five-name allowlist, never inherited. A variable whose *name* matches a credential, token or proxy pattern is a refusal, not a silent drop. |
 | Private artifacts are world-readable on a shared machine | The state root and every subdirectory are 0700 and every artifact is 0600, set explicitly rather than left to the umask. Existing state is repaired and then re-measured; a repair that did not take effect is a refusal. A state directory that is really a symlink is refused *before* anything follows or chmods it, so the tree that gets made private is the tree that was configured. |
-| The judge agrees with the improver because it *is* the improver | The gate refuses when the judge's command matches the improver's, and every receipt records the independence check. |
-| A candidate is applied against a changed file | Apply recomputes the base hash and refuses on mismatch. |
+| The judge agrees with the improver because it *is* the improver | By default the gate refuses when the judge's command matches the improver's; daily receipts record the command-independence check. |
+| A candidate is applied against a changed file | Apply recomputes the base hash and refuses on mismatch, unless the live file is the candidate's own replacement from an earlier run of this apply that stopped before recording it, which apply then records without writing again. |
 | An apply goes wrong | Every apply writes a backup first; `asi rollback` restores it and verifies the restored hash. The backup and its manifest are verified *before* the restore overwrites anything, so an unusable backup is a refusal with the live file intact rather than a lost original. Rollback only ever overwrites the text its own apply wrote: a skill edited since is refused, not clobbered. |
+
+## How this differs from other self-improving agent projects
+
+asi is not the first loop to improve agent instructions. The closest precedents
+are Anthropic's [skill-creator](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md)
+and the [writing-skills](https://github.com/obra/superpowers/blob/main/skills/writing-skills/SKILL.md)
+skill in obra/superpowers, which test new or revised skill text against a
+baseline, and GEPA's [gskill](https://github.com/gepa-ai/gepa/blob/main/src/gepa/gskill/README.md),
+which learns skill text from an empty start and tests it against a no-skill
+baseline. asi's case is the combination below, not the idea.
+
+| Project | Stars (2026-11-13) | What it improves | What it does better | Where asi differs |
+| --- | --- | --- | --- | --- |
+| [anthropics/skills](https://github.com/anthropics/skills) (skill-creator) | 193,869 | One skill, with its author | [Runs the agent on test tasks](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md#running-and-evaluating-test-cases), tests triggering, reports mean and standard deviation | Scores recorded conversations instead of running test tasks |
+| [obra/superpowers](https://github.com/obra/superpowers) (writing-skills) | 316,967 | Skills, written test-first | Pressure scenarios, a no-guidance control, [five or more runs per variant](https://github.com/obra/superpowers/blob/main/skills/writing-skills/SKILL.md#micro-test-wording-before-full-scenarios) | A rubric outside the candidate write path and, by default, a judge whose command differs from the improver's |
+| [gepa-ai/gepa](https://github.com/gepa-ai/gepa) (gskill) | 7,418 | Prompts, code and skills, by reflection | [Verifiable tests and a test split](https://github.com/gepa-ai/gepa/blob/main/src/gepa/gskill/README.md), a population of candidates | Makes one candidate per selected skill |
+| [stanfordnlp/dspy](https://github.com/stanfordnlp/dspy) | 39,028 | Instructions and examples in LM programs | [A general framework with many optimisers](https://github.com/stanfordnlp/dspy/blob/main/docs/docs/learn/optimization/optimizers.md) | Asks for one replacement text of one `SKILL.md` |
+| [jennyzzt/dgm](https://github.com/jennyzzt/dgm) | 2,506 | Its own Python code | [Finds structural changes on coding benchmarks](https://arxiv.org/abs/2505.22954) | asi's candidate write path replaces a file only if it is named `SKILL.md` |
+| [Human-Agent-Society/reef](https://github.com/Human-Agent-Society/reef) | 7,812 | Agent harnesses or weights, from scored live use | [Repeated task runs and a served-version history](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) | With a private source, the daily run refuses to start unless a probe verified the OS sandbox on this host and every model role is inside it; Reef also supports held activation for human review and configurable executor isolation |
+| [ace-agent/ace](https://github.com/ace-agent/ace) | 1,452 | A playbook of strategies used as context | [Learns many lessons at once](https://github.com/ace-agent/ace#how-it-works) | Asks for one replacement text and the smallest change |
+| [letta-ai/letta-code](https://github.com/letta-ai/letta-code) | 3,828 | Memory and agent-owned skills | [A full agent runtime with versioned memory](https://docs.letta.com/letta-code/memory) | Apply is a separate command |
+
+What asi does. Each sentence is from
+[What asi does, exactly](docs/PRIOR_ART.md#what-asi-does-exactly), which links
+the code:
+
+- **Attribution.** A failure is linked to a skill by a mention of the skill or a
+  path to it in the conversation, or by a prior the rubric declares. Attribution
+  is heuristic.
+- **Candidate write path.** The candidate write path replaces a file only if it
+  is named `SKILL.md` and refuses any target inside asi's package (its source
+  and prompts), the config file and its directory, the state directory or the
+  rubrics directory. This protects asi's write path; it does not confine model
+  commands.
+- **Sandbox scope.** With a private source, the daily run refuses to start
+  unless the model runner reports an OS sandbox that a probe verified on this
+  host, every model role inside it, and an environment allowlist. The sandbox
+  removes network access; it does not restrict reads. With the synthetic
+  fixture source, model commands run unconfined.
+- **Redaction.** Transcript text is masked for known credential shapes when
+  `redact_secrets` is set, which is the default; it can be turned off, and
+  matching known shapes is best-effort.
+- **Apply and rollback.** The daily driver does not import the promotion module.
+  Apply is a separate command, `asi apply`, that needs the candidate's review
+  token, the `--i-reviewed-this` flag, and a live file whose hash equals the
+  candidate's base hash, unless the live file is the candidate's own replacement
+  from an earlier run of this apply that stopped before recording it. It does
+  not authenticate who runs it. Apply writes a
+  hash-verified backup before it replaces the file, and `asi rollback` reads
+  the restored file back and compares it.
+
+Limits:
+
+- The fix count is in-sample: a fix counts FAIL -> PASS on a shown failure.
+  The holdouts are cases that scored PASS earlier in the run and can come from
+  the same conversation as a target. Holdouts catch PASS -> FAIL and
+  PASS -> `INSUFFICIENT` and say nothing about new fixes.
+- Validation re-scores recorded conversations, caching one successful score per
+  (conversation, rubric, arm); a failed attempt can be tried again for another
+  criterion. It does not re-run the agent or collect repeated successful trials,
+  so it reports no variance or confidence interval.
+- A judge whose command differs from the improver's may still be the same model.
+  asi does not test whether a skill is selected.
+
+The full comparison, with a source for each claim, is in [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
 
 ## Install and run, offline, in one minute
 
@@ -99,6 +172,8 @@ executes inside a local no-egress sandbox that has been *verified on this host*,
 with a minimal environment. `sandbox-exec` on macOS, `bubblewrap` on Linux. No
 supported mechanism means `doctor` reports a problem and `daily` raises before a
 single byte is exported -- there is no partial mode and no flag that waives it.
+The commands configured in `[source]` that list and export conversations are not
+model roles: they run outside the sandbox, with the parent's environment.
 
 Prompt fencing and secret redaction are in the code and they are not the answer
 here: a fence is a request to a model, and redaction is shape matching over
@@ -144,6 +219,9 @@ asi apply CAND-... \
    refused rather than authorised by the token printed before the edit.
 3. **A matching base hash.** If the skill file changed since the candidate was
    built, apply refuses; the candidate must be revalidated against the new base.
+   The one exception is the candidate's own replacement, written by an earlier
+   run of this apply that stopped before recording it: apply then records that
+   write and does not write again.
 4. **No automation marker.** The daily driver always sets `ASI_AUTOMATED_RUN`, so
    an apply invoked from inside a scheduled run refuses even with a valid token.
 
@@ -206,6 +284,7 @@ the machine in a model prompt and what redaction does not guarantee.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — day-to-day running, reading a receipt, recovery
 - [`docs/SCHEDULING.md`](docs/SCHEDULING.md) — unattended operation and its limits
 - [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) — each design risk mapped to its implementation and its test
+- [`docs/PRIOR_ART.md`](docs/PRIOR_ART.md) — how asi relates to other self-improving agent projects
 
 ## Licence
 
