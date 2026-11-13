@@ -15,6 +15,13 @@ long``, exit 70; in ``[run].base_dir``, ``doctor`` fell the same way and
 made ``doctor`` fall too; and a ``state_dir`` of 849 bytes passed ``doctor``,
 then made a committed ``daily`` fall the same way mid-run, after it had written
 records, with no receipt.
+
+Each length below is sized from the limits read, so that a case meets its limit
+where PATH_MAX is another number than macOS's, as Linux's 4096 is. Measured
+before, on the Linux CI jobs (3.11, 3.12 and 3.13): three tests sized for 1024
+failed there, the link under ``base_dir`` and the 1000-byte ``[rubrics].dir``
+loading without a ``ConfigError``, and the 849-byte ``state_dir`` passing
+``doctor`` (exit 0) and a committed ``daily`` writing below it.
 """
 
 from __future__ import annotations
@@ -37,6 +44,9 @@ from tests.test_non_finite_numbers import _set_field
 
 DAY = "2026-01-02"
 LONG_NAME = "c" * (NAME_MAX + 45)
+#: A ``state_dir`` this long is within PATH_MAX but leaves less than the reserve
+#: below it: 849 bytes on macOS, where it was measured.
+PAST_THE_RESERVE = PATH_MAX - 175
 
 
 def relative_path_of(total: int, base: Path, *, name: str = "s" * 200) -> str:
@@ -225,14 +235,15 @@ class AConfigPathThePlatformCannotHoldTests(unittest.TestCase):
     def test_a_base_dir_that_resolves_too_long_is_named_as_itself(self):
         """A short base_dir through a link to a directory past PATH_MAX is
         refused as the base_dir, not later as whatever lies under it."""
+        deep = relative_path_of(PATH_MAX + 1, self.base, name="d" * 200)
         here = os.getcwd()
         self.addCleanup(os.chdir, here)
         os.chdir(self.base)  # past PATH_MAX, the directories are made one level at a time
-        for _ in range(5):
-            os.mkdir("d" * 200)
-            os.chdir("d" * 200)
+        for part in deep.split("/"):
+            os.mkdir(part)
+            os.chdir(part)
         os.chdir(here)
-        (self.base / "baselink").symlink_to("/".join(["d" * 200] * 5))
+        (self.base / "baselink").symlink_to(deep)
         _set_field(self.config_path, "run", "base_dir", json.dumps(str(self.base / "baselink")))
         message = self.refusal()
         self.assertTrue(message.startswith("[run].base_dir '"), message[:60])
@@ -240,9 +251,9 @@ class AConfigPathThePlatformCannotHoldTests(unittest.TestCase):
 
     def test_a_linked_rubrics_directory_that_resolves_too_long_is_a_config_error(self):
         """Measured before: a ``[rubrics].dir`` linked to a 1000-byte directory
-        made ``doctor`` fall at the rubric file's ``is_file`` with
-        ``File name too long``, exit 70."""
-        deep = self.base / relative_path_of(1000, self.base)
+        (PATH_MAX less 24 on macOS) made ``doctor`` fall at the rubric file's
+        ``is_file`` with ``File name too long``, exit 70."""
+        deep = self.base / relative_path_of(PATH_MAX - 24, self.base)
         deep.mkdir(parents=True)
         here = os.getcwd()
         self.addCleanup(os.chdir, here)
@@ -273,7 +284,12 @@ class AConfigPathThePlatformCannotHoldTests(unittest.TestCase):
         cases = (
             ("run", "state_dir", json.dumps(LONG_NAME), "has a name of"),
             ("rubrics", "dir", json.dumps(LONG_NAME), "has a name of"),
-            ("run", "state_dir", json.dumps(relative_path_of(849, self.base)), "is 849 bytes"),
+            (
+                "run",
+                "state_dir",
+                json.dumps(relative_path_of(PAST_THE_RESERVE, self.base)),
+                f"is {PAST_THE_RESERVE} bytes",
+            ),
         )
         for table, key, value, needle in cases:
             with self.subTest(field=f"{table}.{key}", needle=needle):

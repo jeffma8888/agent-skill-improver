@@ -107,10 +107,16 @@ def resolve_reference(ref: str) -> list[Path]:
 
 
 def artifact_references(text: str) -> list[str]:
-    """Backticked spans that name a repository artifact rather than a symbol."""
+    """Backticked spans that name a repository artifact rather than a symbol.
+
+    A path on the host (one that begins with ``/``, such as ``/var``) names no
+    file in the repository, and whether it exists is a fact about the machine
+    running the suite: measured before, the map's ``/private/var/root`` resolved
+    on macOS and was reported missing on Linux. So it is not taken for one.
+    """
     refs: list[str] = []
     for span in backticked(text):
-        if span in refs:
+        if span in refs or span.startswith("/"):
             continue
         looks_like_path = "/" in span or span.endswith((".py", ".md", ".toml", ".sh"))
         if looks_like_path:
@@ -229,6 +235,12 @@ class TheExtractorsAreTwoSided(unittest.TestCase):
         self.assertIn("app/daily.py", refs)
         self.assertIn("rubrics/*.toml", refs)
         self.assertIn("packaging/", refs)
+
+    def test_the_artifact_extractor_leaves_out_a_path_on_the_host(self) -> None:
+        sample = "`/private/var/root` (root's), below `/var`, and `app/daily.py`"
+        self.assertEqual(artifact_references(sample), ["app/daily.py"])
+        # The control: a repository path is still taken, wherever it is cited.
+        self.assertEqual(artifact_references("`docs/ACCEPTANCE.md`"), ["docs/ACCEPTANCE.md"])
 
     def test_the_artifact_resolver_refuses_a_path_that_does_not_exist(self) -> None:
         self.assertEqual(resolve_reference("domain/there_is_no_such_module.py"), [])
