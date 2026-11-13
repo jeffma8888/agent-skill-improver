@@ -268,6 +268,9 @@ skills_quarantined            a proposal target that is defective (implicated bu
                               half of a base of 2,000+ chars: a truncated output or a
                               large deletion), a replacement longer than the cap (the
                               scorer and judge would see it clipped, so no replay is run),
+                              a replacement that repeats 25 or more consecutive words of a
+                              cited conversation excerpt the base does not hold (no replay is
+                              run; see "A skill is quarantined for copying a cited excerpt"),
                               or a skill that kept deferring past caps.max_defer_attempts
 skills_deferred               a proposal that could not be made, e.g. the improver timed out
 failure_cases                 FAIL verdicts with resolvable evidence
@@ -543,6 +546,53 @@ because its "export names thread" another one means the conversation command,
 or a wrapper or cache in front of it, answered for a different conversation
 than the id it was given; the run does not score one conversation as another,
 and the raw export (with `keep_raw`) is kept under the id asked for.
+
+**A skill is quarantined for copying a cited excerpt.** The receipt's `skills`
+table shows it `quarantined` at `propose` with "improver returned a replacement
+for skill '<id>' that repeats 25 or more consecutive words of the cited excerpt of
+the conversation whose record name ends in --<digest>". The conversation is named
+only by that digest, the sha256 of its id, never by its id. After a
+`daily --commit` run its record is the file
+`ls state/conversations/*--<digest>.json` lists, and, for a conversation-command
+source (`kind = "conversation-cli"`) with `keep_raw` on, its raw export is the one
+`ls state/raw/*--<digest>.json` lists. A dry run writes neither, so after one,
+look the conversation up in the source itself.
+The improver's replacement repeated, word for word, a run of a conversation
+excerpt as its prompt showed it, a run the skill's current text does not hold.
+A skill file is shared and often committed, so the run proposes nothing for
+that skill: the improver was paid, and the judge and the replay were not.
+What the reason holds, exactly: it interpolates no text of the replacement
+or of any excerpt. Its only variable parts are the skill id, which every
+refusal prints, and the conversation's record digest. The conversation is
+named by that digest, not by its id, because an id can be built from the
+conversation's own text (some agents title a conversation by its first
+message) and an excerpt's head holds it, so a quoted id could complete a
+copied run. A skill id is the installed skill's own name: when an excerpt
+quoted the skill by name, the run "skill '<id>'" (the word skill and the
+skill's name) stands in the reason and in the summary's line for the skill,
+as in any refusal of that skill. Every other output field prints what it
+always printed, among them the skill, rubric and workspace names, paths, the
+seed, and each conversation's id as the key of its entries in the day's
+receipt (`records`, `classes`), which `asi daily --json` prints, and its
+checkpoint (`records`), both under the state directory. asi does not check
+those fields for copied words, so words written into them print as they
+always did. Text
+that merely equals the reason's fixed wording (a cited message that quotes
+this very reason) is a coincidence, not copied transcript text. Usually
+there is nothing to do. The quarantine does not hold
+the skill back: the next run whose failures cite it asks the improver again. If
+it recurs, the failing cases quote text the improver keeps echoing back (a
+phrasing the user typed, a log line). Read the cited conversation, and if the
+text belongs in the skill, put it there yourself; a run the base already holds
+is not counted. The check compares whitespace-separated words exactly, one
+excerpt at a time and each as the prompt's evidence fence showed it (the nonce
+stripped, a forged delimiter neutralized), and runs after the structural and
+size checks. It catches verbatim copying only. A paraphrase or an inserted or
+changed token (a list marker) gets past it only when no exact run of 25 words is
+left that one excerpt holds and the base does not; it misses a run under 25
+words, a run spanning two excerpts, a raw run the fence rewrote (the improver
+never saw it), and text copied from the scorer's rationale or into the
+proposal's other fields, so a review still reads the diff for it.
 
 **The same record defers every day.** Deferral is for transient failures, and a
 deferred record is retried first on the next run. That priority is a ratchet if

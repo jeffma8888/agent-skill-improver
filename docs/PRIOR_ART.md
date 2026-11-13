@@ -153,8 +153,16 @@ Each asi property is stated once, here, with the code that does it.
   replacement longer than three times the base plus 20,000 characters, and one
   that keeps less than half of a base of 2,000 characters or more
   ([`app/pipeline.py`]); they measure length, do not ensure a small or
-  reviewable edit, and are not a cost measure. asi does not refuse long verbatim
-  excerpts of a conversation in the proposed text ([`app/pipeline.py`]).
+  reviewable edit, and are not a cost measure. After those checks, asi refuses a
+  replacement that repeats 25 or more consecutive words of one cited conversation
+  excerpt as the improver was shown it, words the base text does not hold: the
+  skill is quarantined for that run and asked about again by the next
+  ([`app/pipeline.py`]). Words are compared exactly, so it catches verbatim
+  copying only: a paraphrase or an inserted token such as a list marker gets
+  past it only when no exact 25-word run of one excerpt that the base does not
+  hold is left, and it does not refuse a shorter run, a run spanning two
+  excerpts, or text copied from the scorer's rationale or into the proposal's
+  other fields.
 
 ## The closest precedents
 
@@ -328,6 +336,10 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   ([#273](https://github.com/ANative-Lab/EvoAgentX/issues/273)); each asi model
   call is a separate process with a fresh scratch directory
   ([per-call scratch]).
+- **ADOPTED, partly: a copied-text guard.** GEPA
+  [#261](https://github.com/gepa-ai/gepa/issues/261) asks for a guard against
+  training phrases copied into a prompt; asi has the limited, verbatim-only
+  copied-text guard described in [proposal checks].
 - **AVOIDED in the candidate write path: a candidate that can edit what grades
   it.** DGM's authors report a
   child that scored perfectly by removing the markers its hallucination check
@@ -409,10 +421,6 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
 - **PLANNED, not built: trigger testing.** Skill-creator tests should-trigger
   and should-not-trigger queries; asi does not test whether a skill is selected
   ([proposal checks]).
-- **PLANNED, not built: a copied-text guard.** GEPA
-  [#261](https://github.com/gepa-ai/gepa/issues/261) asks for a guard against
-  training phrases copied into a prompt; asi does not refuse long verbatim
-  excerpts of a conversation in the proposed text ([proposal checks]).
 - **PLANNED, not built: a per-skill history view.** Reef ties each served
   version to its patch, score and activation state; asi has no per-skill history
   command ([receipts]).

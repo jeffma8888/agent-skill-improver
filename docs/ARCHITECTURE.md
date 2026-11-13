@@ -322,6 +322,32 @@ replacement. Constraints:
 - the replacement's line endings are folded to LF before it is checked, diffed
   or replayed, as the base's are when it is read; apply writes it in the
   document's own convention, so the diff shows the lines apply writes.
+- a replacement that repeats `MIN_COPIED_RUN_WORDS` (25) consecutive words of
+  one cited excerpt as the improver was shown it (`prompts.shown_excerpts`: each
+  text of the list `prompts.cited_excerpts` made for its prompt, as the evidence
+  fence shows it, the nonce stripped and any forged delimiter neutralized),
+  words the base does not hold, is quarantined (`RecordDefect`) after the
+  structural and size checks and before the patch is made, so the improver is
+  paid and the judge and the replay are not. A skill file is shared and often
+  committed, so copied transcript text would carry private conversation content
+  out of `state/`. The reason interpolates no text of the replacement or of
+  any excerpt, and names the conversation only by the sha256 digest of its id
+  that ends its record's name (`state/conversations/<readable>--<digest>.json`,
+  `state.keyed_name`), never by its id, whatever its length: its only variable
+  parts are the skill id, as in every refusal, and that digest. The other
+  output fields print what they always printed and are not checked for copied
+  words, as `docs/OPERATIONS.md` states in full under Recovery. An
+  excerpt's head holds the id, and the conversation's text can hold it with the
+  reason's words around it, so a quoted id of any length could complete a
+  copied run: measured before, an id of 24 short words quoted after the word
+  "conversation" did, in stdout and the receipt. Stated limit: words are
+  whitespace-separated tokens compared exactly, one excerpt at a time, so a
+  paraphrase, an inserted token such as a list marker, or a change of case or
+  punctuation evades the guard only when no exact 25-word window remains that
+  one excerpt holds and the base does not. A shorter copy, a run spanning two
+  excerpts, a raw run the fence rewrote (the improver was never shown it), and
+  text from the scorer's rationale or in the proposal's other fields are not
+  refused.
 
 ### 8. Validate
 

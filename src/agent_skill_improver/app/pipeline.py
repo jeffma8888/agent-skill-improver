@@ -8,6 +8,7 @@ alive: :class:`RecordDefect` means quarantine this record, and
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -43,6 +44,17 @@ MAX_ABSOLUTE_GROWTH_CHARS = 20_000
 #: replacement passed every structural check with thousands of removed lines.
 MIN_RETAINED_FRACTION = 0.5
 SHRINK_RULE_MIN_BASE_CHARS = 2_000
+#: A replacement that repeats this many consecutive words of one cited excerpt
+#: the improver was shown, words the base skill text does not hold, copied
+#: transcript text into the skill. A skill file is shared and often committed,
+#: so the copy would carry private conversation content out of state/, and a
+#: rule that quotes the failing cases fits the fix to those cases. Words are
+#: whitespace-separated tokens compared exactly, so this catches verbatim
+#: copying only: not a paraphrase, not a shorter run, not the scorer's rationale.
+#: Measured before (3.11 and 3.13, ``daily --commit``, an improver that appended
+#: 30 words of a cited user message): the candidate was validated and its patch
+#: held the words.
+MIN_COPIED_RUN_WORDS = 25
 
 
 @dataclass(frozen=True)
@@ -196,6 +208,52 @@ def skill_text_defects(new_text: str, *, base_text: str, skill_id: str) -> list[
     return problems
 
 
+def _word_runs(text: str, size: int) -> set[tuple[str, ...]]:
+    """Every run of ``size`` consecutive whitespace-separated words in ``text``."""
+    words = text.split()
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def copied_excerpt_source(
+    new_text: str, *, base_text: str, excerpts: Sequence[tuple[str, str]]
+) -> str | None:
+    """The conversation id of the first excerpt ``new_text`` copies a run of words from.
+
+    ``excerpts`` are the ``(conversation id, text)`` pairs the improver's prompt
+    carried, each text as its evidence fence showed it (``prompts.shown_excerpts``).
+    A run counts when its
+    ``MIN_COPIED_RUN_WORDS`` consecutive words stand, as consecutive words, in
+    one excerpt and not in ``base_text``: a transcript often holds the skill's
+    own text, which the agent loaded, and keeping that is not copying. None when
+    no run was copied. The id is returned, never the words.
+    """
+    runs = _word_runs(new_text, MIN_COPIED_RUN_WORDS)
+    if not runs:
+        return None
+    runs -= _word_runs(base_text, MIN_COPIED_RUN_WORDS)
+    for conversation_id, text in excerpts:
+        if not runs.isdisjoint(_word_runs(text, MIN_COPIED_RUN_WORDS)):
+            return conversation_id
+    return None
+
+
+def copied_conversation_named(conversation_id: str) -> str:
+    """How the copied-text refusal names the conversation: by its record's digest only.
+
+    The name never interpolates the id, whatever its length. An excerpt's head
+    holds its id, and the conversation's own text can hold it too, with the
+    reason's words around it ("conversation", the quotes), so a quoted id of any
+    length can complete a run that stands in the excerpt. The name is the sha256
+    digest of the id that ends the name of the conversation's record,
+    ``state/conversations/<readable>--<digest>.json`` (``state.keyed_name``), so
+    ``ls state/conversations/*--<digest>.json`` finds the record. Measured
+    before: an id of 24 short words, quoted after the word "conversation",
+    reproduced a cited 25-word run in stdout and the receipt.
+    """
+    digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()
+    return f"the conversation whose record name ends in --{digest}"
+
+
 def read_canonical_text(
     read_text: Callable[[Path], str] | None, path: Path, *, skill_id: str
 ) -> str:
@@ -312,6 +370,10 @@ def propose_candidate(
     ordered = sorted(cases, key=lambda c: (-c.weight, c.criterion_id, c.conversation_id))[
         :max_cases
     ]
+    # Made once and handed to the prompt; the copied-text check below reads
+    # them as the prompt's evidence fence shows them (``prompts.shown_excerpts``),
+    # so it compares the words the improver read and not a rendering of its own.
+    excerpts = prompts.cited_excerpts(ordered, conversations, cfg)
     user = prompts.improver_user_prompt(
         skill_id=group.skill_id,
         skill_path=str(canonical.path),
@@ -320,6 +382,7 @@ def propose_candidate(
         conversations=conversations,
         cfg=cfg,
         seed=seed,
+        excerpts=excerpts,
     )
     payload = runner.run(
         role=ROLE_IMPROVER,
@@ -367,6 +430,28 @@ def propose_candidate(
             "to the end. Nothing is "
             "proposed against it this run and no replay was run; raise the cap to cover a "
             "replacement this size, or expect the improver to add less.",
+            record_id=group.skill_id,
+        )
+    shown = prompts.shown_excerpts(excerpts, seed=seed, skill_id=group.skill_id)
+    copied_from = copied_excerpt_source(new_text, base_text=base_text, excerpts=shown)
+    if copied_from is not None:
+        # The reason interpolates neither the replacement nor any excerpt: it
+        # lands in the quarantine record, the receipt and the daily summary. Nor
+        # the conversation's id: the conversation is named by the digest that
+        # ends its record's name (``copied_conversation_named``). Its only
+        # variable parts are the skill id, printed as every refusal prints it (so
+        # a skill whose name an excerpt quoted, "skill '<id>'", is repeated as its
+        # name), and that digest. docs/OPERATIONS.md (Recovery) states what the
+        # other output fields print: asi does not check them for copied words.
+        raise RecordDefect(
+            f"improver returned a replacement for skill {group.skill_id!r} that repeats "
+            f"{MIN_COPIED_RUN_WORDS} or more consecutive words of the cited excerpt of "
+            f"{copied_conversation_named(copied_from)}, words the base skill text does not "
+            "hold: a skill file is shared and often committed, so copied transcript text "
+            "would carry private conversation content out of state/, and a rule that quotes "
+            "the failing cases fits the fix to them. The improver was asked; the judge and "
+            "the replay were not. Nothing is proposed against it this run, and neither the "
+            "replacement nor the excerpt is quoted here.",
             record_id=group.skill_id,
         )
 

@@ -70,8 +70,9 @@ def nonce_for(seed: str, label: str) -> str:
     return hashlib.sha256(f"asi-nonce:{seed}:{label}".encode("utf-8")).hexdigest()[:12]
 
 
-def wrap_untrusted(text: str, *, label: str, nonce: str) -> str:
-    """Fence untrusted content, neutralizing any forged delimiter inside it.
+def untrusted_body(text: str, *, nonce: str) -> str:
+    """Untrusted content as its fence shows it: the nonce stripped, any forged
+    delimiter neutralized.
 
     Order matters and it is not obvious. The nonce is stripped from the RAW text
     first, and the delimiter marker is inserted afterwards. Doing it the other way
@@ -82,12 +83,21 @@ def wrap_untrusted(text: str, *, label: str, nonce: str) -> str:
     previous sanitising pass has already annotated.
     """
     body = text.replace(nonce, "[nonce-stripped]") if nonce else text
-    body = _FENCE_RE.sub(NEUTRALIZED, body)
+    return _FENCE_RE.sub(NEUTRALIZED, body)
+
+
+def _fence(body: str, *, label: str, nonce: str) -> str:
+    """A body ``untrusted_body`` already made, between the fence's two lines."""
     return (
         f"<<<{FENCE_WORD} {label} {nonce}>>>\n"
         f"{body}\n"
         f"<<<END-{FENCE_WORD} {label} {nonce}>>>"
     )
+
+
+def wrap_untrusted(text: str, *, label: str, nonce: str) -> str:
+    """Fence untrusted content, neutralizing any forged delimiter inside it."""
+    return _fence(untrusted_body(text, nonce=nonce), label=label, nonce=nonce)
 
 
 @dataclass(frozen=True)
@@ -516,6 +526,56 @@ def improver_system_prompt() -> str:
     )
 
 
+def cited_excerpts(
+    cases: Sequence[FailureCase],
+    conversations: Mapping[str, NormalizedConversation],
+    cfg: PromptConfig,
+) -> list[tuple[str, str]]:
+    """The cited conversation excerpts the improver is shown, in the prompt's order.
+
+    One ``(conversation id, text)`` pair for each case whose conversation is at
+    hand and whose cited positions render to any text: a head naming the
+    conversation and the case, then the cited blocks as ``render_transcript``
+    shows them. ``shown_excerpts`` makes each text what the evidence fence shows,
+    and ``improver_user_prompt`` joins those.
+    """
+    excerpts: list[tuple[str, str]] = []
+    for case in cases:
+        conversation = conversations.get(case.conversation_id)
+        if conversation is None:
+            continue
+        positions = [e.position for e in case.evidence]
+        render = render_transcript(conversation, cfg=cfg, only_positions=positions)
+        if render.text.strip():
+            # The excerpt's text is masked as the transcript is; its head names
+            # the export's thread id twice, so it is masked the same way.
+            head = _masked(f"[conversation {case.conversation_id} / case {case.id}]", cfg)
+            excerpts.append((case.conversation_id, f"{head}\n{render.text}"))
+    return excerpts
+
+
+def shown_excerpts(
+    excerpts: Sequence[tuple[str, str]], *, seed: str, skill_id: str
+) -> list[tuple[str, str]]:
+    """Each cited excerpt as the improver's evidence fence shows it, one per pair.
+
+    ``excerpts`` is ``cited_excerpts``' list. Each text is made what the fence
+    shows (``untrusted_body`` with the evidence nonce: the nonce stripped, any
+    forged delimiter neutralized), and ``improver_user_prompt`` joins exactly
+    these texts into the fence, so ``pipeline.propose_candidate``, which checks
+    the replacement against this list, compares the words the improver read,
+    one excerpt at a time. Measured before: the check read the texts before the
+    fence rewrote them, so a 25-word run holding ``[neutralized-delimiter]`` or
+    ``[nonce-stripped]``, copied as shown, was proposed. Made one at a time, the
+    texts join to what the fence made of them joined: every excerpt begins with
+    its head's ``[``, which no delimiter or 12-hex nonce can run on into.
+    """
+    nonce = nonce_for(seed, f"evidence:{skill_id}")
+    return [
+        (conversation_id, untrusted_body(text, nonce=nonce)) for conversation_id, text in excerpts
+    ]
+
+
 def improver_user_prompt(
     *,
     skill_id: str,
@@ -525,7 +585,15 @@ def improver_user_prompt(
     conversations: Mapping[str, NormalizedConversation],
     cfg: PromptConfig,
     seed: str,
+    excerpts: Sequence[tuple[str, str]] | None = None,
 ) -> str:
+    """The improver's prompt for one skill and its failure cases.
+
+    ``excerpts`` is ``cited_excerpts(cases, conversations, cfg)`` when the caller
+    has already made it, as ``pipeline.propose_candidate`` has; its copied-text
+    check reads ``shown_excerpts`` of the same list, the texts this prompt's
+    evidence fence joins.
+    """
     # The rationale is the scorer's own words about an untrusted transcript, and
     # the case id, the conversation id and each cited element's id and kind are
     # the export's text. Measured before: the list sat outside every fence under
@@ -575,23 +643,13 @@ def improver_user_prompt(
             nonce=nonce_for(seed, f"skill:{skill_id}"),
         )
     )
-    excerpts: list[str] = []
-    for case in cases:
-        conversation = conversations.get(case.conversation_id)
-        if conversation is None:
-            continue
-        positions = [e.position for e in case.evidence]
-        render = render_transcript(conversation, cfg=cfg, only_positions=positions)
-        if render.text.strip():
-            # The excerpt's text is masked as the transcript is; its head names
-            # the export's thread id twice, so it is masked the same way.
-            head = _masked(f"[conversation {case.conversation_id} / case {case.id}]", cfg)
-            excerpts.append(f"{head}\n{render.text}")
-    if excerpts:
+    cited = cited_excerpts(cases, conversations, cfg) if excerpts is None else excerpts
+    shown = shown_excerpts(cited, seed=seed, skill_id=skill_id)
+    if shown:
         sections.append(
             "## CITED CONVERSATION EXCERPTS (untrusted data)\n"
-            + wrap_untrusted(
-                "\n\n".join(excerpts),
+            + _fence(
+                "\n\n".join(text for _, text in shown),
                 label="evidence",
                 nonce=nonce_for(seed, f"evidence:{skill_id}"),
             )
