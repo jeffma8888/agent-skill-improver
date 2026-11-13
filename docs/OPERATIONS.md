@@ -197,6 +197,47 @@ the wrong thing; no receipt or checkpoint was written, so the next run with the
 same day repeated all of it. A library caller gets the same refusal as a
 `ConfigError` from `run_daily`, before the source is touched.
 
+### Withholding failures from the improver's prompt
+
+Off by default (`[caps].unseen_withhold = 0`: no split is made). At k = 0 the
+candidate record (`asi.validation.v3`), the run receipt and `review`, its text and
+its `--json` alike, are byte-identical to a build without the feature. With
+`unseen_withhold = k > 0` and a skill holding at least
+`[caps].unseen_min_failures = N` failures in a run (N defaults to 4; k must be
+smaller than N, or the config is refused), `daily` withholds one or more whole
+conversations from the improver's prompt, taken in an order fixed by a hash of the
+validation seed and never the last conversation in that order, until together they
+hold at least k of those failures (so a single conversation may hold fewer than k).
+It replays every withheld failure against the candidate after it, in both arms,
+unjudged. What turning it on changes: the improver sees fewer failures, so a
+candidate has fewer targets and fixes and a gate that passed can fail (measured on
+the example plus three cloned conversations: 5 targets and 4 fixes become 3 and 3,
+so `min_fixes = 4` fails). Holdouts are excluded per pair, not per conversation:
+the withheld failure pairs are never holdouts, but the withheld conversation's
+other, passing pairs are not excluded. With no shown target left on it, that
+conversation competes for one of the `[caps].max_extra_holdout_conversations`
+slots like any other conversation, and it can win one (its passing pairs become
+holdouts) or displace another conversation from one. In that fixture 14 holdouts
+become 13 at the default 3 slots and stay 14 at 8, where a passing pair of the
+withheld conversation is a holdout: these are that fixture's counts, not a rule. The
+scorer replays the withheld cases too, in both arms (the run's evidence calls were
+25 here against 29 with withholding off, the targets having shrunk), and the
+records are `asi.validation.v4`, whose `unseen` block recomputes the split from its
+own pool and seed. Below N failures, with all of them on one conversation, or with
+fewer than k off the conversations before the last, nothing is withheld and the
+record says which. A candidate that fixes none of its withheld failures prints
+`0/w`: in the `daily` note and the receipt for every measured candidate, and in
+`review` for validated ones. The withholding is from the prompt only, and of the
+withheld cases' failure rows and conversation excerpts only: the prompt still shows
+the current skill text whole, so a withheld conversation's id or failure words that
+an earlier edit wrote into the skill reach the improver, and the improver's command
+can still read the withheld conversation and its failure record in the state
+directory and the source, so the count is no proof the improver never saw them;
+this is not a security boundary. The count is report-only: the gate never
+reads it, and decides on the shown failures and the holdouts exactly as with
+withholding off. Nor is it a general out-of-sample estimate: it counts fixes on a
+few failures of conversations this run already scored.
+
 ## Reading a receipt
 
 One receipt per run, under `state/receipts/`. `--json` prints it. The fields worth
@@ -313,6 +354,19 @@ because the remedies differ: a quarantined record is a data or normalizer proble
 a deferred skill is almost always a model problem. Either kind makes the run
 `partial`.
 
+**`candidates[].unseen_failures`** — present only when `[caps].unseen_withhold`
+is on: the split's `status` (`measured`, `too-few`, `one-conversation`,
+`short-of-k`), `withheld` (w), `replayed` and `fixed` (x, FAIL -> PASS only), and the
+`scope`. Each measured candidate also gets the note `candidate <id>: unseen
+failures fixed: x/w (withheld from the improver's prompt as failures and excerpts
+only, not from the skill text that prompt shows or files its command can read; not
+used by the gate)`, with `, n not replayed` after `x/w` when
+a withheld case could not be replayed. A gate-failed candidate's x/w is read here
+and in its record's `validation.unseen` block, since `review` refuses it. With
+withholding off the receipt carries neither this key nor the two `unseen_*` keys
+under `caps` (they are listed only when k > 0), so it is byte-identical to a build
+without the feature.
+
 **`discovery.is_total`** — whether the source returned everything or a page. When
 `false`, `any_page_truncated_by_limit` is `true` and `honesty_note` says so. Do not
 compute a rate over a page and call it a rate over the corpus.
@@ -407,6 +461,30 @@ blind judge's preference and rationale per target case), and the approval token.
 Read the *evidence*, not the summary. The question to ask is not "does this edit
 look reasonable" but "does the cited turn actually show the problem this edit
 claims to fix".
+
+For an `asi.validation.v4` record, `review` prints `unseen failures fixed: x/w`
+under the metrics with the same scope ("withheld from the improver's prompt as
+failures and excerpts only, not from the skill text that prompt shows or files its
+command can read; not used by the gate"), or `not measured`
+with the split's reason, and lists each replayed withheld case as an `[unseen]`
+row beside the gate's cases, unchanged ones included; `--json` carries them in
+`unseen`, never in `outcomes`. An `asi.validation.v3` record cannot say whether
+withholding was off, did not exist yet, or was dropped by a rewrite, so with
+withholding on now `review` prints `not recorded` and with it off prints nothing,
+line for line as before. `review --json` carries the `unseen` key for a v4
+record; for a v3 record it carries `{"schema": "asi.validation.v3", "status":
+"not-recorded"}` with withholding on and no `unseen` key with it off, byte for
+byte as before. A defective `unseen` block refuses `review` and `apply` like any
+other defect in the record: a withheld set the pool and seed do not recompute, an
+inconsistent edit (a verdict whose derived flags or counts disagree), or a count
+that does not add up. A rubric graded only by withheld cases that changed after
+the run blocks `apply` for that candidate. The limits: the block is checked for
+consistency, not origin, and the scorer's verdicts are not authenticated, so a
+coherent edit (an unseen verdict rewritten together with its outcome's derived
+flags and the block's fixed count) verifies, is shown and applies; the change
+word `review` prints is derived from the verdict pair, not stored, so writing
+one into an outcome is refused as an unknown key; and a v4 record rewritten as
+v3 still verifies and applies, so the count's absence proves nothing.
 
 The hypothesis, intended change, risks and rollback note are the model's own
 words, kept masked and clipped (each past 4,000 characters, a risk past 2,000,

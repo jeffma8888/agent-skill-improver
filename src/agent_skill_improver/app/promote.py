@@ -48,7 +48,8 @@ from ..domain.approval import HumanApproval, automation_active
 from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
 from ..domain.integrity import repropose_advice, verify_full_integrity
 from ..domain.redaction import named_path, quoted_value, quoted_values, why_unreadable
-from ..domain.validation import ValidationRecord
+from .. import SCHEMA_VALIDATION_V3
+from ..domain.validation import UNSEEN_SCOPE, ReplayOutcome, ValidationRecord
 from ..errors import (
     AsiError,
     LockHeld,
@@ -98,13 +99,50 @@ def refuse_a_closed_review(candidate: Candidate) -> None:
         )
 
 
+def _outcome_row(outcome: ReplayOutcome) -> dict[str, Any]:
+    return {
+        "kind": outcome.case.kind,
+        "rubric_id": outcome.rubric_id,
+        "conversation_id": outcome.case.conversation_id,
+        "criterion_id": outcome.case.criterion_id,
+        "baseline": outcome.baseline.value,
+        "candidate": outcome.candidate.value,
+        "change": outcome.change,
+    }
+
+
+def _unseen_report(validation: ValidationRecord) -> dict[str, Any]:
+    """The record's unseen block for review, or what a v3 record cannot say."""
+    unseen = validation.unseen
+    if unseen is None:
+        return {"status": "not-recorded", "schema": SCHEMA_VALIDATION_V3}
+    return {
+        "status": unseen.status,
+        "min_failures": unseen.min_failures,
+        "withhold": unseen.withhold,
+        "eligible": [r.to_dict() for r in unseen.eligible],
+        "withheld": [r.to_dict() for r in unseen.withheld],
+        "replayed": unseen.replayed,
+        "fixed": unseen.fixed,
+        "outcomes": [_outcome_row(o) for o in unseen.outcomes],
+        "scope": UNSEEN_SCOPE,
+    }
+
+
 def review_report(
     candidate: Candidate,
     *,
     base_text: str,
     rubrics: Any = None,
+    unseen_withhold: int = 0,
 ) -> dict[str, Any]:
     """Everything a human needs in order to decide, plus the exact apply command.
+
+    ``unseen_withhold`` is the configured ``[caps].unseen_withhold``. It decides
+    only whether a v3 record's report carries ``unseen``: with withholding off
+    (the default) a v3 report has no such key, so it is byte for byte what it
+    was before the unseen block existed; with it on, ``unseen`` says the record
+    cannot tell (``not-recorded``). A v4 record's ``unseen`` is always reported.
 
     Refuses before it prints anything in four cases, checked in this order so
     that each is named for what it is:
@@ -147,7 +185,7 @@ def review_report(
     # fixed or regressed; these say which, and what the blind judge said.
     validation = ValidationRecord.parse(candidate.validation)
     token = candidate.required_approval_token
-    return {
+    report: dict[str, Any] = {
         "candidate_id": candidate.id,
         "status": candidate.status,
         "skill_id": candidate.target.skill_id,
@@ -167,18 +205,8 @@ def review_report(
         "added_lines": candidate.patch.added_lines,
         "removed_lines": candidate.patch.removed_lines,
         "gate": gate,
-        "outcomes": [
-            {
-                "kind": o.case.kind,
-                "rubric_id": o.rubric_id,
-                "conversation_id": o.case.conversation_id,
-                "criterion_id": o.case.criterion_id,
-                "baseline": o.baseline.value,
-                "candidate": o.candidate.value,
-                "change": o.change,
-            }
-            for o in validation.outcomes
-        ],
+        # The gate's cases only. The unseen cases are in ``unseen``, never here.
+        "outcomes": [_outcome_row(o) for o in validation.outcomes],
         "judgements": [
             {
                 "conversation_id": j.case.conversation_id,
@@ -188,12 +216,17 @@ def review_report(
             }
             for j in validation.judgements
         ],
-        "notes": list(candidate.notes),
-        "approval_token": token,
-        "apply_command": shlex.join(
-            ["asi", "apply", candidate.id, "--approve", token, "--i-reviewed-this"]
-        ),
     }
+    # Report-only: the gate above never read it. Left out for a v3 record
+    # while withholding is off, so the default report is the one before.
+    if validation.unseen is not None or unseen_withhold > 0:
+        report["unseen"] = _unseen_report(validation)
+    report["notes"] = list(candidate.notes)
+    report["approval_token"] = token
+    report["apply_command"] = shlex.join(
+        ["asi", "apply", candidate.id, "--approve", token, "--i-reviewed-this"]
+    )
+    return report
 
 
 def apply_candidate(

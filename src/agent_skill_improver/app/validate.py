@@ -25,17 +25,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from .. import SCHEMA_VALIDATION
+from .. import SCHEMA_VALIDATION, SCHEMA_VALIDATION_V3
 from ..config import ROLE_JUDGE, ROLE_SCORER, PromptConfig
 from ..domain.candidate import Candidate
 from ..domain.conversation import NormalizedConversation
 from ..domain.integrity import verify_candidate_integrity
+from ..domain.redaction import quoted_value
 from ..domain.rubric import Rubric, Verdict
 from ..domain.validation import (
     ARM_BASELINE,
     ARM_CANDIDATE,
     CASE_HOLDOUT,
     CASE_TARGET,
+    CASE_UNSEEN,
     GateDecision,
     GatePolicy,
     Judgement,
@@ -43,6 +45,7 @@ from ..domain.validation import (
     ReplayOutcome,
     RubricBinding,
     TargetCaseRef,
+    UnseenSplit,
     blind_arms,
     evaluate_gate,
     evidence_call_count,
@@ -71,10 +74,38 @@ class ValidationResult:
     decision: GateDecision
     evidence_model_calls: int
     notes: tuple[str, ...]
+    #: The split daily made before the improver was asked, or ``None`` (k = 0):
+    #: then the record is v3, exactly as before withholding existed.
+    unseen: UnseenSplit | None = None
+    #: The withheld cases that were replayed. Never in ``outcomes``, never
+    #: judged, never a gate input.
+    unseen_outcomes: tuple[ReplayOutcome, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
+        if self.unseen is None:
+            if self.unseen_outcomes:
+                raise ValueError(
+                    "unseen outcomes without an unseen split: a v3 record has nowhere to "
+                    "put them, and a v4 record needs the split they were withheld by"
+                )
+            return self._record(SCHEMA_VALIDATION_V3)
+        record = self._record(SCHEMA_VALIDATION)
+        record["unseen"] = {
+            "status": self.unseen.status,
+            "min_failures": self.unseen.min_failures,
+            "withhold": self.unseen.withhold,
+            "eligible_refs": [r.to_dict() for r in self.unseen.eligible],
+            "withheld_refs": [r.to_dict() for r in self.unseen.withheld],
+            "outcomes": [o.to_dict() for o in self.unseen_outcomes],
+            "replayed": len(self.unseen_outcomes),
+            # FAIL -> PASS only: FAIL -> INSUFFICIENT is no fix, as for the gate.
+            "fixed": sum(1 for o in self.unseen_outcomes if o.fixed),
+        }
+        return record
+
+    def _record(self, schema: str) -> dict[str, Any]:
         return {
-            "schema": SCHEMA_VALIDATION,
+            "schema": schema,
             "candidate_id": self.candidate_id,
             "base_sha256": self.base_sha256,
             "patch_sha256": self.patch_sha256,
@@ -123,6 +154,7 @@ def validate_candidate(
     holdout_pairs: Sequence[tuple[str, str]] = (),
     max_extra_holdout_conversations: int = 3,
     known_skill_ids: Sequence[str] = (),
+    unseen: UnseenSplit | None = None,
 ) -> ValidationResult:
     """Replay both arms, judge blind, and decide the gate.
 
@@ -143,8 +175,41 @@ def validate_candidate(
     that cannot be replayed is still recorded in the claim set, so the gate
     fails here with a named coverage reason instead of producing a record that
     passes now and refuses itself at review time.
+
+    ``unseen`` is the split daily made before the improver was asked: its
+    withheld failures are replayed in both arms after the targets and holdouts,
+    into ``unseen_outcomes`` only. They are never judged and never reach
+    ``evaluate_gate``; a withheld case that cannot be replayed is noted and stays
+    in ``w`` without counting in ``x``. A withheld case passed as a holdout pair,
+    or claimed as a target, is refused with ``ValueError`` before any model call:
+    the gate would read it, and the record refuses a case that is both.
     """
     verify_candidate_integrity(candidate, base_text=base_text, action="validate")
+    if unseen is not None:
+        # daily never sends one (it drops the withheld pairs from the holdouts
+        # and never shows them, so they are never claimed); a library caller
+        # that does is refused here rather than given a gate that read a
+        # withheld case and a record that refuses itself.
+        withheld_cases = {
+            f"{ref.conversation_id}::{ref.criterion_id}": ref for ref in unseen.withheld
+        }
+        for failure in candidate.rubric_failures:
+            overlap = withheld_cases.get(f"{failure.conversation_id}::{failure.criterion_id}")
+            if overlap is not None:
+                raise ValueError(
+                    f"candidate {candidate.id}: target {quoted_value(overlap.key)} is withheld "
+                    "from the improver's prompt, so it cannot be a claimed target; no model "
+                    "was called"
+                )
+        for conversation_id, criterion_id in holdout_pairs:
+            overlap = withheld_cases.get(f"{conversation_id}::{criterion_id}")
+            if overlap is not None:
+                raise ValueError(
+                    f"candidate {candidate.id}: holdout pair "
+                    f"{quoted_value(f'{conversation_id}::{criterion_id}')} is the withheld case "
+                    f"{quoted_value(overlap.key)}: a withheld case is replayed as unseen only, "
+                    "never as evidence the gate reads; no model was called"
+                )
     notes: list[str] = []
     skill_id = candidate.target.skill_id
     new_text = candidate.patch.new_text
@@ -274,6 +339,44 @@ def validate_candidate(
             )
         )
 
+    # The withheld failures, replayed after the gate's cases through the same
+    # cache. A separate list on purpose: the judge loop and evaluate_gate below
+    # read ``outcomes`` only, so nothing here is judged or gated.
+    unseen_outcomes: list[ReplayOutcome] = []
+    for withheld_ref in unseen.withheld if unseen is not None else ():
+        unseen_rubric = rubrics.get(withheld_ref.rubric_id)
+        if unseen_rubric is None or unseen_rubric.criterion(withheld_ref.criterion_id) is None:
+            notes.append(
+                f"unseen {withheld_ref.key} was NOT replayed: rubric "
+                f"{withheld_ref.rubric_id!r} is not loaded or does not grade criterion "
+                f"{withheld_ref.criterion_id!r}"
+            )
+            continue
+        if withheld_ref.conversation_id not in conversations:
+            notes.append(
+                f"unseen {withheld_ref.key} was NOT replayed: conversation "
+                f"{withheld_ref.conversation_id} is not available for replay"
+            )
+            continue
+        case = ReplayCase(withheld_ref.conversation_id, withheld_ref.criterion_id, CASE_UNSEEN)
+        try:
+            baseline = verdicts(case.conversation_id, withheld_ref.rubric_id, ARM_BASELINE)
+            proposed = verdicts(case.conversation_id, withheld_ref.rubric_id, ARM_CANDIDATE)
+        except AsiError as exc:
+            notes.append(f"replay of unseen {case.key} failed: {exc}")
+            continue
+        if case.criterion_id not in baseline or case.criterion_id not in proposed:
+            notes.append(f"replay of unseen {case.key} produced no verdict for that criterion")
+            continue
+        unseen_outcomes.append(
+            ReplayOutcome(
+                case=case,
+                baseline=baseline[case.criterion_id],
+                candidate=proposed[case.criterion_id],
+                rubric_id=withheld_ref.rubric_id,
+            )
+        )
+
     judgements: list[Judgement] = []
     if policy.require_judge:
         # Only cases with a persisted target outcome are judged. A judgement
@@ -340,7 +443,8 @@ def validate_candidate(
     # that were attempted. A rubric whose replay produced nothing would
     # otherwise be bound with nothing to check it against, and the record's own
     # parser rejects such an unused binding.
-    used_rubric_ids = sorted({o.rubric_id for o in outcomes})
+    scored = outcomes + unseen_outcomes
+    used_rubric_ids = sorted({o.rubric_id for o in scored})
     rubric_bindings = tuple(
         RubricBinding(
             rubric_id=rid,
@@ -349,7 +453,7 @@ def validate_candidate(
         )
         for rid in used_rubric_ids
     )
-    evidence_calls = evidence_call_count(outcomes, judgements)
+    evidence_calls = evidence_call_count(scored, judgements)
     if attempted_calls != evidence_calls:
         notes.append(
             f"{attempted_calls} model call(s) were attempted and {evidence_calls} produced the "
@@ -372,4 +476,6 @@ def validate_candidate(
         decision=decision,
         evidence_model_calls=evidence_calls,
         notes=tuple(notes),
+        unseen=unseen,
+        unseen_outcomes=tuple(unseen_outcomes),
     )

@@ -135,6 +135,23 @@ max_defer_attempts = 3
 # for again until they are closed: two open drafts for one file cannot both be
 # applied, and the duplicates would spend the backlog cap.
 max_open_candidates_per_skill = 1
+# Report-only, off by default. With unseen_withhold = k > 0, when a skill has at
+# least unseen_min_failures = N failures in a run, one or more whole conversations
+# that together hold at least k of them are kept out of the improver's prompt and
+# replayed afterwards, unless the failures are all on one conversation or fewer
+# than k of them are on the conversations before the last in the seed's order:
+# then nothing is withheld and the record says which (the conditions in full are
+# in docs/OPERATIONS.md, "Withholding failures from the improver's prompt").
+# Daily notes and the receipt record "unseen failures fixed:
+# x/w" for every measured candidate; review prints it for validated candidates
+# only. The count is report-only: the gate never reads it, but withholding takes
+# those failures out of the gate's targets (only the withheld failure pairs leave
+# the holdouts). The prompt still shows the current skill text whole, so a withheld
+# id an earlier edit wrote there reaches it, and the improver command can still
+# read them from the state directory.
+# At k = 0 records, receipts and review, text and --json, are unchanged.
+unseen_min_failures = 4     # N, minimum 2
+unseen_withhold = 0         # k, minimum 0 (0 = off); when on, must be smaller than N
 
 [prompt]
 # Budget per model call. When the budget binds, transcript blocks are dropped

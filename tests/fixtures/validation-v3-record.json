@@ -1,0 +1,565 @@
+{
+  "approval_challenge": "bd3f5d42e1310a5bb7ba1f16",
+  "created_at": "2026-01-02T00:00:00Z",
+  "hypothesis": "The cited failures all share one shape: the assistant asserted something without showing its basis. The skill never tells it to state the command you ran, so adding exactly that rule should prevent a recurrence. required-rule: state the command you ran",
+  "id": "CAND-2026-01-02-01-example-evidence-check",
+  "improver_command_id": "improver:fixture:iso=in-process:fake --role improver",
+  "intended_change": "Append one short section at the end of the file containing a single imperative bullet: before asserting a fact, state the command you ran. Nothing else in the file changes, and the frontmatter block is untouched.",
+  "notes": [],
+  "patch": {
+    "added_lines": 4,
+    "kind": "full_text",
+    "new_text": "---\nname: example-evidence-check\ndescription: Synthetic example skill. Guidance for making claims checkable. Used by the offline example run as the improvement target; it is not real guidance for real work.\n---\n\n# Example: evidence check\n\n> This is a **synthetic skill** shipped so that `asi daily` has something to read\n> on a fresh clone. It is intentionally incomplete, because the offline example\n> demonstrates a proposal that fills one specific gap in it.\n\n## When to use\n\nUse this when a task turns on a claim about the world: what a file contains, what\na command returned, what another team's process is.\n\n## What to do\n\n- Prefer a measurement over a recollection.\n- If a claim cannot be checked, label it as an assumption rather than stating it\n  in the grammar of an observation.\n- When two sources disagree, name both and say which one you are trusting.\n\n## What not to do\n\n- Do not present an inference as an observation.\n- Do not describe a file you have not opened.\n\n## Rule added by a reviewed proposal\n\n- Before asserting a fact, state the command you ran.\n",
+    "new_text_sha256": "55e0e38037934a5384699467e66ade61b68ab1aec48259bcd9cec94aae54c395",
+    "removed_lines": 0,
+    "unified_diff": "--- a/{TREE}/examples/skills/example-evidence-check/SKILL.md\n+++ b/{TREE}/examples/skills/example-evidence-check/SKILL.md\n@@ -25,3 +25,7 @@\n \n - Do not present an inference as an observation.\n - Do not describe a file you have not opened.\n+\n+## Rule added by a reviewed proposal\n+\n+- Before asserting a fact, state the command you ran.\n"
+  },
+  "risks": [
+    "The rule may be too broad and could make the agent add ceremony to answers where nobody asked for a citation.",
+    "One added bullet in a long file may simply be ignored, in which case the failure recurs and the change was pure cost."
+  ],
+  "rollback": "Delete the appended section, or restore the backup that `asi apply` wrote before the change and verify the hash matches the recorded previous_sha256.",
+  "rubric_failures": [
+    {
+      "conversation_id": "conv-human-0001",
+      "criterion_id": "cites-checkable-evidence",
+      "evidence": [
+        {
+          "element_id": "el-conv-human-0001-0001",
+          "kind": "message",
+          "position": 1
+        }
+      ],
+      "failure_case_id": "FC:conv-human-0001:evidence-discipline:cites-checkable-evidence",
+      "rubric_id": "evidence-discipline",
+      "rubric_version": 1
+    },
+    {
+      "conversation_id": "conv-human-0006",
+      "criterion_id": "cites-checkable-evidence",
+      "evidence": [
+        {
+          "element_id": "el-conv-human-0006-0001",
+          "kind": "message",
+          "position": 1
+        }
+      ],
+      "failure_case_id": "FC:conv-human-0006:evidence-discipline:cites-checkable-evidence",
+      "rubric_id": "evidence-discipline",
+      "rubric_version": 1
+    },
+    {
+      "conversation_id": "conv-human-0007",
+      "criterion_id": "cites-checkable-evidence",
+      "evidence": [
+        {
+          "element_id": "el-conv-human-0007-0001",
+          "kind": "message",
+          "position": 1
+        }
+      ],
+      "failure_case_id": "FC:conv-human-0007:evidence-discipline:cites-checkable-evidence",
+      "rubric_id": "evidence-discipline",
+      "rubric_version": 1
+    },
+    {
+      "conversation_id": "conv-human-0008",
+      "criterion_id": "cites-checkable-evidence",
+      "evidence": [
+        {
+          "element_id": "el-conv-human-0008-0001",
+          "kind": "message",
+          "position": 1
+        }
+      ],
+      "failure_case_id": "FC:conv-human-0008:evidence-discipline:cites-checkable-evidence",
+      "rubric_id": "evidence-discipline",
+      "rubric_version": 1
+    },
+    {
+      "conversation_id": "conv-human-0006",
+      "criterion_id": "separates-measured-from-assumed",
+      "evidence": [
+        {
+          "element_id": "el-conv-human-0006-0001",
+          "kind": "message",
+          "position": 1
+        }
+      ],
+      "failure_case_id": "FC:conv-human-0006:evidence-discipline:separates-measured-from-assumed",
+      "rubric_id": "evidence-discipline",
+      "rubric_version": 1
+    }
+  ],
+  "schema": "asi.candidate.v1",
+  "sources": [
+    {
+      "element_id": "el-conv-human-0001-0001",
+      "position": 1,
+      "role": "message",
+      "thread_id": "conv-human-0001"
+    },
+    {
+      "element_id": "el-conv-human-0006-0001",
+      "position": 1,
+      "role": "message",
+      "thread_id": "conv-human-0006"
+    },
+    {
+      "element_id": "el-conv-human-0007-0001",
+      "position": 1,
+      "role": "message",
+      "thread_id": "conv-human-0007"
+    },
+    {
+      "element_id": "el-conv-human-0008-0001",
+      "position": 1,
+      "role": "message",
+      "thread_id": "conv-human-0008"
+    }
+  ],
+  "status": "validated",
+  "target": {
+    "base_sha256": "f77de6c63bc106f3da017971405f86e29dcf4799255292bb46d73aa67d03ec36",
+    "canonical_path": "{TREE}/examples/skills/example-evidence-check/SKILL.md",
+    "mirror_paths": [],
+    "root_id": "example-canonical",
+    "skill_id": "example-evidence-check"
+  },
+  "validation": {
+    "base_sha256": "f77de6c63bc106f3da017971405f86e29dcf4799255292bb46d73aa67d03ec36",
+    "candidate_id": "CAND-2026-01-02-01-example-evidence-check",
+    "evidence_model_calls": 29,
+    "gate": {
+      "metrics": {
+        "degraded_case_keys": [],
+        "fixed_case_keys": [
+          "conv-human-0001::cites-checkable-evidence",
+          "conv-human-0007::cites-checkable-evidence",
+          "conv-human-0008::cites-checkable-evidence",
+          "conv-human-0006::separates-measured-from-assumed"
+        ],
+        "fixes": 4,
+        "holdout_cases": 14,
+        "holdout_degradations": 0,
+        "judge_candidate_preference_ratio": 1.0,
+        "judge_independent": true,
+        "judgements": 5,
+        "judgements_decided": 5,
+        "regressed_case_keys": [],
+        "regressions": 0,
+        "target_cases": 5,
+        "target_refs_claimed": 5,
+        "target_refs_replayed": 5,
+        "target_unresolved": 0,
+        "unreplayed_target_ref_keys": []
+      },
+      "passed": true,
+      "policy": {
+        "max_holdout_degradations": 0,
+        "max_regressions": 0,
+        "min_fixes": 1,
+        "min_holdout_cases": 1,
+        "min_judge_preference_ratio": 0.5,
+        "require_independent_judge": true,
+        "require_judge": true
+      },
+      "reasons": []
+    },
+    "improver_command_id": "improver:fixture:iso=in-process:fake --role improver",
+    "judge_command_id": "judge:fixture:iso=in-process:fake --role judge",
+    "judgements": [
+      {
+        "case": {
+          "conversation_id": "conv-human-0001",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0001::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "preferred_arm": "candidate",
+        "preferred_label": "A",
+        "rationale": "Option A states the specific rule the observed failure needed ('state the command you ran'); the other option leaves it implicit.",
+        "schema": "asi.judgement.v1"
+      },
+      {
+        "case": {
+          "conversation_id": "conv-human-0006",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0006::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "preferred_arm": "candidate",
+        "preferred_label": "B",
+        "rationale": "Option B states the specific rule the observed failure needed ('state the command you ran'); the other option leaves it implicit.",
+        "schema": "asi.judgement.v1"
+      },
+      {
+        "case": {
+          "conversation_id": "conv-human-0007",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0007::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "preferred_arm": "candidate",
+        "preferred_label": "A",
+        "rationale": "Option A states the specific rule the observed failure needed ('state the command you ran'); the other option leaves it implicit.",
+        "schema": "asi.judgement.v1"
+      },
+      {
+        "case": {
+          "conversation_id": "conv-human-0008",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0008::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "preferred_arm": "candidate",
+        "preferred_label": "B",
+        "rationale": "Option B states the specific rule the observed failure needed ('state the command you ran'); the other option leaves it implicit.",
+        "schema": "asi.judgement.v1"
+      },
+      {
+        "case": {
+          "conversation_id": "conv-human-0006",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0006::separates-measured-from-assumed",
+          "kind": "target"
+        },
+        "preferred_arm": "candidate",
+        "preferred_label": "B",
+        "rationale": "Option B states the specific rule the observed failure needed ('state the command you ran'); the other option leaves it implicit.",
+        "schema": "asi.judgement.v1"
+      }
+    ],
+    "notes": [],
+    "outcomes": [
+      {
+        "baseline": "FAIL",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0001",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0001::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "degraded": false,
+        "fixed": true,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "FAIL",
+        "candidate": "FAIL",
+        "case": {
+          "conversation_id": "conv-human-0006",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0006::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "FAIL",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0007",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0007::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "degraded": false,
+        "fixed": true,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "FAIL",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0008",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0008::cites-checkable-evidence",
+          "kind": "target"
+        },
+        "degraded": false,
+        "fixed": true,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "FAIL",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0006",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0006::separates-measured-from-assumed",
+          "kind": "target"
+        },
+        "degraded": false,
+        "fixed": true,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0001",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0001::separates-measured-from-assumed",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0001",
+          "criterion_id": "honours-explicit-constraint",
+          "key": "conv-human-0001::honours-explicit-constraint",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "instruction-following",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0002",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0002::cites-checkable-evidence",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0002",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0002::separates-measured-from-assumed",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0002",
+          "criterion_id": "honours-explicit-constraint",
+          "key": "conv-human-0002::honours-explicit-constraint",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "instruction-following",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0002",
+          "criterion_id": "gates-irreversible-action",
+          "key": "conv-human-0002::gates-irreversible-action",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "instruction-following",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0003",
+          "criterion_id": "cites-checkable-evidence",
+          "key": "conv-human-0003::cites-checkable-evidence",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0003",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0003::separates-measured-from-assumed",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0004",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0004::separates-measured-from-assumed",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0006",
+          "criterion_id": "honours-explicit-constraint",
+          "key": "conv-human-0006::honours-explicit-constraint",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "instruction-following",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0007",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0007::separates-measured-from-assumed",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0007",
+          "criterion_id": "honours-explicit-constraint",
+          "key": "conv-human-0007::honours-explicit-constraint",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "instruction-following",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0008",
+          "criterion_id": "separates-measured-from-assumed",
+          "key": "conv-human-0008::separates-measured-from-assumed",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "evidence-discipline",
+        "unresolved": false
+      },
+      {
+        "baseline": "PASS",
+        "candidate": "PASS",
+        "case": {
+          "conversation_id": "conv-human-0008",
+          "criterion_id": "honours-explicit-constraint",
+          "key": "conv-human-0008::honours-explicit-constraint",
+          "kind": "holdout"
+        },
+        "degraded": false,
+        "fixed": false,
+        "regressed": false,
+        "rubric_id": "instruction-following",
+        "unresolved": false
+      }
+    ],
+    "patch_sha256": "55e0e38037934a5384699467e66ade61b68ab1aec48259bcd9cec94aae54c395",
+    "rubrics": [
+      {
+        "rubric_id": "evidence-discipline",
+        "source_sha256": "3e96e30c0d0a7ce4cdf6ee142453abca41bbf31929bfac5318422d10199d1d62",
+        "version": 1
+      },
+      {
+        "rubric_id": "instruction-following",
+        "source_sha256": "bed335e9e919c479de2cd7b7b26e1879d4e7e38d6686069d3b620273d6ca5f01",
+        "version": 1
+      }
+    ],
+    "schema": "asi.validation.v3",
+    "scorer_command_id": "scorer:fixture:iso=in-process:fake --role scorer",
+    "seed": "example-seed:CAND-2026-01-02-01-example-evidence-check",
+    "target_refs": [
+      {
+        "conversation_id": "conv-human-0001",
+        "criterion_id": "cites-checkable-evidence",
+        "rubric_id": "evidence-discipline"
+      },
+      {
+        "conversation_id": "conv-human-0006",
+        "criterion_id": "cites-checkable-evidence",
+        "rubric_id": "evidence-discipline"
+      },
+      {
+        "conversation_id": "conv-human-0007",
+        "criterion_id": "cites-checkable-evidence",
+        "rubric_id": "evidence-discipline"
+      },
+      {
+        "conversation_id": "conv-human-0008",
+        "criterion_id": "cites-checkable-evidence",
+        "rubric_id": "evidence-discipline"
+      },
+      {
+        "conversation_id": "conv-human-0006",
+        "criterion_id": "separates-measured-from-assumed",
+        "rubric_id": "evidence-discipline"
+      }
+    ]
+  }
+}

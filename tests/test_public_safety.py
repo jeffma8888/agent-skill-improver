@@ -266,13 +266,81 @@ class TrackedTreeIsPublicSafe(unittest.TestCase):
                 )
                 self.assertNotIn("__pycache__", path)
 
-    #: JSON fixture files that are export-shaped and therefore in scope below.
-    def _fixture_exports(self) -> list[str]:
+    #: Every tracked JSON fixture except the deliberately malformed ones.
+    def _fixture_json(self) -> list[str]:
         return [
             path
             for path in self.tracked
             if path.endswith(".json") and "fixtures" in path and "malformed" not in path
         ]
+
+    @staticmethod
+    def _fixture_kind(text: str) -> str:
+        """Tell an export from a frozen candidate record by shape, never by path.
+
+        An export carries a ``thread`` object; a candidate record carries a
+        ``CAND-`` id and a ``validation`` block. Anything else is ``unknown``
+        and refused below, so a new fixture shape cannot slip past both checks.
+        """
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            return "unknown"
+        if isinstance(payload.get("thread"), dict):
+            return "export"
+        if str(payload.get("id", "")).startswith("CAND-") and "validation" in payload:
+            return "candidate-record"
+        return "unknown"
+
+    def _fixtures_of(self, kind: str) -> list[str]:
+        return [
+            path
+            for path in self._fixture_json()
+            if self._fixture_kind((REPO / path).read_text(encoding="utf-8")) == kind
+        ]
+
+    #: JSON fixture files that are export-shaped and therefore in scope below.
+    def _fixture_exports(self) -> list[str]:
+        return self._fixtures_of("export")
+
+    def test_d0_every_json_fixture_is_an_export_or_a_candidate_record(self) -> None:
+        unknown = self._fixtures_of("unknown")
+        self.assertEqual(unknown, [], "a JSON fixture of neither checked shape")
+        # The classifier is two-sided: each shape is recognised and a third is not.
+        self.assertEqual(self._fixture_kind(json.dumps({"thread": {"id": "x"}})), "export")
+        record = {"id": "CAND-x", "validation": {}}
+        self.assertEqual(self._fixture_kind(json.dumps(record)), "candidate-record")
+        self.assertEqual(self._fixture_kind(json.dumps({"id": "x"})), "unknown")
+        self.assertEqual(self._fixture_kind("[]"), "unknown")
+
+    def test_d2_a_candidate_record_fixture_carries_no_absolute_path_or_personal_data(
+        self,
+    ) -> None:
+        """The privacy check for fixtures that are not exports.
+
+        A frozen candidate record has no thread id to place in the synthetic
+        namespace, so it is held to the other signals instead: every path is
+        written against the ``{TREE}`` placeholder, never an absolute home
+        path; no deep-link URL scheme; and the leak scanner finds nothing
+        under either the fixture or the tracked-content scope, and neither the
+        product name nor the sampled title occurs.
+        """
+        records = self._fixtures_of("candidate-record")
+        self.assertGreater(len(records), 0, "no candidate record fixture was checked")
+        homes = (_j("/", "Us", "ers", "/"), _j("/", "ho", "me", "/"))
+        for path in records:
+            text = (REPO / path).read_text(encoding="utf-8")
+            squashed = text.lower().replace(" ", "")
+            with self.subTest(path=path):
+                self.assertIn("{TREE}/", text, f"{path} does not use the path placeholder")
+                for home in homes:
+                    self.assertNotIn(home, text, f"{path} carries an absolute home path")
+                for scheme in (_j("a", "ki", "://"), "chat://", "thread://"):
+                    self.assertNotIn(scheme, squashed, f"{path} carries a deep-link URL scheme")
+                for scope in ("fixture", "tracked-content"):
+                    findings = leakscan.scan_text(text, scope=scope, location=path)
+                    self.assertEqual(findings, [], f"{path} under scope {scope}")
+                for pattern in (self.product_re(), self.sampled_title_re()):
+                    self.assertIsNone(pattern.search(text), f"{path} names {pattern.pattern!r}")
 
     def test_d_no_tracked_file_is_a_real_conversation_export(self) -> None:
         """Fixtures must be synthetic, and the test says how it knows.

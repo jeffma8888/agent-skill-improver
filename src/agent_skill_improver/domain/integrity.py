@@ -414,7 +414,13 @@ def validation_mismatches(
                     "currently configured rubric's source: the criteria that decided this gate "
                     "are not the criteria configured now"
                 )
-        for outcome in record.outcomes:
+        # The unseen outcomes are checked the same way: they are never a gate
+        # input, but an outcome naming an examiner that cannot have produced it
+        # is invalid evidence wherever it sits in the record.
+        scored = [("validation.outcomes", o) for o in record.outcomes]
+        if record.unseen is not None:
+            scored += [("validation.unseen.outcomes", o) for o in record.unseen.outcomes]
+        for where, outcome in scored:
             live_rubric = rubrics.get(outcome.rubric_id)
             if live_rubric is None:
                 # Already reported once by the binding check above; saying it
@@ -422,7 +428,7 @@ def validation_mismatches(
                 continue
             if live_rubric.criterion(outcome.case.criterion_id) is None:
                 problems.append(
-                    f"validation.outcomes case {quoted_value(outcome.case.key)} says it was "
+                    f"{where} case {quoted_value(outcome.case.key)} says it was "
                     f"scored by {quoted_value(outcome.rubric_id)}, but that rubric has no "
                     f"criterion {quoted_value(outcome.case.criterion_id)}: the outcome names an "
                     "examiner that cannot "

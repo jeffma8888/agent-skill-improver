@@ -74,6 +74,13 @@ from ..domain.skills import (
     group_for,
     tree_digest_of,
 )
+from ..domain.validation import (
+    UNSEEN_MEASURED,
+    UNSEEN_SCOPE,
+    TargetCaseRef,
+    UnseenSplit,
+    split_unseen,
+)
 from ..errors import (
     AsiError,
     BlockedRunUnreviewed,
@@ -684,6 +691,14 @@ def _discover(config: Config, source: Any, receipt: RunReceipt) -> list[Any]:
     return found
 
 
+def _failure_ref(case: FailureCase) -> TargetCaseRef:
+    return TargetCaseRef(
+        rubric_id=case.rubric_id,
+        conversation_id=case.conversation_id,
+        criterion_id=case.criterion_id,
+    )
+
+
 def _propose_and_validate(
     config: Config,
     *,
@@ -787,10 +802,25 @@ def _propose_and_validate(
         while state.candidate_path(candidate_id).exists():
             seq += 1
             candidate_id = f"CAND-{run_day}-{seq:02d}-{safe_name(skill_id)}"
+        # Report-only withholding ([caps].unseen_withhold = k > 0): split the
+        # skill's whole failure pool, before max_failures_per_candidate cuts it,
+        # with the seed the validation record stores, so the record alone
+        # recomputes the split. The improver is shown the rest, in their order.
+        unseen: UnseenSplit | None = None
+        shown_cases = cases
+        if config.caps.unseen_withhold > 0:
+            unseen = split_unseen(
+                [_failure_ref(c) for c in cases],
+                seed=f"{run_seed}:{candidate_id}",
+                min_failures=config.caps.unseen_min_failures,
+                withhold=config.caps.unseen_withhold,
+            )
+            withheld_keys = {ref.key for ref in unseen.withheld}
+            shown_cases = [c for c in cases if _failure_ref(c).key not in withheld_keys]
         try:
             candidate = propose_candidate(
                 group,
-                cases,
+                shown_cases,
                 runner,
                 conversations=conversations,
                 cfg=config.prompt,
@@ -842,6 +872,9 @@ def _propose_and_validate(
             continue
 
         targets = {(r.conversation_id, r.criterion_id) for r in candidate.rubric_failures}
+        if unseen is not None:
+            # A withheld case is never also control evidence for the gate.
+            targets |= {(r.conversation_id, r.criterion_id) for r in unseen.withheld}
         holdouts = [p for p in dict.fromkeys(holdout_pairs) if p not in targets]
         try:
             validation = validate_candidate(
@@ -856,6 +889,7 @@ def _propose_and_validate(
                 holdout_pairs=holdouts,
                 max_extra_holdout_conversations=config.caps.max_extra_holdout_conversations,
                 known_skill_ids=known_skill_ids,
+                unseen=unseen,
             )
         except AsiError as exc:
             _defer(
@@ -893,6 +927,27 @@ def _propose_and_validate(
             "validation_notes": list(validation.notes),
             "persisted": not dry_run,
         }
+        if unseen is not None:
+            withheld_count = len(unseen.withheld)
+            replayed = len(validation.unseen_outcomes)
+            fixed = sum(1 for o in validation.unseen_outcomes if o.fixed)
+            entry["unseen_failures"] = {
+                "status": unseen.status,
+                "withheld": withheld_count,
+                "replayed": replayed,
+                "fixed": fixed,
+                "scope": UNSEEN_SCOPE,
+            }
+            if unseen.status == UNSEEN_MEASURED:
+                # Every measured candidate, validated or gate-failed: review
+                # shows validated candidates only, so the note is the one place
+                # a gate-failed candidate's number is printed.
+                not_replayed = withheld_count - replayed
+                missing = f", {not_replayed} not replayed" if not_replayed else ""
+                receipt.note(
+                    f"candidate {candidate.id}: unseen failures fixed: "
+                    f"{fixed}/{withheld_count}{missing} ({UNSEEN_SCOPE})"
+                )
         if dry_run:
             entry["diff_preview"] = candidate.patch.unified_diff[:4000]
             receipt.note(

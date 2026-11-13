@@ -50,6 +50,13 @@ from .domain.candidate import (
     validate_run_day,
 )
 from .domain.skills import BOM
+from .domain.validation import (
+    UNSEEN_MEASURED,
+    UNSEEN_ONE_CONVERSATION,
+    UNSEEN_SCOPE,
+    UNSEEN_SHORT_OF_K,
+    UNSEEN_TOO_FEW,
+)
 from .domain.isolation import (
     MODE_NONE,
     SOURCE_CLASS_PRIVATE,
@@ -1389,6 +1396,48 @@ def cmd_set_aside(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unseen_line(report: Mapping[str, Any]) -> str | None:
+    """The review line for the unseen count, or ``None`` when there is nothing to say.
+
+    Report-only: the gate line above it never read this number. A v3 record
+    cannot say whether withholding was off, did not exist yet, or was dropped
+    by a rewrite, so ``review_report`` reports it only when withholding is on
+    now; with the default (k = 0) a v3 report has no ``unseen`` key and a v3
+    review is line for line what it was before.
+    """
+    unseen = report.get("unseen") or {}
+    status = unseen.get("status")
+    head = "  unseen failures fixed: "
+    if status == UNSEEN_MEASURED:
+        withheld = len(unseen.get("withheld", []))
+        replayed = unseen.get("replayed", 0)
+        missing = f", {withheld - replayed} not replayed" if replayed < withheld else ""
+        return f"{head}{unseen.get('fixed')}/{withheld}{missing} ({UNSEEN_SCOPE})"
+    pool = len(unseen.get("eligible", []))
+    if status == UNSEEN_TOO_FEW:
+        return (
+            f"{head}not measured (the skill had {pool} failure(s), fewer than "
+            f"[caps].unseen_min_failures = {unseen.get('min_failures')})"
+        )
+    if status == UNSEEN_ONE_CONVERSATION:
+        return (
+            f"{head}not measured (all {pool} failure(s) are on one conversation, so none can "
+            "be withheld while one stays shown)"
+        )
+    if status == UNSEEN_SHORT_OF_K:
+        return (
+            f"{head}not measured (fewer than [caps].unseen_withhold = {unseen.get('withhold')} "
+            "failure(s) can be withheld while one whole conversation stays shown)"
+        )
+    if status == "not-recorded":
+        return (
+            f"{head}not recorded (an {unseen.get('schema')} record: written with "
+            "[caps].unseen_withhold = 0 or before withholding existed, or rewritten as v3; "
+            "the record cannot tell which)"
+        )
+    return None
+
+
 def _replayed_case_lines(outcomes: Sequence[Mapping[str, Any]]) -> list[str]:
     """The cases behind the gate's metrics, one line each, the tool's words only.
 
@@ -1455,7 +1504,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     store = build_skill_store(config, writable=False)
     base_text = read_live_base_text(store, candidate, action="review")
     rubrics = {r.id: r for r in config.rubrics}
-    report = review_report(candidate, base_text=base_text, rubrics=rubrics)
+    report = review_report(
+        candidate,
+        base_text=base_text,
+        rubrics=rubrics,
+        unseen_withhold=config.caps.unseen_withhold,
+    )
     # The questions the write will ask of its target, asked before anything is
     # shown, by the method the write asks them with: a target reached through a
     # symbolic link, one that is not the skill document, one inside a protected
@@ -1509,11 +1563,16 @@ def cmd_review(args: argparse.Namespace) -> int:
                 judge_candidate_preference_ratio=metrics.get("judge_candidate_preference_ratio"),
             )
         )
+    unseen_line = _unseen_line(report)
+    if unseen_line is not None:
+        out.append(one_line(unseen_line))
     # Which cases the gate counted, and what the judge said about each: the
     # evidence behind the metrics line, so the operator can read the evidence
     # rather than the summary. Ids are kept to one line; the judge's prose is
-    # quoted like the improver's.
-    out += ["", "REPLAYED CASES (baseline -> candidate)", *_replayed_case_lines(report["outcomes"])]
+    # quoted like the improver's. The unseen cases are listed with them, tagged
+    # [unseen], in the text only: report["outcomes"] stays the gate's list.
+    replayed = list(report["outcomes"]) + list(report.get("unseen", {}).get("outcomes", []))
+    out += ["", "REPLAYED CASES (baseline -> candidate)", *_replayed_case_lines(replayed)]
     out += ["", "JUDGE (blind, candidate vs baseline)", *_judgement_lines(report["judgements"])]
     out += ["", "HYPOTHESIS", *quoted(report["hypothesis"])]
     out += ["", "INTENDED CHANGE", *quoted(report["intended_change"])]

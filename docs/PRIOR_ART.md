@@ -105,20 +105,34 @@ Each asi property is stated once, here, with the code that does it.
   ([`app/daily.py`], [`app/validate.py`]). A required judge compares the two
   texts on target cases only ([`app/validate.py`]).
 - **Gate and defaults.** The gate counts a fix as FAIL -> PASS on a target case,
-  a regression as PASS -> FAIL on any replayed case, and a holdout degradation
-  as PASS -> `INSUFFICIENT` on a holdout; it fails when a claimed target has no
-  replay outcome ([`domain/validation.py`]). The fix count is in-sample:
-  a fix counts FAIL -> PASS on a shown failure, because the targets are the
-  failures the improver was shown ([`app/pipeline.py`], [`app/daily.py`]).
-  Holdouts catch PASS -> FAIL and PASS -> `INSUFFICIENT` and say nothing about
-  new fixes. By default the gate requires at least one fix, no regressions, no
-  holdout degradations, at least one holdout, and a blind judge preference for
-  the candidate in at least half of the decided cases; each threshold is a
-  `[gate]` setting ([`config.py`], [`domain/validation.py`]). By default the
-  gate refuses when the judge's command matches the improver's
-  ([`app/validate.py`], [`domain/validation.py`]). A
-  judge whose command differs from the improver's may still be the same model;
-  the threat model calls command inequality "a weak proxy"
+  a regression as PASS -> FAIL on a target or holdout case, and a holdout
+  degradation as PASS -> `INSUFFICIENT` on a holdout; it fails when a claimed
+  target has no replay outcome ([`domain/validation.py`]). The fix count is
+  in-sample: a fix counts FAIL -> PASS on a shown failure, because the targets
+  are the failures the improver was shown ([`app/pipeline.py`],
+  [`app/daily.py`]). Holdouts catch PASS -> FAIL and PASS -> `INSUFFICIENT` and
+  say nothing about new fixes. An optional count of fixes on withheld failures
+  is off by default (`[caps].unseen_withhold = 0`). Set to k > 0, for a skill
+  with at least `[caps].unseen_min_failures` failures in a run, whole
+  conversations taken in an order fixed by the seed, never the last, until
+  together they hold at least k of those failures, are kept out of the
+  improver's prompt and replayed after it; with too few failures, all on one
+  conversation, or fewer than k before the last, nothing is withheld and the
+  record says which. The candidate record and `asi review` report how many
+  withheld failures the candidate fixed, report-only: the gate never reads the
+  count. What is withheld is the failure rows and excerpts: the prompt still
+  shows the current skill text whole, which an earlier edit may have written a
+  withheld instance into, and the improver's command can still read those
+  conversations in the state directory ([`config.py`], [`domain/validation.py`],
+  [`app/daily.py`], [`app/validate.py`], [`cli.py`]). By default the gate
+  requires at least one fix, no regressions, no holdout degradations, at least
+  one holdout, and a blind judge preference for the candidate in at least half
+  of the decided cases; each threshold is a `[gate]` setting ([`config.py`],
+  [`domain/validation.py`]). By default the gate refuses when the judge's
+  command matches the improver's ([`app/validate.py`],
+  [`domain/validation.py`]). A judge whose command differs from the improver's
+  may still be the same model; the threat model calls command inequality
+  "a weak proxy"
   ([correlated evaluators](PRIVACY_AND_THREAT_MODEL.md#correlated-evaluators)).
 - **Apply and rollback.** The daily driver does not import the promotion module
   and refuses a writable skill store ([`app/daily.py`]). Apply is a separate
@@ -340,6 +354,13 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   [#261](https://github.com/gepa-ai/gepa/issues/261) asks for a guard against
   training phrases copied into a prompt; asi has the limited, verbatim-only
   copied-text guard described in [proposal checks].
+- **ADOPTED, partly: fixes on failures the improver did not see.** ADAS, AFlow
+  and HyperAgents keep a test split apart from search, and GEPA's gskill keeps a
+  test split too. asi has an optional, report-only count of fixes on withheld
+  failures ([gate and defaults]). Not built: a gate on that count, a large
+  withheld set (k counts failures of one skill in one run), a grader other than
+  the same rubric and scorer, and a withholding that also covers the skill text
+  and the state directory.
 - **AVOIDED in the candidate write path: a candidate that can edit what grades
   it.** DGM's authors report a
   child that scored perfectly by removing the markers its hallucination check
@@ -390,11 +411,6 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   version unless activation is held for a person
   ([harness guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)).
   In asi, apply is a separate command ([apply and rollback]).
-- **PLANNED, not built: fixes on failures the improver did not see.** ADAS,
-  AFlow and HyperAgents keep a test split apart from search, and GEPA's gskill
-  keeps a test split too. The plan is to hold back some failures of a criterion
-  from the improver and require a fix on those; today the fix count is in-sample
-  ([gate and defaults]).
 - **PLANNED, not built: repeated trials, sample size and an interval.**
   Superpowers prescribes five or more runs per variant, AFlow repeats validation
   rounds, ADAS gives its meta agent a bootstrap confidence interval

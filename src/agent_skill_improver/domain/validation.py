@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from .. import SCHEMA_JUDGEMENT, SCHEMA_VALIDATION
+from .. import SCHEMA_JUDGEMENT, SCHEMA_VALIDATION, SCHEMA_VALIDATION_V3
 from .redaction import kept_prose, quoted_value, quoted_values
 from .rubric import Verdict
 from .scoring import MAX_RATIONALE_CHARS
@@ -41,13 +41,17 @@ ARM_CANDIDATE = "candidate"
 
 CASE_TARGET = "target"
 CASE_HOLDOUT = "holdout"
+#: A failure withheld from the improver's prompt and replayed afterwards. Never
+#: in ``outcomes``, never judged, never a gate input: it lives in the record's
+#: ``unseen`` block only.
+CASE_UNSEEN = "unseen"
 
 
 @dataclass(frozen=True)
 class ReplayCase:
     conversation_id: str
     criterion_id: str
-    kind: str  # CASE_TARGET | CASE_HOLDOUT
+    kind: str  # CASE_TARGET | CASE_HOLDOUT | CASE_UNSEEN (the unseen block only)
 
     @property
     def key(self) -> str:
@@ -198,6 +202,101 @@ def blind_arms(case_key: str, seed: str) -> dict[str, str]:
     return {"A": ARM_CANDIDATE, "B": ARM_BASELINE}
 
 
+UNSEEN_MEASURED = "measured"
+UNSEEN_TOO_FEW = "too-few"  # fewer than N failures
+UNSEEN_ONE_CONVERSATION = "one-conversation"
+UNSEEN_SHORT_OF_K = "short-of-k"  # >= N failures, but fewer than k off the last conversation
+UNSEEN_STATUSES = (UNSEEN_MEASURED, UNSEEN_TOO_FEW, UNSEEN_ONE_CONVERSATION, UNSEEN_SHORT_OF_K)
+
+#: Printed next to the unseen number wherever it is printed. The withholding is
+#: of the withheld cases' failure rows and conversation excerpts from the
+#: improver's *prompt*: the prompt still shows the current skill text whole, so
+#: a withheld conversation's id or failure words an earlier edit wrote into the
+#: skill reach it, and the improver command can still read the state directory.
+#: And the number is report-only: ``evaluate_gate`` never sees it.
+UNSEEN_SCOPE = (
+    "withheld from the improver's prompt as failures and excerpts only, not from the "
+    "skill text that prompt shows or files its command can read; not used by the gate"
+)
+
+
+@dataclass(frozen=True)
+class UnseenSplit:
+    """Which of a skill's failures were kept out of the improver's prompt.
+
+    Recomputable from the record alone: ``split_unseen(eligible, seed=...,
+    min_failures=..., withhold=...)`` over the recorded pool gives this split
+    again, so a verifier never has to trust the stored withheld set. That is
+    reproducibility, not secrecy: the seed is on the record.
+    """
+
+    status: str
+    eligible: tuple[TargetCaseRef, ...]  # the pool daily passed, sorted by .key, unique
+    withheld: tuple[TargetCaseRef, ...]  # sorted by .key; () unless status == measured
+    min_failures: int  # N, as configured when the split was made
+    withhold: int  # k, as configured; always >= 1 (k = 0 makes no split)
+
+    @property
+    def shown(self) -> tuple[TargetCaseRef, ...]:
+        withheld = {ref.key for ref in self.withheld}
+        return tuple(ref for ref in self.eligible if ref.key not in withheld)
+
+
+def unseen_conversation_order(conversation_ids: Sequence[str], *, seed: str) -> list[str]:
+    """The conversations of a pool in the order the split walks them.
+
+    A hash of the seed and the id, so the order is fixed by the record and is
+    not the export's order, the weight order or anything a model wrote.
+    """
+
+    def rank(conversation_id: str) -> tuple[str, str]:
+        digest = hashlib.sha256(f"{seed}\x00unseen\x00{conversation_id}".encode("utf-8"))
+        return (digest.hexdigest(), conversation_id)
+
+    return sorted(set(conversation_ids), key=rank)
+
+
+def split_unseen(
+    eligible: Sequence[TargetCaseRef], *, seed: str, min_failures: int, withhold: int
+) -> UnseenSplit:
+    """Withhold whole conversations holding at least ``withhold`` failures.
+
+    The unit is a conversation, because the prompt carries excerpts of every
+    shown case's conversation: a withheld failure must not share a transcript
+    with a shown one. The last conversation in the order is never withheld, so
+    at least one whole conversation always stays shown.
+    """
+    if withhold < 1 or withhold >= min_failures:
+        raise ValueError(
+            f"an unseen split needs 1 <= withhold < min_failures, got withhold={withhold} "
+            f"min_failures={min_failures}"
+        )
+    pool = tuple(sorted({ref.key: ref for ref in eligible}.values(), key=lambda r: r.key))
+
+    def split(status: str, withheld: tuple[TargetCaseRef, ...] = ()) -> UnseenSplit:
+        return UnseenSplit(
+            status=status,
+            eligible=pool,
+            withheld=withheld,
+            min_failures=min_failures,
+            withhold=withhold,
+        )
+
+    if len(pool) < min_failures:
+        return split(UNSEEN_TOO_FEW)
+    order = unseen_conversation_order([ref.conversation_id for ref in pool], seed=seed)
+    if len(order) < 2:
+        return split(UNSEEN_ONE_CONVERSATION)
+    withheld: list[TargetCaseRef] = []
+    for conversation_id in order[:-1]:
+        withheld.extend(ref for ref in pool if ref.conversation_id == conversation_id)
+        if len(withheld) >= withhold:
+            break
+    if len(withheld) < withhold:
+        return split(UNSEEN_SHORT_OF_K)
+    return split(UNSEEN_MEASURED, tuple(sorted(withheld, key=lambda r: r.key)))
+
+
 @dataclass(frozen=True)
 class Judgement:
     case: ReplayCase
@@ -317,7 +416,17 @@ def evaluate_gate(
     verifier has to call tampered. It is a sequence rather than a boolean so the
     same decision can be recomputed byte-exact from a persisted record, which
     carries the same claim set.
+
+    An unseen outcome is refused with ``ValueError``: the unseen count is
+    report-only, so the gate is never handed one, by any caller.
     """
+    unseen = [o for o in outcomes if o.case.kind == CASE_UNSEEN]
+    if unseen:
+        raise ValueError(
+            f"evaluate_gate was given {len(unseen)} unseen outcome(s), the first "
+            f"{quoted_value(unseen[0].case.key)}: an unseen case is report-only, never gate "
+            "evidence; pass the target and holdout outcomes only"
+        )
     targets = [o for o in outcomes if o.case.kind == CASE_TARGET]
     holdouts = [o for o in outcomes if o.case.kind == CASE_HOLDOUT]
 
@@ -508,16 +617,19 @@ def _expect_sha256(raw: Mapping[str, Any], key: str, *, label: str) -> str:
 _CASE_KEYS = frozenset({"conversation_id", "criterion_id", "kind", "key"})
 
 
-def _parse_case(raw: Any, *, label: str) -> ReplayCase:
+_OUTCOME_KINDS = (CASE_TARGET, CASE_HOLDOUT)
+_UNSEEN_KINDS = (CASE_UNSEEN,)
+
+
+def _parse_case(raw: Any, *, label: str, kinds: tuple[str, ...] = _OUTCOME_KINDS) -> ReplayCase:
     raw = _expect_mapping(raw, label=label)
     _expect_exact_keys(raw, _CASE_KEYS, label=label)
     conversation_id = _expect_str(raw, "conversation_id", label=label)
     criterion_id = _expect_str(raw, "criterion_id", label=label)
     kind = _expect_str(raw, "kind", label=label)
-    if kind not in (CASE_TARGET, CASE_HOLDOUT):
-        raise ValueError(
-            f"{label}.kind must be {CASE_TARGET!r} or {CASE_HOLDOUT!r}, got {quoted_value(kind)}"
-        )
+    if kind not in kinds:
+        allowed = " or ".join(repr(k) for k in kinds)
+        raise ValueError(f"{label}.kind must be {allowed}, got {quoted_value(kind)}")
     case = ReplayCase(conversation_id=conversation_id, criterion_id=criterion_id, kind=kind)
     key = _expect_str(raw, "key", label=label)
     if key != case.key:
@@ -541,11 +653,17 @@ _OUTCOME_KEYS = frozenset(
 )
 
 
-def _parse_outcome(raw: Any, *, index: int) -> ReplayOutcome:
-    label = f"outcomes[{index}]"
+def _parse_outcome(
+    raw: Any,
+    *,
+    index: int,
+    prefix: str = "outcomes",
+    kinds: tuple[str, ...] = _OUTCOME_KINDS,
+) -> ReplayOutcome:
+    label = f"{prefix}[{index}]"
     raw = _expect_mapping(raw, label=label)
     _expect_exact_keys(raw, _OUTCOME_KEYS, label=label)
-    case = _parse_case(raw["case"], label=f"{label}.case")
+    case = _parse_case(raw["case"], label=f"{label}.case", kinds=kinds)
     rubric_id = _expect_nonempty_str(raw, "rubric_id", label=label)
     try:
         baseline = Verdict.parse(raw.get("baseline"))
@@ -766,6 +884,163 @@ _RECORD_KEYS = frozenset(
         "notes",
     }
 )
+#: v4 is exactly v3 plus the unseen block: no field of v3 changes meaning.
+_RECORD_KEYS_V4 = _RECORD_KEYS | {"unseen"}
+_ACCEPTED_SCHEMAS = (SCHEMA_VALIDATION_V3, SCHEMA_VALIDATION)
+
+_UNSEEN_KEYS = frozenset(
+    {
+        "status",
+        "min_failures",
+        "withhold",
+        "eligible_refs",
+        "withheld_refs",
+        "outcomes",
+        "replayed",
+        "fixed",
+    }
+)
+
+
+@dataclass(frozen=True)
+class UnseenRecord:
+    """The parsed ``validation.unseen`` block of a v4 record.
+
+    ``withheld`` was recomputed from ``seed``, ``eligible``, ``min_failures`` and
+    ``withhold`` before this was built. ``outcomes`` are the withheld cases that
+    were replayed: never judged and never a gate input. ``len(withheld)`` is
+    ``w``; ``fixed`` (FAIL -> PASS only) is ``x``.
+    """
+
+    status: str
+    min_failures: int
+    withhold: int
+    eligible: tuple[TargetCaseRef, ...]
+    withheld: tuple[TargetCaseRef, ...]
+    outcomes: tuple[ReplayOutcome, ...]
+    replayed: int
+    fixed: int
+
+
+def _parse_ref_list(raw: Any, *, label: str) -> tuple[TargetCaseRef, ...]:
+    """A list of refs that must be unique and sorted by key, as the writer writes it."""
+    if not isinstance(raw, list):
+        raise ValueError(f"validation.{label} must be a list")
+    refs = tuple(
+        TargetCaseRef.from_mapping(item, label=f"{label}[{i}]") for i, item in enumerate(raw)
+    )
+    keys = [ref.key for ref in refs]
+    if len(set(keys)) != len(keys):
+        duplicated = sorted({key for key in keys if keys.count(key) > 1})
+        raise ValueError(f"validation.{label} has a duplicate ref {quoted_value(duplicated[0])}")
+    if keys != sorted(keys):
+        raise ValueError(f"validation.{label} must be sorted by ref key")
+    return refs
+
+
+def _parse_unseen(
+    raw: Any,
+    *,
+    seed: str,
+    target_refs: Sequence[TargetCaseRef],
+    outcome_keys: set[str],
+) -> UnseenRecord:
+    label = "validation.unseen"
+    raw = _expect_mapping(raw, label=label)
+    _expect_exact_keys(raw, _UNSEEN_KEYS, label=label)
+    status = _expect_str(raw, "status", label=label)
+    if status not in UNSEEN_STATUSES:
+        raise ValueError(
+            f"{label}.status must be one of {', '.join(repr(s) for s in UNSEEN_STATUSES)}, "
+            f"got {quoted_value(status)}"
+        )
+    min_failures = _expect_int(raw, "min_failures", label=label)
+    if min_failures < 2:
+        raise ValueError(f"{label}.min_failures must be >= 2, got {min_failures}")
+    withhold = _expect_int(raw, "withhold", label=label)
+    if not 1 <= withhold < min_failures:
+        raise ValueError(
+            f"{label}.withhold must be >= 1 and smaller than {label}.min_failures "
+            f"({min_failures}), got {withhold}"
+        )
+    eligible = _parse_ref_list(raw["eligible_refs"], label="unseen.eligible_refs")
+    eligible_keys = {ref.key for ref in eligible}
+    for ref in target_refs:
+        if ref.key not in eligible_keys:
+            raise ValueError(
+                f"validation.target_refs names {quoted_value(ref.key)} but "
+                "validation.unseen.eligible_refs does not: a claimed failure must come from the "
+                "pool the split was made from"
+            )
+    withheld = _parse_ref_list(raw["withheld_refs"], label="unseen.withheld_refs")
+    recomputed = split_unseen(eligible, seed=seed, min_failures=min_failures, withhold=withhold)
+    if status != recomputed.status or withheld != recomputed.withheld:
+        recorded_keys = quoted_values([ref.key for ref in withheld]) if withheld else ""
+        recomputed_keys = (
+            quoted_values([ref.key for ref in recomputed.withheld]) if recomputed.withheld else ""
+        )
+        raise ValueError(
+            f"validation.unseen.withheld_refs is [{recorded_keys}] with status "
+            f"{quoted_value(status)} but seed {quoted_value(seed)} with this pool, "
+            f"N={min_failures} and k={withhold} recomputes [{recomputed_keys}] with status "
+            f"{quoted_value(recomputed.status)}: the withheld set is derived from the record, "
+            "not chosen"
+        )
+    claimed = {ref.key for ref in target_refs}
+    for ref in withheld:
+        if ref.key in claimed:
+            raise ValueError(
+                f"validation.unseen.withheld_refs names {quoted_value(ref.key)}, which was "
+                "withheld from the improver's prompt but is on the candidate's claim set"
+            )
+    outcomes_raw = raw["outcomes"]
+    if not isinstance(outcomes_raw, list):
+        raise ValueError("validation.unseen.outcomes must be a list")
+    outcomes = tuple(
+        _parse_outcome(item, index=i, prefix="unseen.outcomes", kinds=_UNSEEN_KINDS)
+        for i, item in enumerate(outcomes_raw)
+    )
+    withheld_keys = {ref.key for ref in withheld}
+    seen: set[str] = set()
+    for outcome in outcomes:
+        key = outcome.ref.key
+        if key not in withheld_keys:
+            raise ValueError(
+                f"validation.unseen.outcomes has case {quoted_value(key)}, which is not among "
+                "validation.unseen.withheld_refs: only a withheld failure is replayed as unseen"
+            )
+        if key in seen:
+            raise ValueError(f"validation.unseen.outcomes has a duplicate case {quoted_value(key)}")
+        seen.add(key)
+        if outcome.case.key in outcome_keys:
+            raise ValueError(
+                f"validation.unseen.outcomes case {quoted_value(outcome.case.key)} is also a "
+                "case in validation.outcomes: one case cannot be both withheld from the "
+                "improver and evidence the gate reads"
+            )
+    replayed = _expect_int(raw, "replayed", label=label)
+    if replayed != len(outcomes):
+        raise ValueError(
+            f"validation.unseen.replayed is {replayed} but the block holds {len(outcomes)} "
+            "unseen outcome(s)"
+        )
+    fixed = _expect_int(raw, "fixed", label=label)
+    fixed_count = sum(1 for o in outcomes if o.fixed)
+    if fixed != fixed_count:
+        raise ValueError(
+            f"validation.unseen.fixed is {fixed} but {fixed_count} of the unseen outcome(s) went "
+            "FAIL -> PASS (FAIL -> INSUFFICIENT is not a fix)"
+        )
+    return UnseenRecord(
+        status=status,
+        min_failures=min_failures,
+        withhold=withhold,
+        eligible=eligible,
+        withheld=withheld,
+        outcomes=outcomes,
+        replayed=replayed,
+        fixed=fixed,
+    )
 
 
 @dataclass(frozen=True)
@@ -803,15 +1078,19 @@ class ValidationRecord:
     gate_raw: Mapping[str, Any]
     evidence_model_calls: int
     notes: tuple[str, ...]
+    #: The v4 ``unseen`` block, or ``None`` for a v3 record (no split was made).
+    unseen: UnseenRecord | None = None
 
     @staticmethod
     def parse(raw: Any) -> "ValidationRecord":
         raw = _expect_mapping(raw, label="validation")
-        _expect_exact_keys(raw, _RECORD_KEYS, label="validation")
+        is_v4 = raw.get("schema") == SCHEMA_VALIDATION
+        _expect_exact_keys(raw, _RECORD_KEYS_V4 if is_v4 else _RECORD_KEYS, label="validation")
         schema = _expect_str(raw, "schema", label="validation")
-        if schema != SCHEMA_VALIDATION:
+        if schema not in _ACCEPTED_SCHEMAS:
             raise ValueError(
-                f"validation.schema must be {SCHEMA_VALIDATION!r}, got {quoted_value(schema)}"
+                f"validation.schema must be {SCHEMA_VALIDATION_V3!r} or {SCHEMA_VALIDATION!r}, "
+                f"got {quoted_value(schema)}"
             )
         gate_raw = _expect_mapping(raw["gate"], label="validation.gate")
         _expect_exact_keys(gate_raw, _GATE_KEYS, label="validation.gate")
@@ -888,12 +1167,24 @@ class ValidationRecord:
                     "criterion"
                 )
 
+        unseen: UnseenRecord | None = None
+        if is_v4:
+            unseen = _parse_unseen(
+                raw["unseen"],
+                seed=seed,
+                target_refs=target_refs,
+                outcome_keys={o.case.key for o in outcomes},
+            )
+        # Every outcome whose verdicts came from a scorer call: the gate's and,
+        # for v4, the unseen ones. Bindings and the call count cover both.
+        scored = outcomes + (unseen.outcomes if unseen is not None else ())
+
         # Rubric completeness: the top-level list must name exactly the rubrics
         # the outcomes actually claim to have been scored against -- no
         # omission (an outcome whose rubric is not bound at all) and no extra
         # (a rubric nobody's outcome used, which cannot be checked for staleness
         # against anything).
-        required_rubric_ids = {o.rubric_id for o in outcomes}
+        required_rubric_ids = {o.rubric_id for o in scored}
         if required_rubric_ids != seen_rubric_ids:
             missing = sorted(required_rubric_ids - seen_rubric_ids)
             extra = sorted(seen_rubric_ids - required_rubric_ids)
@@ -930,13 +1221,13 @@ class ValidationRecord:
                 )
 
         evidence_model_calls = _expect_int(raw, "evidence_model_calls", label="validation")
-        expected_calls = evidence_call_count(outcomes, judgements)
+        expected_calls = evidence_call_count(scored, judgements)
         if evidence_model_calls != expected_calls:
-            distinct_scored_pairs = {(o.case.conversation_id, o.rubric_id) for o in outcomes}
+            distinct_scored_pairs = {(o.case.conversation_id, o.rubric_id) for o in scored}
             raise ValueError(
                 f"validation.evidence_model_calls is {quoted_value(evidence_model_calls)} but "
                 "this record's own "
-                f"evidence derives exactly {expected_calls}: {len(outcomes)} outcome(s) across "
+                f"evidence derives exactly {expected_calls}: {len(scored)} outcome(s) across "
                 f"{len(distinct_scored_pairs)} distinct (conversation, rubric) pair(s) at a "
                 f"baseline and a candidate call each, plus {len(judgements)} judgement(s). This "
                 "count is derived rather than reported, so any other value is a rewritten field "
@@ -979,6 +1270,7 @@ class ValidationRecord:
             gate_raw=gate_raw,
             evidence_model_calls=evidence_model_calls,
             notes=notes,
+            unseen=unseen,
         )
 
     def recompute_gate_mismatches(self) -> list[str]:

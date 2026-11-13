@@ -108,6 +108,8 @@ the code:
 Limits:
 
 - The fix count is in-sample: a fix counts FAIL -> PASS on a shown failure.
+  An optional count of fixes on withheld failures is off by default and
+  report-only: the gate never reads it.
   The holdouts are cases that scored PASS earlier in the run and can come from
   the same conversation as a target. Holdouts catch PASS -> FAIL and
   PASS -> `INSUFFICIENT` and say nothing about new fixes.

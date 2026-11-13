@@ -14,7 +14,10 @@ SCHEMA_CANDIDATE = "asi.candidate.v1"
 SCHEMA_JUDGEMENT = "asi.judgement.v1"
 SCHEMA_RECEIPT = "asi.receipt.v1"
 SCHEMA_MODEL_REQUEST = "asi.model_request.v1"
-SCHEMA_VALIDATION = "asi.validation.v3"
+#: The validation record written when a run withheld failures from the improver's prompt
+#: (``[caps].unseen_withhold`` > 0). Without a split the writer still writes v3.
+SCHEMA_VALIDATION = "asi.validation.v4"
+SCHEMA_VALIDATION_V3 = "asi.validation.v3"
 
 __all__ = [
     "__version__",
@@ -26,4 +29,5 @@ __all__ = [
     "SCHEMA_RECEIPT",
     "SCHEMA_MODEL_REQUEST",
     "SCHEMA_VALIDATION",
+    "SCHEMA_VALIDATION_V3",
 ]

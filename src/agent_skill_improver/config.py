@@ -220,6 +220,8 @@ TABLE_KEYS: dict[str, frozenset[str]] = {
             "max_extra_holdout_conversations",
             "max_defer_attempts",
             "max_open_candidates_per_skill",
+            "unseen_min_failures",
+            "unseen_withhold",
         }
     ),
     "prompt": frozenset(
@@ -436,9 +438,15 @@ class CapsConfig:
     max_extra_holdout_conversations: int = 3
     max_defer_attempts: int = 3
     max_open_candidates_per_skill: int = 1
+    #: N: a skill needs at least this many failures in a run before any is withheld.
+    unseen_min_failures: int = 4
+    #: k: withhold whole conversations holding at least k failures from the
+    #: improver's prompt and replay them afterwards. 0 (the default) is off: no
+    #: split is made and the validation record is v3. Report-only: never a gate input.
+    unseen_withhold: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "max_candidates_per_run": self.max_candidates_per_run,
             "max_open_candidates": self.max_open_candidates,
             "max_failures_per_candidate": self.max_failures_per_candidate,
@@ -447,6 +455,13 @@ class CapsConfig:
             "max_defer_attempts": self.max_defer_attempts,
             "max_open_candidates_per_skill": self.max_open_candidates_per_skill,
         }
+        # Withholding off (k = 0) leaves this dict, and so the run receipt that
+        # copies it, byte-identical to a build without the feature. The two
+        # keys appear only when withholding is on (k > 0).
+        if self.unseen_withhold > 0:
+            out["unseen_min_failures"] = self.unseen_min_failures
+            out["unseen_withhold"] = self.unseen_withhold
+        return out
 
 
 @dataclass(frozen=True)
@@ -965,6 +980,13 @@ def _load_selection(table: Mapping[str, Any]) -> SelectionConfig:
 
 
 def _load_caps(table: Mapping[str, Any]) -> CapsConfig:
+    unseen_min_failures = _int_field(table, "unseen_min_failures", 4, where="caps", minimum=2)
+    unseen_withhold = _int_field(table, "unseen_withhold", 0, where="caps", minimum=0)
+    if unseen_withhold > 0 and unseen_withhold >= unseen_min_failures:
+        raise ConfigError(
+            "[caps].unseen_withhold (k) must be smaller than [caps].unseen_min_failures (N), "
+            f"got k={unseen_withhold} N={unseen_min_failures}"
+        )
     return CapsConfig(
         max_candidates_per_run=_int_field(
             table, "max_candidates_per_run", 3, where="caps", minimum=0
@@ -981,6 +1003,8 @@ def _load_caps(table: Mapping[str, Any]) -> CapsConfig:
         max_open_candidates_per_skill=_int_field(
             table, "max_open_candidates_per_skill", 1, where="caps", minimum=1
         ),
+        unseen_min_failures=unseen_min_failures,
+        unseen_withhold=unseen_withhold,
     )
 
 
