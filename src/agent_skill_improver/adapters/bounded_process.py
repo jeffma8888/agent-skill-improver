@@ -53,7 +53,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ..domain.redaction import NAMED_PATH_CHARS, quoted_value, redact, why_unreadable
 
@@ -404,16 +404,21 @@ def _waitid_exited(pid: int, timeout: float) -> bool | None:
 
 
 def _kqueue_exited(pid: int, timeout: float) -> bool | None:
+    # The kqueue names are declared only for the platforms that have one (macOS
+    # and the BSDs), so they are read through an untyped name, as ``os.waitid``
+    # is above, for the type gate to pass on Linux too, where this is never
+    # reached (measured before: 8 attr-defined errors there).
+    kq: Any = select
     try:
-        queue = select.kqueue()
+        queue = kq.kqueue()
     except OSError:
         return None
     try:
-        watch = select.kevent(
+        watch = kq.kevent(
             pid,
-            filter=select.KQ_FILTER_PROC,
-            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-            fflags=select.KQ_NOTE_EXIT,
+            filter=kq.KQ_FILTER_PROC,
+            flags=kq.KQ_EV_ADD | kq.KQ_EV_ONESHOT,
+            fflags=kq.KQ_NOTE_EXIT,
         )
         events = queue.control([watch], 1, timeout)
     except OSError as exc:
@@ -423,11 +428,11 @@ def _kqueue_exited(pid: int, timeout: float) -> bool | None:
     if not events:
         return False
     event = events[0]
-    if event.flags & select.KQ_EV_ERROR:
+    if event.flags & kq.KQ_EV_ERROR:
         # A child that has already exited cannot be watched (measured on macOS:
         # ESRCH, reported as the event); it is still unreaped, as above.
         return True if event.data == errno.ESRCH else None
-    return bool(event.fflags & select.KQ_NOTE_EXIT)
+    return bool(event.fflags & kq.KQ_NOTE_EXIT)
 
 
 def _end_group(pid: int) -> bool:

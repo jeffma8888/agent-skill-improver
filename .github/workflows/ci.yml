@@ -77,6 +77,13 @@ jobs:
       - name: Type gate
         run: mypy
 
+      # mypy checks the source against the platform it runs on, and the stubs
+      # declare some names for some platforms only (the kqueue for macOS and the
+      # BSDs, for one), so the gate checks it as on macOS too, the other platform
+      # the suite runs on.
+      - name: Type gate as on macOS
+        run: mypy --platform darwin
+
       - name: Fixture drift check
         run: python examples/build_fixtures.py --check
 
