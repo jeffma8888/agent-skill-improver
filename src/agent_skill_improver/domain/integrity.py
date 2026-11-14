@@ -449,6 +449,7 @@ def verify_full_integrity(
     base_text: str | None = None,
     rubrics: Mapping[str, Rubric] | None = None,
     action: str,
+    advice: str | None = None,
 ) -> None:
     """The one fail-closed verifier review and apply must call before anything else.
 
@@ -456,6 +457,11 @@ def verify_full_integrity(
     recomputation of its persisted validation, and refuses ``action`` before a
     token, backup, receipt or write is produced if either disagrees with a
     fresh recomputation.
+
+    ``advice``, when given, is what the refusal says to do in place of the
+    approval-token sentence and ``repropose_advice``. ``rollback`` gives its own:
+    the record it checks is an apply's, which with its backup is what a rollback
+    restores from, so it must not be sent to delete the record and propose again.
     """
     problems = derived_field_mismatches(candidate, base_text=base_text)
     problems += validation_mismatches(candidate, rubrics=rubrics)
@@ -468,8 +474,13 @@ def verify_full_integrity(
         f"refusing to {action} candidate {candidate.id}: {len(problems)} derived field(s) do not "
         "match a fresh recomputation, so the record has changed since it was written.\n"
         + "\n".join(listed)
-        + "\n  An approval token is derived from the candidate's content, so a record edited "
-        "after review must never be authorised by the token printed before it. To propose and "
-        f"validate the change again, {repropose_advice(candidate.id)}; nothing has been "
-        "written to any skill file."
+        + "\n  "
+        + (
+            advice
+            if advice is not None
+            else "An approval token is derived from the candidate's content, so a record edited "
+            "after review must never be authorised by the token printed before it. To propose "
+            f"and validate the change again, {repropose_advice(candidate.id)}; nothing has been "
+            "written to any skill file."
+        )
     )

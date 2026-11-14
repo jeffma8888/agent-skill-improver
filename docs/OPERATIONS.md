@@ -569,6 +569,15 @@ spelled as `\n`, in the `skill` and `file` lines and in the diff's own
 asi apply <candidate-id> --approve <approval-token> --i-reviewed-this
 ```
 
+`apply` and `rollback` read the candidate record again once they hold the run
+lock, and act on what it says then. So an `apply` that waited while another
+`apply` or a `rollback` of the same candidate finished is refused with
+`GateFailed`, naming the status its record now holds and saying that it changed
+after this apply read it; nothing is written. An `apply` stopped after its skill
+write but before the candidate is recorded `applied` leaves it `validated`, and
+running the same `apply` again finishes it; one stopped after that has nothing
+left to finish, and its rerun is refused (see Recovery).
+
 Refusals you should expect, and what each means. The name is what the CLI prints
 on stderr before the message, and a refusal that reaches stderr exits 3. Two of
 these are normally caught inside the daily pass instead and land in the receipt's
@@ -578,7 +587,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | Refusal | Meaning |
 | --- | --- |
 | `GateFailed` | on `review`/`apply`: the candidate is not exactly `validated`, because it failed the gate or is closed (`applied`, `rolled-back`, `gate-failed`, `blocked-run`); a closed candidate never exposes a token or an apply command again. Both ask this before they read the skill file, so a closed candidate whose skill moved is named closed, never told to delete the record `rollback` restores from. On `rollback`: no backup manifest exists for the candidate, so there is nothing to roll back, or the candidate is still `validated` and its skill holds the text it was proposed against (an apply of it stopped before its skill write), so it was never applied: run that apply again |
-| `CandidateTampered` | a derived field of the candidate record (patch hash, approval challenge, diff, target identity, status against the recorded gate, validation binding) does not recompute from its inputs. The file was edited after it was written; nothing was backed up or applied. Do not "fix" the record: re-propose, by deleting it (`<id>.json` in the state directory's `candidates/`) and running `daily --commit` for another day, as the refusal says. Left in place, the record still counts against its skill's open-candidate cap, and a run for the same day skips every conversation that day already scored, the ones behind the candidate included. `daily` gives this refusal too, as the reason for a skill `asi set-aside` lists as deferred at validate (quarantined, once deferral is exhausted), when the skill file changed between the read that proposed the candidate and the read that validates it: no record was written yet, so there is nothing to delete, and a run for another day proposes again, as that reason says |
+| `CandidateTampered` | a derived field of the candidate record (patch hash, approval challenge, diff, target identity, status against the recorded gate, validation binding) does not recompute from its inputs. The file was edited after it was written; nothing was backed up or applied. Do not "fix" the record: re-propose, by deleting it (`<id>.json` in the state directory's `candidates/`) and running `daily --commit` for another day, as the refusal says. Left in place, the record still counts against its skill's open-candidate cap, and a run for the same day skips every conversation that day already scored, the ones behind the candidate included. `daily` gives this refusal too, as the reason for a skill `asi set-aside` lists as deferred at validate (quarantined, once deferral is exhausted), when the skill file changed between the read that proposed the candidate and the read that validates it: no record was written yet, so there is nothing to delete, and a run for another day proposes again, as that reason says. On `rollback`, the record it read again once it held the run lock does not recompute, or names another candidate, document, skill, base or replacement than the record the command read when it started (see Rollback), and nothing was restored or written; the advice there is not to re-propose, since the record and its backup are what rollback restores from: keep both, and never run the manifest's `rollback_command` or any other command taken from the state files, whose agreeing with each other establishes no trust. Put the record back only if its original contents are known from outside the state directory, and run `rollback` again; otherwise follow Manual restoration under Recovery |
 | `ApprovalRequired` | no token was passed, `--i-reviewed-this` is missing, or the token does not match the challenge recomputed from the candidate id, base hash and patch text. Re-run `review` and copy the token it prints now |
 | `AutomationRefused` | the automation marker is active. Run apply after review, or rollback, from an unmarked interactive shell; do not schedule either. The marker is an interlock, not caller authentication |
 | `BaseHashMismatch` | on `review` or `apply`: the skill file changed since the candidate was built (on `apply`, also while it ran: an edit after its own check and before the write is refused by the write, with the candidate and the same advice, and the skill is not written), or what is at its path is not a regular file (a fifo or a device: refused on the open handle rather than read or waited on). The record is intact as far as it can be checked without the file (a record that fails its own recomputation is `CandidateTampered`, checked first); the evidence no longer describes this file, so re-propose as for `CandidateTampered`: delete the record and run `daily --commit` for another day, as the refusal says for a file that changed, moved or cannot be read. The refusal for a path that is not a regular file names the candidate and both ways on: put back a regular UTF-8 file holding the text the candidate was written against, and `review` and `apply` with the same token go through as before; or, to propose against other text, put a regular UTF-8 file there first, then delete the record and run another day, because `daily` quarantines that skill until a regular file is back at the path. A run for another day with the record left in place refuses the skill as already having an open candidate, and `review` refuses the record again. If the change was not meant to stay, put back the text the candidate was written against: measured for an edit made while `apply` ran, `apply` with the same token then wrote the change. An `apply` stopped after it wrote the skill is not refused this way when run again: it records the write (see Recovery) |
@@ -589,7 +598,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `LinkedTargetRefused` | on `review`, `apply` or `rollback`: the skill document (judged `O_NOFOLLOW` on every read of it, so `review` shows no token for it), or a directory beneath its root on the way to it, is now a symbolic link, or the target is spelled outside every configured root yet resolves into a canonical one, so the write would land wherever the link points (a same-text twin would pass the hash check). `review` asks these of the target before it shows a token, so it shows none for any of them. Nothing was backed up or written (a document that is a link is not read at all; a link above the document is read through to check its hash, then refused); replace the link with the real file and re-run `review`. On `review` and `apply`, the refusal for a document that is itself a link names the candidate and says this, and that to propose against other text instead, a regular file goes there before the record is deleted (as for `BaseHashMismatch`). The refusal for a directory beneath the root that is a link, as `review` and `apply`'s own check of the target give it, names the candidate too, and says that it stays open, and counts against `[caps].max_open_candidates`, until it is closed, that deleting its record closes it, and that with the directory itself in place of the link, while the skill file there holds the text the candidate was written against, `review` and `apply` take it as before; an `apply` that finishes an earlier run of itself, stopped after it wrote the skill, records that write before this is asked, and writes nothing through the link. A link made after `apply`'s own check and before its write, at the skill file or at a directory beneath the root, is refused by the write's own check, which is given the candidate too, so in the words for a directory beneath the root (for the skill file, "put the file itself in its place"), and `apply` leaves no backup directory for it. The refusal of a target spelled outside every root that resolves into one (a root moved and left as a link to its new place, the config re-pointed there; or, under a directory reached through a link, as macOS's temporary directory below `/var`, a root made a link to a moved copy of itself with the config unchanged, because the record keeps the path as it resolved when the candidate was proposed), as `review` and `apply`'s own check give it, names the candidate too, and says that it stays open, and counts against `[caps].max_open_candidates`, until it is closed, that deleting its record closes it, and, when the candidate's path gives a spelling of that root (what is left of the path ahead of the skill's own parts below the root, when it resolves to the root: the old place of a moved root left as a link, an alias), names that spelling, when the target check's later judgments (of the document, the protected paths, the canonical copy and the listed skills) take the path the candidate's resolves to, and says that with the root configured so, while the skill file there holds the text the candidate was written against, `review` and `apply` take it as before; a path that gives none (one that reaches the skill through a link no spelling of the root lies ahead of, as a folder outside every root linked into one) is given no such advice, since a root configured as the folder ahead of that link meets the link below it, and one configured as the link itself holds the skill file at its top, where discovery finds no skill, and nor is one those judgments refuse (a mirror copy in an editable root, a skill listed as protected, or, where the filesystem folds case, as macOS's does, the skill's folder spelled in another case than discovery's), since with the root so configured they refuse it in turn, nor one whose judgments cannot finish for an error of the system (another `SKILL.md` in the root that is a link to a file in a directory this process cannot read no longer stops them: discovery passes it over with why). A root's link re-pointed after `apply`'s own check and before its write, with a link to its new place left where the record's path points, is refused by the write's own check, which is given the candidate too, so in these words, with the spelling of the root to configure, and `apply` leaves no backup directory for it. `rollback`'s refusals name no candidate, as before |
 | `BlockedRunUnreviewed` (`daily`, exit 5) | the newest daily receipt recorded a skill tree mutation and no run since has stated it was reviewed. Read `skill_tree.changes` in the receipt the message names, find out what wrote to the tree, then run once with `--commit --mutation-reviewed 2026-01-01` naming that run's day (only a committed run clears the block) |
 | `BackupUnusable` | rollback's backup or manifest does not verify (a field missing or not text, a backup whose hash differs, a backup that is a link, not in its manifest's directory or not UTF-8, a recorded path the platform cannot judge, a manifest that does not record this candidate's own apply, of its document from its base to its replacement), or the target is now a symlink. The live file was not touched; find an older backup under `state/backups/` |
-| `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written; restore by hand from the backup path in the message if that is what you want |
+| `BaseHashMismatch` on rollback | the skill was edited after this apply, so the backup would overwrite work the candidate never touched. Nothing was written. Manual restoration under Recovery stops here too, since it requires the skill to hold the text the apply wrote: whether the backup should replace that later work is yours to decide by comparing the two by hand, and the backup path in the message is read from the manifest, an editable file |
 | `BackupNotTaken` | on `apply`: the backup taken before the write (the copy of the skill under `state/backups/<candidate>--<stamp>/` and its `backup.json`) could not be written (a full disk, a backup directory this process can no longer write). Both are written before the skill is, so the skill is unchanged and the record stays `validated`, its token still good: make room or fix the directory and run the same `apply` again. Whatever was written of the backup (an empty directory, or the copy with no `backup.json`) is left where it is, and `rollback` passes over a directory with no `backup.json`. The directory is named for the candidate and the second, so after an `apply` stopped before its skill write and run again within that second, a refused one leaves the stopped one's `backup.json` as it was: `rollback` reads it and answers that the candidate was never applied |
 | `SkillWriteFailed` | on `apply` or `rollback`: the platform refused the write of the skill document (a skill directory this process cannot write, a full disk). The replacement is written beside the document and renamed over it, so the document is unchanged: after `apply` it still holds the base text and the backup taken first is kept, after `rollback` it still holds the applied text. Fix the permission or the space and run the command again |
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config, state or rubrics). Never a proposal target and never written, by design: `daily` refuses to propose for a skill inside a protected path (one under a root that holds the config file, its directory, the state directory or the rubrics directory) before the improver is asked, and records it in the receipt as a policy refusal of the skill (measured before: such a skill was proposed and the improver and the judge paid, and `review` then refused it naming no candidate, which stayed open with no token to be had). The list is read again by `review` and `apply`, so a skill listed after its candidate was validated gets no token from `review` and is not written by `apply`; `rollback` does not read it, so a skill listed after its apply can still be restored. On `review` and `apply`, the refusal for a listed skill names the candidate and says how it is closed: it stays open, and counts against `[caps].max_open_candidates`, until its record is deleted (measured: with the cap at 1, the next day stood down on it, and with the record deleted the next day ran); with the skill taken off the list, `review` and `apply` with the same token take it. The protected paths are read again too: a candidate validated before one of them came to hold its skill (the config file moved into the skill's folder, or `[rubrics].dir` pointed at it) is refused by `review` and `apply` naming the candidate, with the same way to close it; with the path moved out, the same token takes it. `rollback` refuses a target inside a protected path naming no candidate. An `apply` that finishes an earlier run of itself (see Recovery) records the write that run made before the list is asked, as before, so it marks a listed skill's candidate applied while writing nothing to the skill |
@@ -634,6 +643,31 @@ edited since (by you, or by applying another candidate), it refuses with
 second run finds the previous text already in place and says so without
 writing: `nothing written` on its fourth line, `already_restored` in `--json`.
 
+`apply` and `rollback` read the candidate record again once they hold the run
+lock, and act on what it says then. Rollback reads it after choosing the backup,
+and decides, restores and records from what it read, not from the record as it
+was when the command started: a rollback that waited while the apply, or a first
+rollback, of the same candidate finished keeps the note that one added. It
+checks that record against itself first, as `apply` checks the one it is given
+(its validation against itself, not against the rubrics configured now, so a
+rubric changed since the apply does not stop its rollback): a record that no
+longer recomputes, such as one edited together with its backup manifest to name
+another skill or a later edit of this one, is refused with `CandidateTampered`
+before anything is decided from it. It then holds that record to the one the
+command read when it started: the candidate id, the document, the skill id, the
+base hash and the replacement's hash must be the same in both, or it is refused
+with `CandidateTampered` as a record that changed after this rollback read it.
+This catches an edit that recomputes, such as one naming another canonical
+skill that holds the same applied text, made while the rollback waited for the
+lock; it does not make the record trustworthy, since both reads are of the same
+editable file, and an edit made before the command started is in both. Either
+refusal comes before the never-applied guard and any write, and nothing is
+restored or written. Keep the record and the backup then, since they are what
+rollback restores from; never run the manifest's `rollback_command` or any other
+command taken from the state files, and follow the refusal: put the record back
+only if its original contents are known from outside the state directory,
+otherwise Manual restoration under Recovery.
+
 Apply records the supplied operator label in the backup manifest as
 `actor: "operator:<operator>"` and appends a candidate note beginning
 `applied <timestamp> by operator:<operator>;`; an empty resolved operator is recorded as
@@ -668,6 +702,43 @@ another `asi` process is alive and holds it, and the message says which: find it
 before anything else, because two concurrent runs interleaving writes, or a
 promotion landing in the tree a run is reading, is exactly what the lock exists to
 prevent.
+
+**Do not run an older asi on the same state tree while this one runs: an older
+apply does not re-read the record under the lock.** Nor does an older rollback.
+Either can act on what the candidate record said before it waited for the lock,
+after this one's `apply` or `rollback` of the same candidate has changed it: write
+the skill again over a rollback, or drop the note this one added.
+
+**Manual restoration.** Stop every asi run and owner edit. Never execute
+`rollback_command` or any command from the record, manifest or receipts; their
+agreement is not proof. Independently establish the original canonical skill
+file and its retained pre-apply backup using known configuration and owner
+history, or a trusted copy kept outside the state directory:
+`asi --config=<known-config> skills --json` reports the current inventory (the
+configuration, root policy and discovery as they are now), not original
+identity, so it only corroborates the present location, and the candidate suffix
+is lossy (skills `t d d` and `t_d_d` share the suffix `t_d_d`), so it proves no
+skill; an identity that is missing, ambiguous or under a changed root is
+unknown. Independently establish the backup's original `backups/<id>--<stamp>/`
+directory from that history or a trusted outside-state copy; require the backup
+there and both files regular, no symbolic-link path component, and the target
+link count one (a copy over a hard link also overwrites its other names). Decode
+both strictly as UTF-8; hash UTF-8 after replacing CRLF and CR with LF. Require
+backup = the independently established previous hash. If target already equals
+that previous hash, do not copy. Otherwise require target = the independently
+established applied hash; inspect their diff to confirm the intended undo.
+Then copy only between the inspected absolute paths, safely quoted, then
+verify the target equals the previous hash. Only then may the record be
+archived, and keep the backup; if any fact is unknown, stop without copying or
+archiving. When `asi rollback` runs, the store already checks some of this
+itself, under its lock: that the backup is a regular file, not a link, in its
+manifest's own directory, strict UTF-8 and hashing to the base the record names;
+that the skill is a canonical `SKILL.md`, with no link at it or below its root,
+holding either the previous text (nothing is written) or the text the apply
+wrote; and, when restoring, that the skill, written as a fresh file in place of
+the old one rather than through it, reads back with the backup's hash.
+It does not check links above the skill root or above the backup's directory,
+nor that the record and the manifest name the skill and the backup you meant.
 
 **Rejection memory was ignored or could not be written.** Damaged, foreign,
 oversize or unreadable optional memory (any read error, such as an ownership or

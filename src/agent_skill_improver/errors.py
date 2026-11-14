@@ -192,6 +192,10 @@ class CandidateTampered(SafetyRefusal):
     counts, the status against the recorded gate -- can be edited to disagree with
     the input it was derived from, and an approval token derived from the stored
     value would then authorise bytes not shown for review.
+
+    ``rollback`` raises it too when the record it reads again under the run lock
+    names another candidate, document, skill, base or replacement than the
+    record the command read when it started: the record changed after that read.
     """
 
 

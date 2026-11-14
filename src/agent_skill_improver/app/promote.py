@@ -56,6 +56,7 @@ from ..errors import (
     ApprovalRequired,
     AutomationRefused,
     BaseHashMismatch,
+    CandidateTampered,
     GateFailed,
     LinkedTargetRefused,
     SafetyRefusal,
@@ -272,11 +273,34 @@ def apply_candidate(
     # its persisted validation, recomputed from the validation's own outcomes,
     # judgements and policy rather than trusted off the stored gate. The first
     # of the two ran above, before the gate was read.
-    # From the live read to the receipt, under the run lock ``daily`` holds: a
-    # promotion while a run reads the tree would change what the run is
-    # reading, and the run would record that as a skill tree mutation and
+    # From the record's re-read to the receipt, under the run lock ``daily``
+    # holds: a promotion while a run reads the tree would change what the run
+    # is reading, and the run would record that as a skill tree mutation and
     # block the schedule over a write the tool made itself.
     with _holding_the_run_lock(state, "apply", candidate):
+        # The record as it is now, read once the lock is held: the object this
+        # apply was handed was read before it waited for the lock, and another
+        # apply or a rollback of the same candidate may have finished since.
+        # Measured before (3.11 and 3.13), acting on the handed read: an apply
+        # holding a read made before another apply finished recorded that
+        # write again as its own and replaced that apply's receipt, and one
+        # holding a read made before a rollback wrote the skill again over the
+        # restored text. Only the status is compared: the handed object is
+        # what the integrity check and the token were checked against, and the
+        # write and the record still come from it. A record deleted meanwhile
+        # raises ``FileNotFoundError`` here and one made unreadable
+        # ``StateUnreadable``, before the skill is read and before anything is
+        # written. An apply stopped after its skill write but before the
+        # candidate is recorded ``applied`` leaves it ``validated``, so the
+        # rerun that finishes it passes here; one stopped after that has
+        # nothing left to finish, and its rerun is refused as ``applied``.
+        current = state.read_candidate(candidate.id)
+        if current.status != STATUS_VALIDATED:
+            raise GateFailed(
+                f"refusing to apply {candidate.id}: its record now says "
+                f"{quoted_value(current.status)}, not {STATUS_VALIDATED!r}: it changed after "
+                "this apply read it. Nothing was written."
+            )
         base_text = read_live_base_text(skill_store, candidate)
         live_sha = sha256_text(base_text)
         if live_sha != candidate.target.base_sha256:
@@ -453,6 +477,12 @@ def _holding_the_run_lock(state: StateStore, action: str, candidate: Candidate) 
     finished ``blocked`` with the applied document in ``skill_tree.changes``,
     its candidates were closed as blocked-run, and the next morning's run was
     refused until the operator reviewed a mutation the tool had made itself.
+
+    Apply and rollback both read the candidate record again once they hold it,
+    and act on what it says then: the record they were handed was read before
+    they waited, and another apply or rollback of the same candidate may have
+    finished in between. Apply refuses unless the record still says
+    ``validated``; rollback decides and records from the record it re-read.
     """
     lock = RunLock(state.lock_path(), owner=f"{action} {candidate.id} pid={os.getpid()}")
     try:
@@ -562,6 +592,13 @@ def rollback_candidate(
     """Restore the file this candidate overwrote, from its verified backup.
 
     Refused under the automation marker; requires no approval token or acknowledgement.
+    Acts on the candidate record as it is once the run lock is held, not on the
+    object it was handed. That record is checked against itself, then against
+    the object it was handed: the two must name the same candidate, document,
+    skill, base and replacement. Either refusal is ``CandidateTampered``, with
+    advice that keeps the record and its backup, and comes before any other
+    decision and any write. Its status and notes, and every write, come from the
+    record as it is.
     """
     if automation_active():
         raise AutomationRefused("rollback refused: automation marker is set. " + ROLLBACK_ENV_HINT)
@@ -575,7 +612,58 @@ def rollback_candidate(
                 f"no backup manifest found for {candidate.id}; nothing to roll back. "
                 "A candidate that was never applied has nothing to restore."
             )
-        if candidate.status == STATUS_VALIDATED and _still_at_its_base(skill_store, candidate):
+        # The record as it is now, read once the lock is held and after the
+        # manifest is chosen (so a candidate never applied is still answered
+        # "no backup manifest found"). Every decision and write below is made
+        # from it, not from the object this rollback was handed, which was read
+        # before it waited for the lock. Measured before (3.11 and 3.13): a
+        # rollback holding a read made before the apply finished, or before a
+        # first rollback, wrote its record from that read and dropped the note
+        # the apply or the first rollback had added. A record deleted meanwhile
+        # raises ``FileNotFoundError`` here and one made unreadable
+        # ``StateUnreadable``, before anything is restored or written.
+        current = state.read_candidate(candidate.id)
+        # Checked against itself before any decision is made from it, as apply
+        # checks the record it was handed: the restore's document and hashes
+        # come from this one, and the backup manifest is checked against them.
+        # Measured without this check (3.11 and 3.13), with the record and the
+        # manifest edited together after the command read the record and
+        # before it held the lock: one edited to name another canonical skill
+        # restored that skill from a planted backup, and one edited to name a
+        # later edit of the skill as the apply's write erased that edit; each
+        # exited 0 and recorded the candidate rolled back. Its validation is
+        # judged against itself only (``rubrics=None``): a rubric changed since
+        # the apply does not stand in the way of undoing it.
+        verify_full_integrity(
+            current,
+            rubrics=None,
+            action="roll back",
+            advice=_rollback_of_a_changed_record_advice(candidate.id),
+        )
+        # Bound to the record this rollback was handed, which the command read
+        # before it waited for the lock: what is restored, from what to what,
+        # must be what that read named. A record checked against itself still
+        # passes when it is edited so that it recomputes. Measured with the
+        # check above and without this one (3.11 and 3.13), the record and its
+        # manifest edited as the rollback reached for the lock to name another
+        # canonical skill holding the same applied text, its hashes, challenge
+        # and validation left as they were: the rollback exited 0, overwrote
+        # that skill, erasing its edit, and recorded the candidate rolled back.
+        # This holds the two reads to each other; it does not make either one
+        # trustworthy, since both are reads of the same editable file, and an
+        # edit made before the command started is in both. Status and notes
+        # are not compared: a rollback that waited while the apply or a first
+        # rollback finished takes them from the record as it is.
+        changed = _restore_identity_changes(candidate, current)
+        if changed:
+            raise CandidateTampered(
+                f"refusing to roll back candidate {candidate.id}: its record changed after this "
+                f"rollback read it: {', '.join(changed)} "
+                f"{'differs' if len(changed) == 1 else 'differ'} from that read, so it is not "
+                "the record this rollback was started on.\n  "
+                + _rollback_of_a_changed_record_advice(candidate.id)
+            )
+        if current.status == STATUS_VALIDATED and _still_at_its_base(skill_store, current):
             # The manifest is written ahead of the skill, so an apply stopped
             # before its skill write leaves one for a write that never landed.
             # Restoring "from" it would close a candidate never applied as
@@ -585,18 +673,55 @@ def rollback_candidate(
                 "proposed against, so there is nothing to roll back. An apply of it stopped "
                 "before its skill write leaves this; run that apply again to apply it."
             )
-        _refuse_unwritable_receipt(state, "rollback", candidate)
+        _refuse_unwritable_receipt(state, "rollback", current)
         # The manifest must record this candidate's own write: its document,
         # from its base to its replacement. Measured before: a manifest edited
         # to name another skill, a planted backup or a later edit's hash was
         # restored from, and the candidate recorded rolled back.
         result = skill_store.rollback(
             manifest,
-            path=Path(candidate.target.canonical_path),
-            previous_sha256=candidate.target.base_sha256,
-            new_sha256=sha256_text(candidate.patch.new_text),
+            path=Path(current.target.canonical_path),
+            previous_sha256=current.target.base_sha256,
+            new_sha256=sha256_text(current.patch.new_text),
         )
-        return _record_rollback(candidate, manifest, result, state, clock)
+        return _record_rollback(current, manifest, result, state, clock)
+
+
+def _restore_identity_changes(handed: Candidate, current: Candidate) -> list[str]:
+    """The fields naming what a rollback restores that differ between two reads.
+
+    The candidate, its document and skill, the base the backup must hold and
+    the hash of the replacement the skill must hold: the restore is made from
+    these. The id cannot differ once ``read_candidate`` returns, which refuses
+    a record that does not claim the id it was read by; it is compared anyway.
+    """
+    pairs = (
+        ("id", handed.id, current.id),
+        ("target.canonical_path", handed.target.canonical_path, current.target.canonical_path),
+        ("target.skill_id", handed.target.skill_id, current.target.skill_id),
+        ("target.base_sha256", handed.target.base_sha256, current.target.base_sha256),
+        ("patch.new_text", sha256_text(handed.patch.new_text), sha256_text(current.patch.new_text)),
+    )
+    return [name for name, was, now in pairs if was != now]
+
+
+def _rollback_of_a_changed_record_advice(candidate_id: str) -> str:
+    """What a rollback refused for its record, as it is under the lock, says to do.
+
+    Not ``repropose_advice``: the record of an applied candidate, with its
+    backup, is what a rollback restores from, so the advice keeps both. It
+    names nothing from the state files to act on: each of them is an editable
+    file, and their agreeing with each other proves nothing about any of them.
+    """
+    return (
+        "Nothing was restored or written: the skill, this record and its backup are as "
+        "they were. Keep the record and the backup. Never run the backup manifest's "
+        "rollback_command, or any other command taken from the state files: they are "
+        "editable, and their agreeing with each other establishes no trust. Put the record "
+        "back only if you know its original contents from outside the state directory, "
+        f"then run `asi rollback {candidate_id}` again; otherwise restore the skill as "
+        'docs/OPERATIONS.md, Recovery, "Manual restoration" says.'
+    )
 
 
 def _still_at_its_base(skill_store: Any, candidate: Candidate) -> bool:

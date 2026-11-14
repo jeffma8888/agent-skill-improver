@@ -1052,6 +1052,7 @@ class CallSiteTests(unittest.TestCase):
         self.state = StateStore(self.root, clock=frozen_clock())
         self.state.ensure()
         self.clean = build_candidate()
+        self.state.write_candidate(self.clean)
         self.tampered = replace(
             self.clean, patch=replace(self.clean.patch, new_text=NEW_TEXT + "- smuggled\n")
         )
