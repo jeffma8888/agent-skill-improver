@@ -277,7 +277,7 @@ class Candidate:
         """The token that authorises this candidate, bound to its actual bytes.
 
         Derived from the recomputed patch hash rather than the stored one. That is
-        the difference between a token bound to the text a human reviewed and a
+        the difference between a token bound to the text shown for review and a
         token bound to a field sitting beside it: with the stored hash, editing
         ``new_text`` alone left this token unchanged and the edit authorised.
         """

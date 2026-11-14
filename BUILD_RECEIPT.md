@@ -137,7 +137,7 @@ token and acknowledgement. Do not schedule apply.
 
 ## The approval token was not bound to the text it approved
 
-A later review found and reproduced a bypass of the human gate, and it is recorded
+A later review found and reproduced a bypass of the review gate, and it is recorded
 here because a receipt that lists only successes is marketing.
 
 **The reproduction.** A validated candidate was produced by a real `daily --commit`
@@ -146,7 +146,7 @@ persisted candidate record was edited: `patch.new_text`. `patch.new_text_sha256`
 `approval_challenge`, `status` and the recorded gate were left byte-identical.
 `asi apply` with the original token returned **0** and wrote the edited text into
 the live skill file. The token was derived from the *stored* patch hash, so it was
-never a function of the bytes a human had read; the one property the whole gate
+never a function of the bytes apply wrote; the one property the whole gate
 exists to provide was absent.
 
 **The fix.** `domain/integrity.py` recomputes every candidate field that claims

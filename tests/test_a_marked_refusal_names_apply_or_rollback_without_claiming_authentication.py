@@ -22,7 +22,7 @@ from agent_skill_improver.clock import FrozenClock
 from agent_skill_improver.domain.approval import HumanApproval
 from agent_skill_improver.domain.integrity import verify_candidate_integrity
 from agent_skill_improver.domain.skills import SkillRoot
-from agent_skill_improver.errors import AutomationRefused, CandidateTampered
+from agent_skill_improver.errors import AutomationRefused, CandidateTampered, ReadOnlyViolation
 from agent_skill_improver.hashing import sha256_text
 from tests.support import InProcessRunner, build_env, run_cli
 from tests.test_candidate_integrity import BASE_TEXT, NEW_TEXT, build_candidate, frozen_clock
@@ -139,6 +139,96 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
             "promotion is a separate review-interlocked path",
         )
         self.assertNotIn("human-only", check["requirement"])
+        integrity_check = next(
+            c
+            for c in json.loads(out.getvalue())["checks"]
+            if c["name"] == "apply recomputes the candidate's derived fields before it writes"
+        )
+        self.assertEqual(
+            integrity_check["requirement"],
+            "app/promote.py must call verify_full_integrity before write_canonical; a "
+            "token derived from a stored hash cannot bind the text shown for review",
+        )
+
+    def test_help_distinguishes_candidate_apply_from_verified_backup_rollback(self) -> None:
+        result = run_cli(["--help"], env={MARKER: "0"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        help_text = " ".join(result.stdout.split())
+        self.assertIn(
+            "apply write a candidate (approval token + acknowledgement; review-gated)", help_text
+        )
+        self.assertIn("rollback restore a verified backup (no token or acknowledgement)", help_text)
+        self.assertNotIn("THE ONLY command that writes a skill file", result.stdout)
+
+    def test_apply_and_rollback_own_help_describes_the_operation(self) -> None:
+        for command, summary in (
+            ("apply", "write a candidate (approval token + acknowledgement; review-gated)"),
+            ("rollback", "restore a verified backup (no token or acknowledgement)"),
+        ):
+            with self.subTest(command=command):
+                own_help = run_cli([command, "--help"], env={MARKER: "0"})
+                self.assertEqual(own_help.returncode, 0, own_help.stderr)
+                # Pin the description block, not a match among the option help or usage.
+                paragraphs = [" ".join(p.split()) for p in own_help.stdout.split("\n\n")]
+                self.assertEqual(paragraphs[1], summary)
+                self.assertTrue(paragraphs[0].startswith(f"usage: asi {command} "))
+
+    def test_cli_operator_falls_back_to_user_in_manifest_note_and_approval(self) -> None:
+        cases = [
+            (user, operator_args, user or "")
+            for user in ("probe-user", None, "")
+            for operator_args in ([], ["--operator", ""])
+        ] + [("probe-user", ["--operator", "op-x"], "op-x")]
+        for index, (user, operator_args, resolved) in enumerate(cases):
+            with self.subTest(USER=user, operator_args=operator_args), mock.patch.dict(os.environ):
+                if user is None:
+                    os.environ.pop("USER", None)
+                else:
+                    os.environ["USER"] = user
+                base = self.base / f"case-{index}"
+                cfg = ["--config", str(build_env(base, seed="c246-user-fallback"))]
+                daily = run_cli([*cfg, "--json", "daily", "--commit", "--day", DAY])
+                self.assertEqual(daily.returncode, 0, daily.stderr)
+                cid = next(
+                    c["candidate_id"]
+                    for c in json.loads(daily.stdout)["candidates"]
+                    if c["status"] == "validated"
+                )
+                review = run_cli([*cfg, "--json", "review", cid])
+                self.assertEqual(review.returncode, 0, review.stderr)
+                token = json.loads(review.stdout)["approval_token"]
+                record = base / "state" / "candidates" / f"{cid}.json"
+                target = Path(json.loads(record.read_text())["target"]["canonical_path"])
+                previous = target.read_bytes()
+                applied = run_cli(
+                    [
+                        *cfg,
+                        "--json",
+                        "apply",
+                        cid,
+                        "--approve",
+                        token,
+                        "--i-reviewed-this",
+                        *operator_args,
+                    ]
+                )
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+                receipt = json.loads(applied.stdout)
+                manifest = json.loads(Path(receipt["write"]["backup_manifest_path"]).read_text())
+                label = f"operator:{resolved or 'unspecified'}"
+                self.assertEqual(manifest["actor"], label)
+                self.assertEqual(
+                    json.loads(record.read_text())["notes"][-1],
+                    f"applied {receipt['applied_at']} by {label}; "
+                    + f"rollback: {receipt['write']['rollback_command']}",
+                )
+                self.assertEqual(receipt["operator"], resolved)
+                self.assertEqual(receipt["approval"]["operator"], resolved)
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    json.loads(record.read_text())["patch"]["new_text"],
+                )
+                self.assertNotEqual(target.read_bytes(), previous)
 
     def test_daily_refusal_prints_review_interlocks_not_human_authentication(self) -> None:
         config = build_env(self.base)
@@ -153,15 +243,14 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
         ):
             rc = cli.main(["--config", str(config), "daily", "--commit", "--day", "2026-02-01"])
         self.assertEqual(rc, 3, err.getvalue())
-        self.assertIn(
-            "the daily driver refuses a writable skill store. Automation may propose and "
-            "validate; only `asi apply` may write, with an approval token and acknowledgement, "
-            "a matching base hash and no active automation marker. These are review interlocks, "
-            "not caller authentication.",
+        self.assertEqual(
             err.getvalue(),
+            "SafetyRefusal: the daily driver refuses a writable skill store. Automation may "
+            "propose and validate; `asi apply` writes a candidate with an approval token and "
+            "acknowledgement, a matching base hash and no active automation marker; `asi rollback` "
+            "restores a verified backup without a token or acknowledgement and also refuses an "
+            "active automation marker. These are review interlocks, not caller authentication.\n",
         )
-        self.assertNotIn("human approval token", err.getvalue())
-        self.assertNotIn("human", err.getvalue().lower())
 
     def _store(self) -> tuple[FilesystemSkillStore, Path]:
         root = self.base / "skills"
@@ -176,7 +265,7 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
             target,
         )
 
-    def _apply(self) -> tuple[StateStore, dict]:
+    def _apply(self, *, operator: str = "batch-job") -> tuple[StateStore, dict]:
         store, target = self._store()
         candidate = build_candidate(canonical_path=str(target), mirror_paths=())
         clock = frozen_clock()
@@ -184,7 +273,7 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
         state.ensure()
         state.write_candidate(candidate)
         approval = HumanApproval.from_cli(
-            token=candidate.required_approval_token, acknowledged=True, operator="batch-job"
+            token=candidate.required_approval_token, acknowledged=True, operator=operator
         )
         receipt = apply_candidate(
             candidate,
@@ -192,7 +281,7 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
             skill_store=store,
             state=state,
             clock=clock,
-            operator="batch-job",
+            operator=operator,
         )
         self.assertEqual(target.read_text(encoding="utf-8"), NEW_TEXT)
         self.assertEqual(receipt["approval"]["origin"], "cli")
@@ -215,6 +304,38 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
         )
         self.assertNotIn("by human:", note)
 
+    def test_an_empty_operator_records_unspecified_in_the_manifest_and_note(self) -> None:
+        state, receipt = self._apply(operator="")
+        manifest = json.loads(Path(receipt["write"]["backup_manifest_path"]).read_text())
+        self.assertEqual(manifest["actor"], "operator:unspecified")
+        self.assertEqual(
+            state.read_candidate(receipt["candidate_id"]).notes[-1],
+            "applied 2026-02-01T00:00:00Z by operator:unspecified; "
+            + f"rollback: {receipt['write']['rollback_command']}",
+        )
+
+    def test_a_read_only_write_refusal_names_both_cli_write_paths(self) -> None:
+        store, target = self._store()
+        store.read_only = True
+        backups = self.base / "backups"
+        with self.assertRaises(ReadOnlyViolation) as caught:
+            store.write_canonical(
+                target,
+                NEW_TEXT,
+                expected_sha256=sha256_text(BASE_TEXT),
+                backup_dir=backups,
+                skill_id="tdd",
+            )
+        self.assertEqual(
+            str(caught.exception),
+            f"refusing to write {target}: this skill store is read-only. "
+            "The daily driver always opens the store read-only; `asi apply` opens it writable "
+            "to write a candidate with an approval token and acknowledgement, and `asi rollback` "
+            "to restore a verified backup without either.",
+        )
+        self.assertEqual(target.read_text(encoding="utf-8"), BASE_TEXT)
+        self.assertFalse(backups.exists())
+
     def test_a_direct_write_records_an_unspecified_actor_not_an_assumed_human(self) -> None:
         store, target = self._store()
         receipt = store.write_canonical(
@@ -233,9 +354,20 @@ class OutputNamesReviewInterlocksNotAuthenticatedHumansTests(unittest.TestCase):
         tampered = replace(candidate, patch=replace(candidate.patch, unified_diff="not the diff"))
         with self.assertRaises(CandidateTampered) as caught:
             verify_candidate_integrity(tampered, base_text=BASE_TEXT, action="review")
-        self.assertIn("diff shown for review does not describe this change", str(caught.exception))
-        self.assertNotIn("diff a human reviewed", str(caught.exception))
-        self.assertNotIn("human", str(caught.exception).lower())
+        self.assertEqual(
+            str(caught.exception),
+            f"refusing to review candidate {candidate.id}: 1 derived field(s) do not match a fresh "
+            "recomputation, so the record has changed since it was written.\n"
+            "  - patch.unified_diff is not the diff between the live base text and new_text: "
+            "the diff shown for review does not describe this change\n"
+            "  An approval token is derived from the candidate's content, so a record edited "
+            "after review must never be authorised by the token printed before it. To propose and "
+            f"validate the change again, delete its record ({candidate.id}.json in the state "
+            "directory's candidates/), which counts against its skill's open-candidate cap while "
+            "it exists, then run `asi daily --commit` for another day: a run for the same day skips "
+            "every conversation that day already scored, the ones behind this candidate included; "
+            "nothing has been written to any skill file.",
+        )
 
 
 if __name__ == "__main__":

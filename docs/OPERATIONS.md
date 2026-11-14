@@ -636,8 +636,9 @@ writing: `nothing written` on its fourth line, `already_restored` in `--json`.
 
 Apply records the supplied operator label in the backup manifest as
 `actor: "operator:<operator>"` and appends a candidate note beginning
-`applied <timestamp> by operator:<operator>;`; an empty operator is recorded as
-`unspecified`, and a direct library write without an actor records `actor: "unspecified"`.
+`applied <timestamp> by operator:<operator>;`; an empty resolved operator is recorded as
+`operator:unspecified` (the CLI uses `$USER` when `--operator` is omitted or empty), and a
+direct library write without an actor records `actor: "unspecified"`.
 Records written before this wording change carry `human:<operator>`, `by human:<operator>`
 or the default actor `human`; asi never reads `actor` or parses the note
 label, although candidate notes are still read, masked and displayed as prose.

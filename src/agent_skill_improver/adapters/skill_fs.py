@@ -1,13 +1,17 @@
-"""Filesystem skill store: discovery, snapshots, and the only write path.
+"""Filesystem skill store: discovery, snapshots, candidate writes and backup restores.
+
+At the CLI, ``apply`` writes a candidate with an approval token and acknowledgement;
+``rollback`` restores a verified backup and needs neither. Both refuse an active
+automation marker.
 
 Safety properties enforced here rather than by convention:
 
 * the store is **read-only by default**, and the daily driver only ever
   constructs it read-only, so an accidental write raises instead of landing;
-* a write verifies the on-disk hash against the candidate's recorded base hash
+* a candidate write verifies the on-disk hash against its recorded base hash
   first, so a skill edited by a human since the proposal was made cannot be
   silently clobbered;
-* a write always takes a timestamped backup with a machine-readable manifest,
+* a candidate write always takes a timestamped backup with a machine-readable manifest,
   so rollback is a single command and does not depend on the operator having
   git in that directory;
 * writes to protected paths -- this package's own source, config and rubrics --
@@ -1011,7 +1015,10 @@ class FilesystemSkillStore:
         actor: str = "unspecified",
         candidate_id: str = "",
     ) -> WriteReceipt:
-        """The single method in this package that modifies a skill file.
+        """Write a candidate's replacement text; ``rollback`` separately restores backups.
+
+        The CLI's ``apply`` requires an approval token and acknowledgement; its
+        ``rollback`` restores a verified backup and requires neither.
 
         ``candidate_id`` names the candidate ``apply`` is writing, so a file that
         changed after ``apply`` checked it is refused with that candidate and the
@@ -1034,8 +1041,9 @@ class FilesystemSkillStore:
         if self.read_only:
             raise ReadOnlyViolation(
                 f"refusing to write {named_path(path)}: this skill store is read-only. "
-                "The daily driver always opens the store read-only; only `asi apply` "
-                "opens it writable."
+                "The daily driver always opens the store read-only; `asi apply` opens it writable "
+                "to write a candidate with an approval token and acknowledgement, and `asi rollback` "
+                "to restore a verified backup without either."
             )
         # Every judgement of the target, made where ``review`` makes it too.
         target = self.assert_write_target(

@@ -191,7 +191,7 @@ class CandidateTampered(SafetyRefusal):
     so a derived field -- the patch hash, the approval challenge, the diff and its
     counts, the status against the recorded gate -- can be edited to disagree with
     the input it was derived from, and an approval token derived from the stored
-    value would then authorise bytes no human reviewed.
+    value would then authorise bytes not shown for review.
     """
 
 
