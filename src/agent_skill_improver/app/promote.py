@@ -39,13 +39,28 @@ from __future__ import annotations
 import os
 import shlex
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Iterator, Sequence
 
 from pathlib import Path
 
 from ..clock import Clock, iso
 from ..domain.approval import HumanApproval, automation_active
-from ..domain.candidate import STATUS_APPLIED, STATUS_ROLLED_BACK, STATUS_VALIDATED, Candidate
+from ..domain.candidate import (
+    MAX_DECLINE_OPERATOR_CHARS,
+    MAX_DECLINE_REASON_CHARS,
+    STATUS_APPLIED,
+    STATUS_DECLINED,
+    STATUS_PROPOSED,
+    STATUS_ROLLED_BACK,
+    STATUS_VALIDATED,
+    Candidate,
+    Decline,
+    decline_reason_problem,
+    is_repair_input,
+    one_line_label,
+    settled_mask,
+)
 from ..domain.integrity import repropose_advice, verify_full_integrity
 from ..domain.redaction import named_path, quoted_value, quoted_values, why_unreadable
 from .. import SCHEMA_VALIDATION_V3
@@ -60,11 +75,12 @@ from ..errors import (
     GateFailed,
     LinkedTargetRefused,
     SafetyRefusal,
+    StateUnreadable,
     UndecodableDocument,
 )
 from ..hashing import sha256_text, short
 from .lock import RunLock
-from .state import StateStore
+from .state import CLOSED_STATUSES, StateStore
 
 #: The note an apply that records an earlier run's write adds to the candidate.
 FINISHING_NOTE = (
@@ -78,6 +94,10 @@ APPLY_ENV_HINT = (
 )
 ROLLBACK_ENV_HINT = (
     "Run rollback from an unmarked interactive shell; do not schedule rollback. "
+    "This marker is an interlock, not caller authentication."
+)
+DECLINE_ENV_HINT = (
+    "Run decline from an unmarked interactive shell; do not schedule decline. "
     "This marker is an interlock, not caller authentication."
 )
 
@@ -98,8 +118,8 @@ def refuse_a_closed_review(candidate: Candidate) -> None:
             f"refusing to review candidate {candidate.id}: status is "
             f"{quoted_value(candidate.status)}, not "
             f"{STATUS_VALIDATED!r}. Only a validated candidate may expose a review token or an "
-            "apply command; a closed candidate (applied, rolled-back, gate-failed or blocked-run) "
-            "never does, "
+            "apply command; a closed candidate (applied, rolled-back, gate-failed, blocked-run "
+            "or declined) never does, "
             "regardless of what its recorded gate says."
         )
 
@@ -467,8 +487,27 @@ def _earlier_write_of(
     )
 
 
+#: Why a promotion waits for the run lock, keyed by action (``apply`` and
+#: ``rollback`` share the first).
+_PROMOTION_WHY = (
+    "A promotion while a daily run reads the tree would change what the run is reading, and "
+    "the run would record that as a skill tree mutation and block the schedule. Wait for the "
+    "holder named above to finish (a daily run, or another apply, rollback or decline); "
+    "nothing was written."
+)
+_LOCK_HELD_WHY = {
+    "decline": (
+        "A decline while a daily run counts the open queue would change the count under it. "
+        "Wait for the holder named above to finish (a daily run, or an apply, rollback or "
+        "decline); nothing was written."
+    ),
+}
+
+
 @contextmanager
-def _holding_the_run_lock(state: StateStore, action: str, candidate: Candidate) -> Iterator[None]:
+def _holding_the_run_lock(
+    state: StateStore, action: str, candidate: Candidate | str
+) -> Iterator[None]:
     """Hold the run lock for the part of a promotion that reads or writes the tree.
 
     The same lock ``daily`` takes, so a run and a promotion never overlap: the
@@ -483,16 +522,19 @@ def _holding_the_run_lock(state: StateStore, action: str, candidate: Candidate) 
     they waited, and another apply or rollback of the same candidate may have
     finished in between. Apply refuses unless the record still says
     ``validated``; rollback decides and records from the record it re-read.
+    A decline takes it too, by candidate id, and reads the record only once it
+    holds it: a daily run counts the open queue twice and must not see a decline
+    change the count between, and a decline must not cross an apply, a rollback
+    or another decline of the same candidate.
     """
-    lock = RunLock(state.lock_path(), owner=f"{action} {candidate.id} pid={os.getpid()}")
+    candidate_id = candidate if isinstance(candidate, str) else candidate.id
+    lock = RunLock(state.lock_path(), owner=f"{action} {candidate_id} pid={os.getpid()}")
     try:
         lock.__enter__()
     except LockHeld as exc:
         raise LockHeld(
-            f"refusing to {action} {candidate.id}: {exc} A promotion while a daily run reads "
-            "the tree would change what the run is reading, and the run would record that as a "
-            "skill tree mutation and block the schedule. Wait for the holder named above to "
-            "finish (a daily run, or another apply or rollback); nothing was written."
+            f"refusing to {action} {candidate_id}: {exc} "
+            + _LOCK_HELD_WHY.get(action, _PROMOTION_WHY)
         ) from exc
     try:
         yield
@@ -663,6 +705,21 @@ def rollback_candidate(
                 "the record this rollback was started on.\n  "
                 + _rollback_of_a_changed_record_advice(candidate.id)
             )
+        # A declined record is refused here: after the record is checked against
+        # itself and against the read this rollback was handed (so a declined
+        # record that was edited gets their advice, which keeps it and its
+        # backup), and before anything is restored. This version declines only a
+        # candidate no apply of it started, so a manifest beside a declined record
+        # was made by an older asi or by hand, and what to restore is not known
+        # from the state files.
+        if current.status == STATUS_DECLINED:
+            raise GateFailed(
+                f"refusing to roll back {candidate.id}: its record says 'declined' "
+                f"({_decided(current)}); a candidate this version declined was never applied "
+                f"by it. A backup manifest exists for it ({one_line_label(str(manifest))}), so an "
+                "older asi or a hand edit applied it: see 'A declined candidate with a backup "
+                "manifest' in OPERATIONS. Nothing was written."
+            )
         if current.status == STATUS_VALIDATED and _still_at_its_base(skill_store, current):
             # The manifest is written ahead of the skill, so an apply stopped
             # before its skill write leaves one for a write that never landed.
@@ -767,3 +824,451 @@ def _record_rollback(
     }
     state.write_action_receipt("rollback", candidate.id, out)
     return out
+
+
+def _decided(candidate: Candidate) -> str:
+    """When and under which label a declined record says it was declined."""
+    decision = candidate.decline
+    if decision is None:
+        return "no decision recorded"
+    return f"at {decision.declined_at} by operator:{decision.operator or 'unspecified'}"
+
+
+def _decline_beside_a_manifest_advice(candidate_id: str, manifest: Path) -> str:
+    """What a decline refused as tampered says when an apply of the candidate started.
+
+    Not ``repropose_advice``, whose "delete its record" would leave a skill the
+    apply may have written with nothing to restore it from, and not rollback's,
+    whose "run `asi rollback` again" a declined record is refused by. It names no
+    command and no receipt from the state files: they are editable.
+    """
+    return (
+        "Nothing was written: the skill, this record and its backup are as they were. An "
+        f"apply of this candidate started (backup manifest {one_line_label(str(manifest))}), so "
+        "it may have written the skill. Keep this record and the backup. Restore the skill as "
+        'docs/OPERATIONS.md, Recovery, "Manual restoration" says.'
+    )
+
+
+def _an_apply_started_refusal(candidate: Candidate, manifest: Path) -> str:
+    """The keep-the-record refusal of a record an apply of it started."""
+    cid = candidate.id
+    if candidate.status == STATUS_VALIDATED:
+        way_out = (
+            "Run that apply again (the same `asi apply` command) to finish it, then "
+            f"`asi rollback {cid}` to restore the skill. If that apply can no longer run, see"
+        )
+    else:
+        way_out = (
+            f"Its record says {quoted_value(candidate.status)}, which apply refuses, so that "
+            "apply cannot run again: see"
+        )
+    return (
+        f"refusing to decline {cid}: an apply of {cid} started (backup manifest "
+        f"{one_line_label(str(manifest))}), and it may have written the skill; decline does not "
+        "close a candidate an apply may have written. Keep this record. "
+        + way_out
+        + " 'An apply that started cannot be declined' in docs/OPERATIONS.md before you move "
+        "the record: deleting only the record does not restore the skill and leaves "
+        "`asi rollback` nothing to act on. Nothing was written."
+    )
+
+
+def _not_declinable(candidate: Candidate) -> str:
+    """Why a record no apply started, whose status is not declinable, is refused."""
+    cid = candidate.id
+    status = candidate.status
+    if status == STATUS_PROPOSED:
+        return (
+            f"refusing to decline {cid}: it was never validated, so there is no gate to decline "
+            "against; the next run validates or replaces it. To close it now, delete its "
+            "record: no apply of a proposed candidate starts"
+        )
+    if status == STATUS_APPLIED:
+        return f"refusing to decline {cid}: it is applied; `asi rollback {cid}` restores the skill"
+    if status in CLOSED_STATUSES:
+        return (
+            f"refusing to decline {cid}: already closed ({status}); a decline would change nothing"
+        )
+    return (
+        f"refusing to decline {cid}: it is not validated (its status is "
+        f"{quoted_value(status)}); only a validated candidate can be declined"
+    )
+
+
+DECLINE_RECEIPT_SCHEMA = "asi.decline_receipt.v1"
+
+
+def _decline_receipt(candidate: Candidate, decision: Decline, *, finishing: bool) -> dict[str, Any]:
+    """The decline receipt: the decision as the record holds it, and what was declined."""
+    validation = candidate.validation or {}
+    gate = validation.get("gate") or {}
+    return {
+        "schema": DECLINE_RECEIPT_SCHEMA,
+        "candidate_id": candidate.id,
+        "declined_at": decision.declined_at,
+        "operator": decision.operator,
+        "reason": decision.reason,
+        "status_before": STATUS_VALIDATED,
+        "skill_id": candidate.target.skill_id,
+        "canonical_path": candidate.target.canonical_path,
+        "base_sha256": candidate.target.base_sha256,
+        "patch_sha256": candidate.recomputed_patch_sha256,
+        "validation_schema": validation.get("schema"),
+        "gate": {
+            "passed": gate.get("passed"),
+            "reasons": gate.get("reasons"),
+            "metrics": gate.get("metrics"),
+        },
+        "improver_command_id": candidate.improver_command_id,
+        "finishes_an_earlier_run": finishing,
+    }
+
+
+#: Every field of a decline receipt this version writes, each with the types it
+#: writes there: a receipt without one of them, or holding any other, is not one
+#: it wrote. Types are matched exactly, so a ``true`` is not a number.
+_DECLINE_RECEIPT_TYPES: dict[str, tuple[type, ...]] = {
+    "schema": (str,),
+    "candidate_id": (str,),
+    "declined_at": (str,),
+    "operator": (str,),
+    "reason": (str,),
+    "status_before": (str,),
+    "skill_id": (str,),
+    "canonical_path": (str,),
+    "base_sha256": (str,),
+    "patch_sha256": (str,),
+    "validation_schema": (str, type(None)),
+    "gate": (dict,),
+    "improver_command_id": (str, type(None)),
+    "finishes_an_earlier_run": (bool,),
+}
+
+#: The receipt fields that must be what the declined record read under the
+#: lock gives, as JSON (``same_json``: by type and value, nested fields
+#: included): the candidate id and the decision first (the bound five), then
+#: what was declined. The schema and ``finishes_an_earlier_run`` are judged
+#: above them: the record does not say which run wrote the receipt.
+_DECLINE_RECEIPT_IDENTITY = (
+    "candidate_id",
+    "declined_at",
+    "operator",
+    "reason",
+    "status_before",
+    "skill_id",
+    "canonical_path",
+    "base_sha256",
+    "patch_sha256",
+    "validation_schema",
+    "gate",
+    "improver_command_id",
+)
+
+
+def _fields(names: Sequence[str]) -> str:
+    return ", ".join(names)
+
+
+def same_json(left: Any, right: Any) -> bool:
+    """Whether two JSON-loaded values are the same JSON value: by type and value, nested.
+
+    Python's ``==`` is not JSON's: ``True == 1`` and ``1 == 1.0`` hold, while
+    ``true``, ``1`` and ``1.0`` are three values. Here each pair must have
+    exactly the same type (``type(x) is type(y)``, not ``isinstance``, which
+    takes a ``bool`` for an ``int``); an object must have the same key set and
+    the same value at each key, an array the same length and the same item at
+    each place, in order; a string, a number of one type or a null is equal by
+    value. Walked with a stack of its own rather than by recursion, so however
+    deep the two values nest the answer is a bool, never a ``RecursionError``.
+    Measured before (FIX 2, audit 2): with ``==``, a decline receipt edited from
+    ``gate.passed: true`` to ``1``, or from a gate metric ``0`` to ``false``,
+    agreed with its record and a rerun exited 0, on 3.13 and 3.11.
+    """
+    pending = [(left, right)]
+    while pending:
+        one, other = pending.pop()
+        if type(one) is not type(other):
+            return False
+        if isinstance(one, dict):
+            if one.keys() != other.keys():
+                return False
+            pending.extend((one[key], other[key]) for key in one)
+        elif isinstance(one, list):
+            if len(one) != len(other):
+                return False
+            pending.extend(zip(one, other))
+        elif one != other:
+            return False
+    return True
+
+
+def _decline_receipt_damage(receipt: dict[str, Any], current: Candidate) -> tuple[str, str] | None:
+    """Why a decline receipt is not the one this version wrote for ``current``, or None.
+
+    ``("shape", why)`` for a receipt this version does not write (its schema, a
+    field missing or one it never writes, a field of another type), and
+    ``("differs", why)`` for one that disagrees with the record. ``why`` names
+    fields, never what they hold: the receipt is a state file, editable by
+    anyone who can write ``state/``, so its content is neither printed nor
+    trusted.
+    """
+    decision = current.decline
+    if decision is None:  # pragma: no cover - the integrity check refuses it first
+        return ("differs", "the record holds no decision")
+    if receipt.get("schema") != DECLINE_RECEIPT_SCHEMA:
+        return ("shape", f"its schema is not {DECLINE_RECEIPT_SCHEMA}")
+    missing = [name for name in _DECLINE_RECEIPT_TYPES if name not in receipt]
+    if missing:
+        return ("shape", f"{_fields(missing)} missing")
+    extra = len(set(receipt) - set(_DECLINE_RECEIPT_TYPES))
+    if extra:
+        return ("shape", f"{extra} field(s) this version does not write")
+    wrong = [
+        name for name, kinds in _DECLINE_RECEIPT_TYPES.items() if type(receipt[name]) not in kinds
+    ]
+    if wrong:
+        return ("shape", f"{_fields(wrong)} of the wrong type")
+    expected = _decline_receipt(current, decision, finishing=receipt["finishes_an_earlier_run"])
+    differ = [
+        name for name in _DECLINE_RECEIPT_IDENTITY if not same_json(receipt[name], expected[name])
+    ]
+    if differ:
+        return ("differs", f"{_fields(differ)} {'differs' if len(differ) == 1 else 'differ'}")
+    return None
+
+
+def _refuse_a_damaged_decline_receipt(
+    receipt: dict[str, Any], current: Candidate, receipt_path: Path, record_path: Path
+) -> None:
+    """A ``StateUnreadable`` naming the receipt, quoting none of it, unless it is this record's."""
+    damage = _decline_receipt_damage(receipt, current)
+    if damage is None:
+        return
+    kind, why = damage
+    cid = current.id
+    if kind == "shape":
+        raise StateUnreadable(
+            f"refusing to decline {cid}: the decline receipt {one_line_label(str(receipt_path))} "
+            f"is not one this version writes ({why}), so it was changed by hand or written by "
+            "another program; none of it is shown or used. It is left as it is. Move it aside "
+            "and run decline again to write it from the record. Nothing was written."
+        )
+    raise StateUnreadable(
+        f"refusing to decline {cid}: the decline receipt "
+        f"{one_line_label(str(receipt_path))} does not agree with the record "
+        f"{one_line_label(str(record_path))} ({why}); this version writes the "
+        "receipt from the record, so one of them was changed by hand. Both are left as "
+        "they are; nothing was written."
+    )
+
+
+#: What ``decline`` prints, text and ``--json`` alike, and nothing else.
+DECLINE_RESULT_FIELDS = (
+    "candidate_id",
+    "status",
+    "outcome",
+    "declined_at",
+    "operator",
+    "reason",
+    "skill_id",
+    "receipt_path",
+    "masked",
+)
+
+
+def _decline_result(
+    candidate: Candidate, decision: Decline, outcome: str, receipt_path: Path, masked: int
+) -> dict[str, Any]:
+    """What a decline reports: fixed strings and what the checked record holds, never a receipt.
+
+    The candidate id and the skill id are the record's, read under the lock and
+    checked against itself; the time, the operator label and the reason are its
+    decision, shape-checked and masked; the receipt path is the state store's own.
+    A receipt's fields, even a verified receipt's, are not copied in.
+    """
+    return {
+        "candidate_id": candidate.id,
+        "status": STATUS_DECLINED,
+        "outcome": outcome,
+        "declined_at": decision.declined_at,
+        "operator": decision.operator,
+        "reason": decision.reason,
+        "skill_id": candidate.target.skill_id,
+        "receipt_path": str(receipt_path),
+        "masked": masked,
+    }
+
+
+def _checked_decline_input(
+    reason: str, operator: str, *, repair: bool
+) -> tuple[str, str, int, bool]:
+    """The reason and the operator label as they are stored, or a refusal naming the rule.
+
+    The raw rules of ``decline_reason_problem`` on the text as typed, then the
+    masking fixed point. Repair input (a stored reason over 500 given back) is
+    carried as it is, flagged, and judged under the lock against the record.
+    """
+    text = reason.strip()
+    if repair and is_repair_input(text):
+        stored, masks = text, 0
+    else:
+        repair = False
+        problem = decline_reason_problem(text, limit=MAX_DECLINE_REASON_CHARS, what="reason")
+        if problem:
+            raise SafetyRefusal(f"decline refused: {problem}. Nothing was written.")
+        stored, masks = settled_mask(text)
+    label = operator.strip()
+    if label:
+        problem = decline_reason_problem(
+            label, limit=MAX_DECLINE_OPERATOR_CHARS, what="operator label"
+        )
+        if problem:
+            raise SafetyRefusal(f"decline refused: {problem}. Nothing was written.")
+        label, _ = settled_mask(label)
+    return stored, label, masks, repair
+
+
+def decline_candidate(
+    candidate_id: str,
+    *,
+    reason: str,
+    operator: str,
+    state: StateStore,
+    clock: Clock,
+    repair: bool = False,
+) -> dict[str, Any]:
+    """Close a validated candidate on the record, with a reason. Writes no skill file.
+
+    Refused under the automation marker. The reason and the operator label are
+    checked and masked first; then, holding the run lock, every read before any
+    write: the record; the backup manifest, whatever the status (a record an
+    apply started is kept, never declined); the status; the record checked
+    against itself (``rubrics=None``: a rubric changed since validation does
+    not stand in the way of saying no); the decline receipt. A declined record
+    is a rerun: the same reason writes a missing receipt from the record, or
+    nothing; another is refused, the first kept. Otherwise the record is
+    written first (``declined``, its decision and a note), then the receipt,
+    which is never written over a leaf: a stop between the two leaves a closed
+    record that apply and rollback refuse and a rerun finishes.
+
+    An existing decline receipt beside a declined record is checked before it
+    is relied on: its schema, its exact fields and their types, and its
+    agreement with the record read under the lock, compared as JSON by type
+    and value, nested fields included (``same_json``); any damage is a
+    ``StateUnreadable`` that names the receipt and quotes none of it.
+
+    Returns the ``DECLINE_RESULT_FIELDS`` (``_decline_result``), built from the
+    record and fixed strings, the outcome one of ``declined``,
+    ``receipt-written`` or ``already-declined``.
+    """
+    if automation_active():
+        raise AutomationRefused("decline refused: automation marker is set. " + DECLINE_ENV_HINT)
+    stored, label, masks, repair = _checked_decline_input(reason, operator, repair=repair)
+    with _holding_the_run_lock(state, "decline", candidate_id):
+        current = state.read_candidate(candidate_id)
+        record_path = state.candidate_path(candidate_id)
+        # Before any status refusal and before the integrity check: the refusals
+        # of a proposed record and of a tampered one say to delete the record,
+        # which is never the advice for a candidate an apply may have written.
+        manifest = state.latest_backup_manifest(candidate_id)
+        if (
+            manifest is not None
+            and current.status != STATUS_DECLINED
+            and current.status not in CLOSED_STATUSES
+        ):
+            raise GateFailed(_an_apply_started_refusal(current, manifest))
+        if current.status not in (STATUS_VALIDATED, STATUS_DECLINED):
+            raise GateFailed(_not_declinable(current))
+        verify_full_integrity(
+            current,
+            rubrics=None,
+            action="decline",
+            advice=(
+                _decline_beside_a_manifest_advice(candidate_id, manifest)
+                if manifest is not None
+                else None
+            ),
+        )
+        receipt = state.read_action_receipt("decline", candidate_id)
+        receipt_path = state.action_receipt_path("decline", candidate_id)
+        if current.status == STATUS_DECLINED:
+            return _decline_again(current, stored, receipt, record_path, receipt_path, state, masks)
+        if repair:
+            raise SafetyRefusal(
+                f"refusing to decline {candidate_id}: the reason is {len(stored)} characters; a "
+                f"new decline takes at most {MAX_DECLINE_REASON_CHARS}. Nothing was written."
+            )
+        if receipt is not None:
+            raise StateUnreadable(
+                f"refusing to decline {candidate_id}: a decline receipt "
+                f"{one_line_label(str(receipt_path))} exists but the record says validated; this "
+                "version writes the record before the receipt, so that receipt is not one it "
+                "wrote. Move it aside and run decline again. Nothing was written."
+            )
+        gate = (current.validation or {}).get("gate") or {}
+        if not gate.get("passed"):
+            reasons = quoted_values(gate.get("reasons") or []) or "no gate decision recorded"
+            raise GateFailed(f"candidate {candidate_id} did not pass the gate: {reasons}")
+        _refuse_unwritable_receipt(state, "decline", current)
+        declined_at = iso(clock.now())
+        decision = Decline(declined_at=declined_at, operator=label, reason=stored)
+        # The record first: what every other command must see to stop is its
+        # status. The reason is not in the note, which says who and when.
+        state.write_candidate(
+            replace(
+                current,
+                status=STATUS_DECLINED,
+                decline=decision,
+                notes=current.notes
+                + (f"declined {declined_at} by operator:{label or 'unspecified'}",),
+            )
+        )
+        payload = _decline_receipt(current, decision, finishing=False)
+        path = state.write_action_receipt("decline", candidate_id, payload, replace=False)
+        return _decline_result(current, decision, "declined", path, masks)
+
+
+def _decline_again(
+    current: Candidate,
+    stored: str,
+    receipt: dict[str, Any] | None,
+    record_path: Path,
+    receipt_path: Path,
+    state: StateStore,
+    masks: int,
+) -> dict[str, Any]:
+    """A decline of a record already declined: finish its receipt, or say nothing changed.
+
+    The reason is matched byte for byte against the record read under the lock,
+    never against an earlier read. The first decision is never replaced: the
+    record is not rewritten, and a receipt is written only where none stands.
+    """
+    cid = current.id
+    decision = current.decline
+    if decision is None:  # pragma: no cover - the integrity check refuses it first
+        raise StateUnreadable(f"refusing to decline {cid}: its declined record holds no decision")
+    if receipt is not None:
+        _refuse_a_damaged_decline_receipt(receipt, current, receipt_path, record_path)
+    if stored != decision.reason:
+        tail = (
+            " Nothing was written."
+            if receipt is not None
+            else (
+                " To write its missing receipt, run decline again with the recorded reason "
+                f"exactly: copy `decline.reason` from {one_line_label(str(record_path))} (it is "
+                "already masked, and may be longer than 500 characters) and give it on standard "
+                "input with `--reason -`; 'Declining a candidate' in docs/OPERATIONS.md gives a "
+                "pipe that decodes it from the record. Nothing was written."
+            )
+        )
+        raise GateFailed(
+            f"refusing to decline {cid}: already declined {_decided(current)} with another "
+            "reason; the first is kept." + tail
+        )
+    if receipt is not None:
+        return _decline_result(current, decision, "already-declined", receipt_path, 0)
+    _refuse_unwritable_receipt(state, "decline", current)
+    payload = _decline_receipt(current, decision, finishing=True)
+    path = state.write_action_receipt("decline", cid, payload, replace=False)
+    return _decline_result(current, decision, "receipt-written", path, 0)

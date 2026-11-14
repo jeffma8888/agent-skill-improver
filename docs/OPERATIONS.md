@@ -127,6 +127,11 @@ remedy in each reason is to move it aside or repair it by hand.
 | 129 | stopped by SIGHUP, which a closed terminal sends, before the command finished: `stopped by SIGHUP` on stderr. A model or source command it had started was ended with it; records are written whole or not at all (a temporary file renamed into place), and the next run starts as usual. A SIGHUP the caller ignores (`nohup` ignores it) does not stop the run |
 | 143 | stopped by SIGTERM, which launchd and systemd send to stop a job, the same way: `stopped by SIGTERM` on stderr. Further stop signals are ignored until the process has exited, so the status stays 143. A signal that arrives while Python is still starting, before the command runs, ends the process by the signal instead. Ctrl-C is Python's own, a traceback ending in KeyboardInterrupt, and it ends the model command the same way |
 
+`decline` uses the same codes: 0 when it declines the candidate, writes the
+missing receipt of a decline already on the record, or finds the decline done;
+2 for a usage error, such as no `--reason`; 3 for a refusal, with its class on
+stderr; 4 when the candidate has no record.
+
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
 "the tool declined and told you why", and 70 as "file a bug": no crash inside a
 command borrows 1, so a negative answer from `doctor` or `selftest` stays unambiguous.
@@ -506,7 +511,8 @@ asi review <candidate-id>
 ```
 
 `candidates` lists open records. Its footer counts the closed ones (applied,
-rolled-back, gate-failed, blocked-run) it is not listing; `--all` shows them.
+rolled-back, gate-failed, blocked-run, declined) it is not listing; `--all`
+shows them.
 
 `set-aside` is the other side of the ledger: every record a run quarantined,
 refused or deferred, newest first, each with its stage and reason (a deferral
@@ -586,7 +592,7 @@ these are normally caught inside the daily pass instead and land in the receipt'
 
 | Refusal | Meaning |
 | --- | --- |
-| `GateFailed` | on `review`/`apply`: the candidate is not exactly `validated`, because it failed the gate or is closed (`applied`, `rolled-back`, `gate-failed`, `blocked-run`); a closed candidate never exposes a token or an apply command again. Both ask this before they read the skill file, so a closed candidate whose skill moved is named closed, never told to delete the record `rollback` restores from. On `rollback`: no backup manifest exists for the candidate, so there is nothing to roll back, or the candidate is still `validated` and its skill holds the text it was proposed against (an apply of it stopped before its skill write), so it was never applied: run that apply again |
+| `GateFailed` | on `review`/`apply`: the candidate is not exactly `validated`, because it failed the gate or is closed (`applied`, `rolled-back`, `gate-failed`, `blocked-run`, `declined`); a closed candidate never exposes a token or an apply command again. Both ask this before they read the skill file, so a closed candidate whose skill moved is named closed, never told to delete the record `rollback` restores from. On `rollback`: no backup manifest exists for the candidate, so there is nothing to roll back, or the candidate is still `validated` and its skill holds the text it was proposed against (an apply of it stopped before its skill write), so it was never applied: run that apply again; or its record says `declined`, which this version never rolls back (see Recovery, "A declined candidate with a backup manifest"). On `decline`: the candidate is not `validated`, or an apply of it started (see Recovery, "An apply that started cannot be declined"), or it is already declined with another reason, the first kept |
 | `CandidateTampered` | a derived field of the candidate record (patch hash, approval challenge, diff, target identity, status against the recorded gate, validation binding) does not recompute from its inputs. The file was edited after it was written; nothing was backed up or applied. Do not "fix" the record: re-propose, by deleting it (`<id>.json` in the state directory's `candidates/`) and running `daily --commit` for another day, as the refusal says. Left in place, the record still counts against its skill's open-candidate cap, and a run for the same day skips every conversation that day already scored, the ones behind the candidate included. `daily` gives this refusal too, as the reason for a skill `asi set-aside` lists as deferred at validate (quarantined, once deferral is exhausted), when the skill file changed between the read that proposed the candidate and the read that validates it: no record was written yet, so there is nothing to delete, and a run for another day proposes again, as that reason says. On `rollback`, the record it read again once it held the run lock does not recompute, or names another candidate, document, skill, base or replacement than the record the command read when it started (see Rollback), and nothing was restored or written; the advice there is not to re-propose, since the record and its backup are what rollback restores from: keep both, and never run the manifest's `rollback_command` or any other command taken from the state files, whose agreeing with each other establishes no trust. Put the record back only if its original contents are known from outside the state directory, and run `rollback` again; otherwise follow Manual restoration under Recovery |
 | `ApprovalRequired` | no token was passed, `--i-reviewed-this` is missing, or the token does not match the challenge recomputed from the candidate id, base hash and patch text. Re-run `review` and copy the token it prints now |
 | `AutomationRefused` | the automation marker is active. Run apply after review, or rollback, from an unmarked interactive shell; do not schedule either. The marker is an interlock, not caller authentication |
@@ -604,9 +610,84 @@ these are normally caught inside the daily pass instead and land in the receipt'
 | `SelfMutationRefused` | the target is a protected skill (`[guard].protected_skill_ids`) or sits inside a protected path (this tool's own source, config, state or rubrics). Never a proposal target and never written, by design: `daily` refuses to propose for a skill inside a protected path (one under a root that holds the config file, its directory, the state directory or the rubrics directory) before the improver is asked, and records it in the receipt as a policy refusal of the skill (measured before: such a skill was proposed and the improver and the judge paid, and `review` then refused it naming no candidate, which stayed open with no token to be had). The list is read again by `review` and `apply`, so a skill listed after its candidate was validated gets no token from `review` and is not written by `apply`; `rollback` does not read it, so a skill listed after its apply can still be restored. On `review` and `apply`, the refusal for a listed skill names the candidate and says how it is closed: it stays open, and counts against `[caps].max_open_candidates`, until its record is deleted (measured: with the cap at 1, the next day stood down on it, and with the record deleted the next day ran); with the skill taken off the list, `review` and `apply` with the same token take it. The protected paths are read again too: a candidate validated before one of them came to hold its skill (the config file moved into the skill's folder, or `[rubrics].dir` pointed at it) is refused by `review` and `apply` naming the candidate, with the same way to close it; with the path moved out, the same token takes it. `rollback` refuses a target inside a protected path naming no candidate. An `apply` that finishes an earlier run of itself (see Recovery) records the write that run made before the list is asked, as before, so it marks a listed skill's candidate applied while writing nothing to the skill |
 | `ReadOnlyViolation` | something tried to write through a skill store opened read-only. The daily driver always opens it that way; only `apply` and `rollback` open it writable, so seeing this outside them is a bug report |
 | `SafetyRefusal` | the residual class: the state directory (or one of its ancestors), a backup directory or the lock leaf is a symlink or not owner-only and could not be repaired; a directory sits where the day's receipt or checkpoint, or any state record, would be written; the daily driver was handed a writable skill store, or `apply` a read-only one; or promotion was attempted through a dry-run store. The message names which |
-| `LockHeld` (`daily`, `apply`, `rollback`) | another `asi` process holds `state/locks/daily.lock`; the message shows who (a run as `pid=N`, a promotion as `apply CAND-... pid=N`). `apply` and `rollback` hold the same lock from the live read to their receipt, so a promotion never lands in the tree a run is reading: before they did, the run finished `blocked` over the tool's own write and the schedule stopped until it was reviewed. Wait for the holder, or see Recovery if it is dead |
+| `LockHeld` (`daily`, `apply`, `rollback`, `decline`) | another `asi` process holds `state/locks/daily.lock`; the message shows who (a run as `pid=N`, a promotion as `apply CAND-... pid=N`). `apply` and `rollback` hold the same lock from the live read to their receipt, so a promotion never lands in the tree a run is reading: before they did, the run finished `blocked` over the tool's own write and the schedule stopped until it was reviewed. Wait for the holder, or see Recovery if it is dead |
 | `IsolationRequired` | the source is private and the model roles are not confined by a verified OS sandbox. Install the mechanism or use the fixture corpus |
 | status already `applied` | re-applying is refused. Use `rollback` first if you want to redo it |
+
+### Declining a candidate
+
+```bash
+asi decline <candidate-id> --reason -
+```
+
+`decline` closes a `validated` candidate on the record: it says no, with a
+one-line reason and, with `--operator`, a label for who said it. With
+`--reason -` the line is read from standard input: at a terminal decline
+prompts on stderr and reads nothing after the line; a piped reason must end
+after its one line, as decline waits for the end of its input before it takes
+the lock. A reason typed on the command line can appear in other users' process
+listings while asi runs, and stays in your shell history; give `--reason -` and
+type or pipe the line instead. The reason is trimmed first (whitespace at
+either end, line breaks and tabs included, is dropped), and the rules apply to
+what is left: one line of at most 500 characters with no tab, line break, other
+control character, byte order mark or lone surrogate. It is then masked as every
+text asi keeps is (a key-shaped value becomes a `[REDACTED:...]` placeholder, so
+the stored reason can be longer than the one given); a refusal never quotes it.
+The operator is a label asi does not check, trimmed the same way and held to the
+same rules after trimming (at most 200 characters). An omitted or empty
+`--operator` takes the value of `$USER`; a label that is empty after trimming
+(`$USER` empty or unset as well, or an `--operator` of blanks only) is
+stored empty and shown as `unspecified`. It records what was typed, or what
+`$USER` held, not who typed it.
+
+`decline` writes `state/` only, never a skill: the candidate record first, now
+`declined` and holding the decision (when, the label, the reason; its note says
+who and when, not why), then its receipt, `state/receipts/decline--<id>.json`,
+beside the gate and hashes it was validated with. It takes the run lock, so it
+is refused with `LockHeld` while a daily run, an apply or a rollback holds it,
+and with `AutomationRefused` under the automation marker. It checks the record
+against itself (`CandidateTampered` if it does not recompute), not against the
+live rubrics, and it does not read the skill. A declined candidate is closed:
+`review`, `apply` and `rollback` refuse it, `candidates` lists it only with
+`--all`, and it no longer counts against `max_open_candidates` or holds its
+skill's slot, so the next run may propose for that skill again, and may propose
+the same change: the reason is shown to no model and is not rejection memory.
+There is no undo.
+
+`daily` (the queue cap and each skill's slot), `candidates` and `doctor` count a
+declined record by its status and the shape of its decision, not by its
+integrity check, as they count every closed record: a record edited after its
+decline (its patch, say) still frees its skill's slot, as one edited to
+`rolled-back`, or deleted, does. `review`, `apply` and `rollback` refuse it all
+the same, by its status (a `rollback` beside a backup manifest checks it first,
+`CandidateTampered`), and a rerun of `decline` checks it against itself
+(`CandidateTampered`).
+
+A decline stopped between its two writes leaves the record `declined` and no
+receipt. Every other command already honours it, and running the same command
+again, with the same reason, writes the missing receipt from the record and
+changes nothing else; once both exist, a rerun says so and writes nothing. A
+rerun checks a receipt that stands before it relies on it: one that is not one
+this version writes (another schema, a field missing, one it never writes, a
+field of another type) or that does not agree with the record read under the
+lock (its candidate, its decision, what was declined; compared as JSON, by type
+and value, nested fields included, so `true` is not `1` and `1` is not `1.0`)
+is refused with `StateUnreadable`, exit 3, naming the receipt and quoting none
+of it, and nothing is written. Move one this version did not write aside and
+run decline again to write it from the record; one that disagrees means the
+record or the receipt was edited, so both are left for you to compare. What
+`decline` prints, in text and in `--json`, is built from the record and fixed
+strings, never from a receipt: `candidate_id`, `status`, `outcome` (`declined`,
+`receipt-written` or `already-declined`), `declined_at`, `operator`, `reason`,
+`skill_id`, `receipt_path` and `masked`. A rerun with another reason is
+refused, and the first is kept. To finish a decline whose stored reason is
+longer than 500 characters or not at hand, give the record's `decline.reason`
+back exactly, decoded from its JSON (a `"` or `\` in it is escaped in the
+file), on standard input:
+
+```bash
+python3 -c 'import json, sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["decline"]["reason"].encode() + b"\n")' <record path> | asi decline <id> --reason -
+```
 
 ## Rollback
 
@@ -705,9 +786,10 @@ prevent.
 
 **Do not run an older asi on the same state tree while this one runs: an older
 apply does not re-read the record under the lock.** Nor does an older rollback.
-Either can act on what the candidate record said before it waited for the lock,
-after this one's `apply` or `rollback` of the same candidate has changed it: write
-the skill again over a rollback, or drop the note this one added.
+An older rollback does not refuse a declined candidate either. Either can act on
+what the candidate record said before it waited for the lock, after this one's
+`apply` or `rollback` of the same candidate has changed it: write the skill again
+over a rollback, or drop the note this one added.
 
 **Manual restoration.** Stop every asi run and owner edit. Never execute
 `rollback_command` or any command from the record, manifest or receipts; their
@@ -740,6 +822,28 @@ the old one rather than through it, reads back with the backup's hash.
 It does not check links above the skill root or above the backup's directory,
 nor that the record and the manifest name the skill and the backup you meant.
 
+**An apply that started cannot be declined.** `decline` refuses a candidate
+once an apply of it has written its backup manifest (`GateFailed`), as that
+apply may have written the skill. Keep the record: deleting only the record
+does not restore the skill and leaves `asi rollback` nothing to act on (exit 4;
+the manifest stays). Run that apply again, the same `asi apply` command, which
+finishes an apply stopped after its write and applies one stopped before it,
+then `asi rollback <id>`, which ends it `rolled-back` with the skill as it was,
+after making the store's checks itself (those "Manual restoration" says it
+makes, not all that the paragraph requires). If that apply can no longer run
+(the record is tampered or its status edited, its live rubric changed so apply
+refuses it, or its command and token are gone), restore the skill as the
+paragraph "Manual restoration" says, and keep the record and the backup until
+then.
+
+**A declined candidate with a backup manifest.** Only an older asi or a hand
+edit makes one: this version refuses to decline a candidate an apply of which
+started, and refuses to roll back a declined one (`GateFailed`). If the skill
+holds the candidate's text, restore it as "Manual restoration" says.
+A declined record is kept in place, not archived, and its backup retained: it
+is closed and holds the decision, so where "Manual restoration" says the record
+may be archived, a declined one is not.
+
 **Rejection memory was ignored or could not be written.** Damaged, foreign,
 oversize or unreadable optional memory (any read error, such as an ownership or
 ACL permission error on a file already at 0600; a plain `chmod 000` is reset to
@@ -749,11 +853,10 @@ in the receipt notes, `rejection_memory_ignored=1`, left untouched and neither
 consulted nor updated; proposals validate normally and repeats may be replayed
 again. A missing file is silent empty history. An optional leaf recheck or
 publication built-in OSError or `SafetyRefusal` is nonfatal: the note says
-`write failed`,
-`rejection_memory_write_failed=1`, and candidate, receipt and checkpoint are
-retained. `ReadOnlyViolation` is not swallowed (exit 3). This recovery applies
-only to optional memory: unreadable candidate records still stand daily down
-before model calls because the queue cannot be counted.
+`write failed`, `rejection_memory_write_failed=1`, and candidate, receipt and
+checkpoint are retained. `ReadOnlyViolation` is not swallowed (exit 3). This
+recovery applies only to optional memory: unreadable candidate records still
+stand daily down before model calls because the queue cannot be counted.
 
 **Force another trial of an exact replacement.** Wait until no daily run owns the
 state lock, inspect if needed, then delete **only**
@@ -768,21 +871,24 @@ cannot authorize apply or mint a review token.
 
 **The queue is full and runs keep standing down.** That is the backlog guard
 working. A review does not shrink the queue: apply the candidates you want and
-delete the records of those you do not (`<id>.json` in the state directory's
-`candidates/`; `asi candidates` lists the open ones), or raise
-`max_open_candidates` if you have decided the queue can carry more. At 0 it holds
-with nothing open, and no run proposes until it is raised. Do not remove the guard.
+decline those you do not (`asi decline <id> --reason -`; `asi candidates` lists
+the open ones), or raise `max_open_candidates` if you have decided the queue can
+carry more. At 0 it holds with nothing open, and no run proposes until it is
+raised. Do not remove the guard.
 
 **A skill has a validated candidate waiting, and later runs propose nothing new
 for it.** That is `max_open_candidates_per_skill` (default 1) holding: the
 receipt's `skills` table shows the skill as `refused` with "open candidate(s)
 already target". Two open drafts for one file cannot both be applied, so the run
-waits for you to apply the existing one, or close it by deleting its record (a
-review alone leaves it open), rather than queue a competitor.
+waits for you to apply the existing one, or decline it (a review alone leaves it
+open), rather than queue a competitor.
 A candidate `review` refuses (`CandidateTampered`, `BaseHashMismatch`) can be
-neither reviewed nor applied; close it by deleting its record, as the refusal says
-(for a skill path that is not a regular file, is a link or is not UTF-8, it says to
-put a regular UTF-8 file there first, as `daily` proposes for none of those; see
+neither reviewed nor applied. A stale one (`BaseHashMismatch`) can be declined, as
+decline does not read the skill. If decline refuses one because an apply of it
+started, keep the record and see 'An apply that started cannot be declined'.
+Otherwise close it by deleting its record, as the refusal says (for a skill path
+that is not a regular file, is a link or is not UTF-8, it says to put a regular
+UTF-8 file there first, as `daily` proposes for none of those; see
 `BaseHashMismatch`).
 A `gate-failed` candidate is closed and does not hold the skill; a skill whose
 proposals keep failing the gate is re-proposed each run.

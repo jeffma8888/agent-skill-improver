@@ -28,8 +28,10 @@ from typing import Mapping
 from ..errors import CandidateTampered
 from ..hashing import sha256_text, short
 from .candidate import (
+    DECLINE_ABSENT,
     STATUS_APPLIED,
     STATUS_BLOCKED_RUN,
+    STATUS_DECLINED,
     STATUS_GATE_FAILED,
     STATUS_PROPOSED,
     STATUS_ROLLED_BACK,
@@ -37,6 +39,7 @@ from .candidate import (
     Candidate,
     TargetRef,
     challenge_for,
+    decline_shape_problems,
     make_patch,
 )
 from .redaction import quoted_value, quoted_values
@@ -51,10 +54,17 @@ _STATUSES_REQUIRING_VALIDATION = (
     STATUS_APPLIED,
     STATUS_ROLLED_BACK,
     STATUS_BLOCKED_RUN,
+    STATUS_DECLINED,
 )
 
-#: Statuses that assert the gate passed.
-_STATUSES_ASSERTING_A_PASS = (STATUS_VALIDATED, STATUS_APPLIED, STATUS_ROLLED_BACK)
+#: Statuses that assert the gate passed. Only a passed, validated candidate can
+#: be declined, so a declined record asserts a pass too.
+_STATUSES_ASSERTING_A_PASS = (
+    STATUS_VALIDATED,
+    STATUS_APPLIED,
+    STATUS_ROLLED_BACK,
+    STATUS_DECLINED,
+)
 
 _SHA256_LEN = 64
 
@@ -443,6 +453,17 @@ def validation_mismatches(
 PROBLEMS_SHOWN = 20
 
 
+def decline_problems(candidate: Candidate) -> list[str]:
+    """Why the candidate's decision does not fit its status; empty when it does.
+
+    A declined candidate holds a well-shaped ``decline`` (a one-line reason, an
+    operator label and a time) and no other status holds one: the reader's rule
+    (``decline_shape_problems``) applied to an object built in process.
+    """
+    value = DECLINE_ABSENT if candidate.decline is None else candidate.decline
+    return decline_shape_problems(value, status=candidate.status)
+
+
 def verify_full_integrity(
     candidate: Candidate,
     *,
@@ -465,6 +486,7 @@ def verify_full_integrity(
     """
     problems = derived_field_mismatches(candidate, base_text=base_text)
     problems += validation_mismatches(candidate, rubrics=rubrics)
+    problems += decline_problems(candidate)
     if not problems:
         return
     listed = [f"  - {p}" for p in problems[:PROBLEMS_SHOWN]]

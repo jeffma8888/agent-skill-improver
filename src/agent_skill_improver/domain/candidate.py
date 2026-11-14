@@ -22,13 +22,15 @@ import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 from .. import SCHEMA_CANDIDATE, SCHEMA_PROPOSAL
 from ..hashing import sha256_text
 from .conversation import EvidenceRef
 from .failure import FailureCase
-from .redaction import kept_prose, quoted_value
+from ..errors import SafetyRefusal
+from .redaction import kept_prose, quoted_value, redact
 
 STATUS_PROPOSED = "proposed"
 STATUS_VALIDATED = "validated"
@@ -39,6 +41,23 @@ STATUS_ROLLED_BACK = "rolled-back"
 #: produced the candidate. Independent of the gate verdict, which was computed
 #: against a tree that then changed.
 STATUS_BLOCKED_RUN = "blocked-run"
+#: Closed by ``asi decline``: the operator said no, on the record, with a reason.
+#: Only a validated candidate no apply has started becomes one; nothing leaves it.
+STATUS_DECLINED = "declined"
+
+#: What a new decline takes: code points as typed, before masking. A reason is
+#: refused over its limit, never clipped: a clipped reason is a different reason.
+MAX_DECLINE_REASON_CHARS = 500
+MAX_DECLINE_OPERATOR_CHARS = 200
+#: What a record may hold: the masked form can be longer than what was typed
+#: (each masked span becomes a placeholder), at most 500 x the longest
+#: placeholder ``redact`` writes (36), and the operator's 200 x the same.
+MAX_STORED_DECLINE_REASON_CHARS = 18_000
+MAX_STORED_DECLINE_OPERATOR_CHARS = 7_200
+#: The form ``clock.iso`` writes and a decline's ``declined_at`` must hold.
+DECLINE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+#: How many ``redact`` calls ``settled_mask`` makes at most before it refuses.
+SETTLE_CALLS = 4
 
 CHALLENGE_DOMAIN = "asi-challenge:v1"
 APPROVAL_DOMAIN = "asi-approve:v1"
@@ -243,6 +262,23 @@ def approval_token_for(challenge: str, base_sha256: str, patch_sha256: str) -> s
 
 
 @dataclass(frozen=True)
+class Decline:
+    """An operator's no: when, under which label, and why, each masked.
+
+    ``operator`` is a label the operator gave (or ``USER``); asi does not check
+    who ran the command. ``reason`` is the masking fixed point of what was
+    typed (``settled_mask``), so reading it back masks nothing more.
+    """
+
+    declined_at: str
+    operator: str
+    reason: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"declined_at": self.declined_at, "operator": self.operator, "reason": self.reason}
+
+
+@dataclass(frozen=True)
 class Candidate:
     id: str
     created_at: str
@@ -259,6 +295,11 @@ class Candidate:
     improver_command_id: str = ""
     validation: dict[str, Any] | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: The operator's no, set only by ``asi decline`` with status ``declined``.
+    #: Checked by the reader and the verifier (``decline_shape_problems``), not
+    #: here, so a hand-built declined candidate still reaches the refusals that
+    #: name its status.
+    decline: "Decline | None" = None
 
     def __post_init__(self) -> None:
         validate_candidate_id(self.id)
@@ -303,6 +344,9 @@ class Candidate:
             "improver_command_id": self.improver_command_id,
             "validation": self.validation,
             "notes": list(self.notes),
+            # Written only when set, so every record that is not declined stays
+            # byte for byte what an earlier version wrote.
+            **({"decline": self.decline.to_dict()} if self.decline is not None else {}),
         }
 
     @staticmethod
@@ -352,6 +396,22 @@ class Candidate:
             validation = dict(_object(validation, "validation"))
             if validation.get("gate") is not None:
                 _object(validation["gate"], "validation.gate")
+        status = str(raw.get("status", STATUS_PROPOSED))
+        decline_raw = raw["decline"] if "decline" in raw else DECLINE_ABSENT
+        shape = decline_shape_problems(decline_raw, status=status)
+        if shape:
+            raise ValueError("; ".join(shape))
+        decline = None
+        if isinstance(decline_raw, Mapping):
+            # Re-masked with no limit: a stored reason is its own masking fixed
+            # point, so this is the identity on what decline wrote, and the record,
+            # the receipt and the output agree byte for byte. The shape rule above
+            # bounds it instead of a clip.
+            decline = Decline(
+                declined_at=decline_raw["declined_at"],
+                operator=kept_prose(decline_raw["operator"]),
+                reason=kept_prose(decline_raw["reason"]),
+            )
         # The improver's prose is masked when its proposal is parsed
         # (``parse_proposal``); it, and the notes, are masked again here, as the
         # judgement reader masks its rationale, so a record edited on disk cannot
@@ -372,10 +432,11 @@ class Candidate:
             sources=sources,
             patch=patch,
             approval_challenge=str(raw.get("approval_challenge", "")),
-            status=str(raw.get("status", STATUS_PROPOSED)),
+            status=status,
             improver_command_id=str(raw.get("improver_command_id", "")),
             validation=validation,
             notes=tuple(kept_prose(n) for n in _strings(raw.get("notes", []), "notes")),
+            decline=decline,
         )
 
 
@@ -647,3 +708,159 @@ def sources_from_cases(cases: Sequence[FailureCase]) -> tuple[SourceRef, ...]:
                 )
             )
     return tuple(out)
+
+
+class _DeclineAbsent:
+    """The ``decline`` key a record does not hold (distinct from a JSON null)."""
+
+    def __repr__(self) -> str:
+        return "DECLINE_ABSENT"
+
+
+DECLINE_ABSENT: Any = _DeclineAbsent()
+
+
+def _code_point_problems(text: str) -> list[str]:
+    """Each code point a one-line decline field may not hold, by name and place.
+
+    A line break or tab, anything ``unreviewable_characters`` names, U+FEFF (which
+    ``strip()`` keeps and a line shows as nothing) and a lone surrogate (what an
+    argv byte that is not UTF-8 decodes to). Named ``U+XXXX at character N``,
+    each code point once at its first place, never the text itself.
+    """
+    bad = set(unreviewable_characters(text))
+    found: list[str] = []
+    seen: set[str] = set()
+    for index, ch in enumerate(text, start=1):
+        if ch in seen:
+            continue
+        name = f"U+{ord(ch):04X}"
+        if ch in "\n\r\t" or name in bad or ch == "\ufeff" or unicodedata.category(ch) == "Cs":
+            seen.add(ch)
+            found.append(f"{name} at character {index}")
+    return found
+
+
+def decline_reason_problem(text: str, *, limit: int, what: str) -> str | None:
+    """Why ``text``, as typed for a decline, is refused; None when it is taken.
+
+    The raw rules, in order, on the text after ``strip()``: blank; longer than
+    ``limit`` code points; a line break or tab; an escape, a bidi or hidden
+    control, U+FEFF or a lone surrogate. The answer names the length and the
+    limit, or the code points and their places, and never quotes the text: a
+    reason may hold a secret.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return f"the {what} is blank; give one line saying why"
+    if len(stripped) > limit:
+        return f"the {what} is {len(stripped)} characters; the limit is {limit}"
+    named = _code_point_problems(stripped)
+    breaks = [n for n in named if n.split(" ", 1)[0] in ("U+000A", "U+000D", "U+0009")]
+    if breaks:
+        return f"the {what} holds a line break or tab ({', '.join(breaks)}); give it on one line"
+    if named:
+        return (
+            f"the {what} holds characters a reader cannot see for what they are "
+            f"({', '.join(named)})"
+        )
+    return None
+
+
+def settled_mask(text: str) -> tuple[str, int]:
+    """``text`` masked to its fixed point, and how many spans the first pass masked.
+
+    One call of ``redact``, then at most three more, each on the last result,
+    stopping at the first that changes nothing: at most four calls. Two masks a
+    URL parameter's shape joins read back as one, so one pass is not always a
+    fixed point, and a stored reason must be one (reading it back re-masks it).
+    A text still changing at the fourth call is refused, never stored unsettled.
+    """
+    first = redact(text)
+    masked = first.text
+    for _ in range(SETTLE_CALLS - 1):
+        again = redact(masked).text
+        if again == masked:
+            return masked, first.total
+        masked = again
+    raise SafetyRefusal(
+        "decline refused: the reason's masked form does not settle; reword it. Nothing was written."
+    )
+
+
+def is_repair_input(text: str) -> bool:
+    """Whether ``text`` may be a stored reason given back to finish a decline.
+
+    Over the 500 a new decline takes but within what a record holds (18,000),
+    passing every other raw rule, and its own fixed point (the first ``redact``
+    call changes nothing). Judged under the lock against the record: accepted only
+    when the record is declined and its reason is this text byte for byte.
+    """
+    stripped = text.strip()
+    if not MAX_DECLINE_REASON_CHARS < len(stripped) <= MAX_STORED_DECLINE_REASON_CHARS:
+        return False
+    if decline_reason_problem(stripped, limit=MAX_STORED_DECLINE_REASON_CHARS, what="reason"):
+        return False
+    return redact(stripped).text == stripped
+
+
+def _decline_field(value: Any, name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, DECLINE_ABSENT)
+    return getattr(value, name, DECLINE_ABSENT)
+
+
+def decline_shape_problems(value: Any, *, status: str) -> list[str]:
+    """Why a record's ``decline`` does not fit its ``status``; empty when it does.
+
+    Shared by the reader (``from_dict``, the raw value or ``DECLINE_ABSENT``) and
+    the verifier (``decline_problems``, a ``Decline`` or ``DECLINE_ABSENT``). A
+    declined record holds a decision: a one-line nonblank reason within the
+    stored ceiling, a one-line operator label within its own, and a time in
+    ``iso()`` form; no other status holds one. Each problem names the field and
+    the rule, never the value.
+    """
+    if status != STATUS_DECLINED:
+        if value is DECLINE_ABSENT:
+            return []
+        return ["a record whose status is not 'declined' must not hold a decline object"]
+    if value is DECLINE_ABSENT or not isinstance(value, (Mapping, Decline)):
+        return ["a declined record must hold a decline object"]
+    problems: list[str] = []
+    reason = _decline_field(value, "reason")
+    if not isinstance(reason, str):
+        problems.append("decline.reason is not a string")
+    else:
+        if not reason.strip():
+            problems.append("decline.reason is blank")
+        if len(reason) > MAX_STORED_DECLINE_REASON_CHARS:
+            problems.append(
+                f"decline.reason is {len(reason)} characters; a record holds at most "
+                f"{MAX_STORED_DECLINE_REASON_CHARS}"
+            )
+        named = _code_point_problems(reason)
+        if named:
+            problems.append(f"decline.reason holds {', '.join(named)}; it must be one plain line")
+    operator = _decline_field(value, "operator")
+    if not isinstance(operator, str):
+        problems.append("decline.operator is not a string")
+    else:
+        if len(operator) > MAX_STORED_DECLINE_OPERATOR_CHARS:
+            problems.append(
+                f"decline.operator is {len(operator)} characters; a record holds at most "
+                f"{MAX_STORED_DECLINE_OPERATOR_CHARS}"
+            )
+        named = _code_point_problems(operator)
+        if named:
+            problems.append(f"decline.operator holds {', '.join(named)}; it must be one plain line")
+    declined_at = _decline_field(value, "declined_at")
+    if not isinstance(declined_at, str) or not _is_iso_time(declined_at):
+        problems.append("decline.declined_at is not a time in the form YYYY-MM-DDTHH:MM:SSZ")
+    return problems
+
+
+def _is_iso_time(value: str) -> bool:
+    try:
+        return datetime.strptime(value, DECLINE_TIME_FORMAT).strftime(DECLINE_TIME_FORMAT) == value
+    except ValueError:
+        return False

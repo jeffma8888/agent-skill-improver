@@ -54,6 +54,7 @@ from ..clock import Clock, iso
 from ..domain.candidate import (
     STATUS_APPLIED,
     STATUS_BLOCKED_RUN,
+    STATUS_DECLINED,
     STATUS_GATE_FAILED,
     STATUS_PROPOSED,
     STATUS_ROLLED_BACK,
@@ -115,7 +116,13 @@ README_TEXT = (
 )
 
 OPEN_STATUSES = (STATUS_PROPOSED, STATUS_VALIDATED)
-CLOSED_STATUSES = (STATUS_APPLIED, STATUS_GATE_FAILED, STATUS_ROLLED_BACK, STATUS_BLOCKED_RUN)
+CLOSED_STATUSES = (
+    STATUS_APPLIED,
+    STATUS_GATE_FAILED,
+    STATUS_ROLLED_BACK,
+    STATUS_BLOCKED_RUN,
+    STATUS_DECLINED,
+)
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -1302,19 +1309,63 @@ class StateStore:
             )
 
     def action_receipt_path(self, action: str, candidate_id: str) -> Path:
-        """Where the receipt of an ``apply`` or ``rollback`` of this candidate goes."""
-        if action not in ("apply", "rollback"):
+        """Where the receipt of an ``apply``, ``rollback`` or ``decline`` of this candidate goes."""
+        if action not in ("apply", "rollback", "decline"):
             raise SafetyRefusal(f"unknown candidate receipt action {action!r}")
         return self.dir("receipts") / f"{action}--{validate_candidate_id(candidate_id)}.json"
 
-    def write_action_receipt(self, action: str, candidate_id: str, payload: dict[str, Any]) -> Path:
-        # Through ``_persist`` like every other record, so a directory at the path
-        # is refused by name; the promotion has asked ``artifact_path_problem``
-        # about this path before touching the skill, so the refusal here is
-        # the last line, not the first.
+    def write_action_receipt(
+        self, action: str, candidate_id: str, payload: dict[str, Any], *, replace: bool = True
+    ) -> Path:
+        """Write one action receipt; with ``replace=False``, only where nothing stands.
+
+        Through ``_persist`` like every other record, so a directory at the path
+        is refused by name; the promotion has asked ``artifact_path_problem``
+        about this path before touching the skill, so the refusal here is the
+        last line, not the first. ``apply`` and ``rollback`` replace (their reruns
+        rewrite a receipt). ``decline`` never does: ``replace=False`` asks
+        ``os.lstat`` first, and anything at the path (a file, a directory, a link,
+        dangling or not, a FIFO) is refused and left as it is; ``Path.exists``
+        would follow a dangling link and call it absent. That is create-if-absent
+        only among writers that hold the run lock, as every decline does: an owner
+        who writes the path by hand between the ``lstat`` and the atomic rename is
+        replaced, as for every other state leaf.
+        """
         self._refuse_promotion_when_withholding("promotion receipt")
         path = self.action_receipt_path(action, candidate_id)
+        if not replace:
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                pass
+            else:
+                raise SafetyRefusal(
+                    f"refusing to write the {action} receipt {_shown(path)}: something is "
+                    "already there, and this receipt is never written over; it is left as it is."
+                )
         return self._persist(path, lambda: write_json(path, payload))
+
+    def read_action_receipt(self, action: str, candidate_id: str) -> dict[str, Any] | None:
+        """The receipt of this action on this candidate, or None when nothing stands there.
+
+        Absence is ``os.lstat`` raising ``FileNotFoundError`` and nothing else, so a
+        dangling link is a leaf, not an absence. Any other ``lstat`` failure, and
+        anything at the path that is not a regular file holding a JSON object (a
+        FIFO, which is never opened blocking, a socket, a link, a directory, a leaf
+        removed after the ``lstat``), is a ``StateUnreadable`` naming the path: never a
+        traceback, and never read as no receipt.
+        """
+        path = self.action_receipt_path(action, candidate_id)
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StateUnreadable(
+                f"refusing to use the {action} receipt record {_shown(path)}: it could not be "
+                f"examined ({why_unreadable(exc)}). Nothing was written."
+            ) from exc
+        return _read_state_object(path, what=f"{action} receipt")
 
     def backup_dir_for(self, candidate_id: str, stamp: str, *, make: bool = True) -> Path:
         """A per-apply backup directory, created only as a direct child.

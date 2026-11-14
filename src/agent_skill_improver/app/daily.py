@@ -126,12 +126,14 @@ DEFER_EXHAUSTED = "defer-exhausted"
 #: What releases a cap that holds the queue or a skill, said by both. Measured
 #: before, both said "review or close": a candidate ``review`` has shown stays
 #: ``validated``, so it still counts, and the run after it was refused or stood
-#: down the same way; there is no command that closes one. A candidate leaves
-#: the open statuses when ``apply`` writes it, or when its record is deleted.
+#: down the same way. A candidate leaves the open statuses when ``apply`` writes
+#: it, when ``decline`` closes it, or when its record is deleted. The advice names
+#: no deletion: decline refuses a candidate an apply started, and deleting that
+#: record alone would leave the skill changed with nothing for ``asi rollback``
+#: to act on; each record decline refuses names its own way out.
 RELEASE_ADVICE = (
     "a review leaves a candidate open, and one is closed by applying it (`asi apply`) or by "
-    "deleting its record (its <id>.json in the state directory's candidates/; "
-    "`asi candidates` lists the open ones)"
+    "declining it (`asi decline <id> --reason -`; `asi candidates` lists the open ones)"
 )
 
 

@@ -185,7 +185,8 @@ def _check_reference(span: str, subparsers: dict[str, argparse.ArgumentParser]) 
         return
     globals_only = _global_option_strings()
     name = next((t for t in argv if not t.startswith("-")), None)
-    flags = [t.split("=", 1)[0] for t in argv if t.startswith("-")]
+    # A lone "-" is the operand that names standard input (`--reason -`), not a flag.
+    flags = [t.split("=", 1)[0] for t in argv if t.startswith("-") and t != "-"]
     if name is None:
         for flag in flags:
             assert flag in globals_only, f"{span}: unknown global flag {flag}"

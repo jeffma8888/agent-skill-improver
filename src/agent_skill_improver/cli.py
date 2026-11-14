@@ -12,10 +12,12 @@ Command surface, and which of them can change anything on disk:
     review              read-only. Prints the argument, the diff, and the approval token.
     apply               writes a candidate (approval token + acknowledgement). Review-gated.
     rollback            restores a verified backup; no token or acknowledgement.
+    decline             writes state/ only: closes a validated candidate on the record,
+                        with a reason (candidate status, receipt). Writes no skill file.
     scheduler-template  prints a launchd or cron template. Installs nothing.
     selftest            re-checks the structural safety invariants on this checkout.
 
-``apply`` and ``rollback`` refuse while the automation marker is active. The daily
+``apply``, ``rollback`` and ``decline`` refuse while the automation marker is active. The daily
 driver sets it only inside its own process; the scheduler templates set it for their
 whole job command (cron also marks later lines on cronie, Vixie and OpenBSD cron).
 Apply needs a content-derived token and acknowledgement but does not authenticate
@@ -45,7 +47,9 @@ from .domain.approval import HumanApproval, automation_active
 from .domain.candidate import (
     BIDI_CONTROLS,
     HIDDEN_CONTROLS,
+    MAX_STORED_DECLINE_REASON_CHARS,
     STATUS_VALIDATED,
+    is_repair_input,
     one_line_label,
     validate_run_day,
 )
@@ -66,7 +70,7 @@ from .domain.isolation import (
     denied_env_names,
     source_class,
 )
-from .errors import AsiError, BlockedRunUnreviewed, ConfigError
+from .errors import AsiError, BlockedRunUnreviewed, ConfigError, SafetyRefusal
 from .jsonio import dumps
 from .adapters.bounded_process import children_reaped_by_the_kernel
 from .adapters.skill_fs import root_presence
@@ -367,9 +371,15 @@ def _say_json(payload: Any) -> None:
     sys.stdout.write(escape_json_for_terminal(dumps(payload)))
 
 
-def _err(text: str) -> None:
-    """The one place text for a person reaches stderr."""
+def _err(text: str, *, flush: bool = False) -> None:
+    """The one place text for a person reaches stderr.
+
+    ``flush`` is for a prompt, which ends no line, so a line-buffered stderr
+    would hold it back until after the answer it asks for.
+    """
     sys.stderr.write(escape_for_terminal(text))
+    if flush:
+        sys.stderr.flush()
 
 
 def _emit(payload: Any, *, as_json: bool, lines: Sequence[str] = ()) -> None:
@@ -1603,6 +1613,10 @@ def cmd_review(args: argparse.Namespace) -> int:
         "",
         "To promote this change, review the diff above, then run:",
         f"  {report['apply_command']}",
+        # Indented, so it stays inside the apply instruction: the "no" is
+        # offered where the "yes" is, and review's column-0 headers are as they were.
+        "  or decline it on the record:  "
+        + shlex.join(["asi", "decline", candidate.id, "--reason", "-"]),
         "",
         "Nothing has been written to any skill file yet.",
     ]
@@ -1665,6 +1679,105 @@ def cmd_apply(args: argparse.Namespace) -> int:
         f"  (or manually)   {manual}",
     ]
     _emit(result, as_json=args.json, lines=lines)
+    return 0
+
+
+#: How much of standard input a ``--reason -`` reads: the longest stored reason
+#: the reader accepts, four bytes a code point in UTF-8, and a ``\r\n``, so a
+#: stored reason copied from a record can always be given back.
+REASON_LINE_BOUND = 4 * MAX_STORED_DECLINE_REASON_CHARS + 2
+REASON_PROMPT = "reason (one line): "
+
+
+def _read_one_reason_line(stream: Any, is_tty: bool) -> str:
+    """One line of reason from ``stream`` (bytes), or a refusal that quotes none of it.
+
+    At a terminal the prompt goes to stderr and nothing is read after the line.
+    From a pipe, the input must end after its one line, so decline waits for that
+    end, before it takes the lock or reads the record. One trailing ``\n`` or
+    ``\r\n`` is dropped; the text then meets the same rules as an argv reason.
+    """
+    if is_tty:
+        _err(REASON_PROMPT, flush=True)
+    line = stream.readline(REASON_LINE_BOUND)
+    if not line:
+        raise SafetyRefusal("decline refused: standard input held no line. Nothing was written.")
+    if len(line) >= REASON_LINE_BOUND and not line.endswith(b"\n"):
+        raise SafetyRefusal(
+            f"decline refused: the line on standard input is too long: it fills {REASON_LINE_BOUND} "
+            "bytes with no line end. Nothing was written."
+        )
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError:
+        raise SafetyRefusal(
+            "decline refused: the line on standard input is not UTF-8. Nothing was written."
+        ) from None
+    if text.endswith("\r\n"):
+        text = text[:-2]
+    elif text.endswith("\n"):
+        text = text[:-1]
+    if not is_tty and stream.read(1):
+        raise SafetyRefusal(
+            "decline refused: standard input holds more than one line; give the reason as one "
+            "line and end the input after it. Nothing was written."
+        )
+    return text
+
+
+def cmd_decline(args: argparse.Namespace) -> int:
+    from .app.promote import DECLINE_RESULT_FIELDS, decline_candidate
+
+    config = _load(args)
+    state = _open_state(config)
+    if args.reason == "-":
+        stdin = sys.stdin
+        reason = _read_one_reason_line(getattr(stdin, "buffer", stdin), bool(stdin.isatty()))
+    else:
+        reason = args.reason
+    # No skill store, writable or not: a decline touches the state directory only.
+    result = decline_candidate(
+        args.candidate_id,
+        reason=reason,
+        operator=args.operator or os.environ.get("USER", ""),
+        state=state,
+        clock=SystemClock(),
+        repair=is_repair_input(reason),
+    )
+    # Every field shown is the result's, which ``decline_candidate`` builds from
+    # the record it checked and fixed strings, never from a receipt: a receipt
+    # is a state file, and a rerun beside one this version did not write is
+    # refused before anything is shown. Measured before (3.11 and 3.13): a rerun
+    # printed the receipt as it stood, a field missing from it a KeyError
+    # traceback (exit 70), a 100,000-character skill id about 101,650
+    # characters, and a field planted in it, in text and in ``--json``.
+    outcome = result["outcome"]
+    cid = result["candidate_id"]
+    label = result["operator"] or "unspecified"
+    decided = f"at {result['declined_at']} by operator:{label}"
+    first = {
+        "declined": f"declined {cid} (it was validated)",
+        "receipt-written": f"already declined {cid} {decided}; its receipt was missing and is "
+        "now written from the record",
+        "already-declined": f"already declined {cid} {decided}; nothing written",
+    }[outcome]
+    lines = [
+        first,
+        f"  skill           {result['skill_id']}",
+        f"  operator        {label} (a label; asi does not check who ran this)",
+        f"  reason          {result['reason']}",
+        *(
+            [f"  masked          {result['masked']} secret-shaped span(s)"]
+            if result["masked"]
+            else []
+        ),
+        f"  receipt         {result['receipt_path']}",
+        "  queue           no longer open: it holds neither the queue nor its skill's slot",
+        "  next run        may propose the same change again; this version does not remember "
+        "declines",
+        "  undo            none in this version",
+    ]
+    _emit({name: result[name] for name in DECLINE_RESULT_FIELDS}, as_json=args.json, lines=lines)
     return 0
 
 
@@ -2241,6 +2354,12 @@ class _EscapingParser(argparse.ArgumentParser):
             )
 
 
+#: The ``--operator`` help apply and decline share: a label, never an identity.
+OPERATOR_HELP = (
+    "operator label to record; defaults to USER when omitted or empty; recorded, not verified"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _EscapingParser(
         prog="asi",
@@ -2326,7 +2445,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_candidates.add_argument(
         "--all",
         action="store_true",
-        help="include closed candidates (applied, rolled-back, gate-failed, blocked-run)",
+        help="include closed candidates (applied, rolled-back, gate-failed, blocked-run, declined)",
     )
     p_candidates.set_defaults(func=cmd_candidates)
 
@@ -2351,13 +2470,33 @@ def build_parser() -> argparse.ArgumentParser:
         dest="i_reviewed_this",
         help="explicit acknowledgement, recorded in the receipt",
     )
-    p_apply.add_argument("--operator", help="who is promoting this")
+    p_apply.add_argument("--operator", help=OPERATOR_HELP)
     p_apply.add_argument("--note", help="free-text note for the receipt")
     p_apply.set_defaults(func=cmd_apply)
 
     p_rollback = add("rollback", "restore a verified backup (no token or acknowledgement)")
     p_rollback.add_argument("candidate_id")
     p_rollback.set_defaults(func=cmd_rollback)
+
+    p_decline = add(
+        "decline", "close a validated candidate on the record, with a reason; writes no skill file"
+    )
+    p_decline.add_argument("candidate_id")
+    p_decline.add_argument(
+        "--reason",
+        required=True,
+        metavar="TEXT|-",
+        help=(
+            "why, in one line of at most 500 characters, or - to read that line from standard "
+            "input; kept in the state directory, masked, never sent to a model. A reason typed "
+            "on the command line can appear in process listings and in your shell history: "
+            "give - for anything you would not want there. A piped reason must end after its "
+            "one line. To finish a decline that stopped before its receipt, give the record's "
+            "decline.reason exactly as stored; it may be longer than 500"
+        ),
+    )
+    p_decline.add_argument("--operator", help=OPERATOR_HELP)
+    p_decline.set_defaults(func=cmd_decline)
 
     p_sched = add(
         "scheduler-template",

@@ -212,6 +212,7 @@ hosted-model option for a private source, are in
 | `set-aside` | as `candidates` | what runs set aside: quarantined, refused and deferred records, newest first, with stage and reason |
 | `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | applies a candidate. Review-gated, see below |
 | `rollback` | a skill file, plus `state/` (candidate status, receipt) | restores a backup and verifies the hash |
+| `decline` | `state/` only (candidate status and decision, receipt) | closes a validated candidate on the record with a one-line reason; writes no skill. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) |
 | `scheduler-template` | nothing | prints a launchd or cron template. Installs nothing |
 | `selftest` | nothing | re-checks the structural safety invariants on the deployed source |
 
@@ -248,6 +249,8 @@ asi apply CAND-... \
 Apply also refuses a candidate that did not pass the gate, refuses a
 non-canonical (mirror) root, refuses a protected skill, and refuses to write
 anything other than `SKILL.md`.
+
+Apply the candidate after its review, or decline it on the record: `asi decline <id> --reason -`.
 
 ## Scheduling
 

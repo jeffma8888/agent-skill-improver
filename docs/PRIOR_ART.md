@@ -135,13 +135,14 @@ Each asi property is stated once, here, with the code that does it.
   "a weak proxy"
   ([correlated evaluators](PRIVACY_AND_THREAT_MODEL.md#correlated-evaluators)).
 - **Apply and rollback.** The daily driver does not import the promotion module
-  and refuses a writable skill store ([`app/daily.py`]). Apply is a separate
-  command, `asi apply`, that refuses while the automation marker is active. Daily
-  sets it only inside its own process; the templates set it for their whole job
-  command (the cron environment line also covers later lines on cronie, Vixie and
-  OpenBSD; BusyBox needs each command's export prefix). Apply needs a validated
-  candidate whose record passes an integrity check and whose gate passed, the
-  candidate's review token, the `--i-reviewed-this` flag, and a
+  and refuses a writable skill store ([`app/daily.py`]). `asi apply` and
+  `asi rollback` are separate commands, and both refuse while the automation
+  marker is active. Daily sets it only inside its own process; the templates set
+  it for their whole job command (the cron environment line also covers later
+  lines on cronie, Vixie and OpenBSD; BusyBox needs each command's export
+  prefix). Apply needs a validated candidate whose record passes an integrity
+  check and whose gate passed, the candidate's review token, the
+  `--i-reviewed-this` flag, and a
   live file whose hash equals the candidate's base hash, unless the live file is
   the candidate's own replacement from an earlier run of this apply that stopped
   before recording it, which apply then records without writing again
@@ -152,8 +153,9 @@ Each asi property is stated once, here, with the code that does it.
   can still apply with a token and acknowledgement; do not schedule apply. Apply
   writes a hash-verified backup and a manifest before it replaces the file, and
   `asi rollback` checks the backup and its manifest before it writes, then reads
-  the restored file back and compares it ([`adapters/skill_fs.py`]). asi has no
-  decline command and no declined status ([`cli.py`], [`domain/candidate.py`]).
+  the restored file back and compares it ([`adapters/skill_fs.py`]). asi records
+  a decline (`asi decline`), with a reason and an operator label it does not
+  check ([`cli.py`], [`domain/candidate.py`]).
 - **Receipts.** Daily receipts record the command-independence check
   ([`app/daily.py`], [`app/receipt.py`]). Apply receipts record the candidate,
   the time, the approval, the write, the gate and an operator string taken from
@@ -316,7 +318,7 @@ person approving that change.
 | [yoheinakajima/babyagi](https://github.com/yoheinakajima/babyagi) | 22,360 | Its own function library: it writes new functions for itself | None described beyond execution logs; generated functions are stored automatically ([README](https://github.com/yoheinakajima/babyagi)) | The README says it is not meant for production use. Open report: hardcoded third-party credentials and DOM XSS in the dashboard ([#615](https://github.com/yoheinakajima/babyagi/issues/615)) | babyagi grows new capability; asi's [candidate write path] replaces a file only if it is named `SKILL.md` |
 | [FoundationAgents/AFlow](https://github.com/FoundationAgents/AFlow) (also in [FoundationAgents/MetaGPT](https://github.com/FoundationAgents/MetaGPT), 71,267 stars for the whole framework) | 633 | Agent workflows represented as code | Monte Carlo tree search with repeated validation runs per round; a fixed 20/80 validation/test split; automatic ([paper, Sec. 4](https://arxiv.org/abs/2410.10762)) | Open question: does the `Test` operator run the benchmark's own unit tests during inference ([#41](https://github.com/FoundationAgents/AFlow/issues/41))? Open report: generated workflow code is imported unsandboxed ([#42](https://github.com/FoundationAgents/AFlow/issues/42)) | AFlow repeats validation and searches a tree; asi does not collect repeated successful trials ([replay and cache]) |
 | [ANative-Lab/EvoAgentX](https://github.com/ANative-Lab/EvoAgentX) | 3,435 | Prompts and multi-agent workflow structure, through several bundled optimisers | Validation then test split; acceptance is automatic within the optimiser | Open reports, not reproduced here: parallel evaluator workers share agent memory across examples ([#273](https://github.com/ANative-Lab/EvoAgentX/issues/273)); MAP-Elites accepts NaN fitness ([#294](https://github.com/ANative-Lab/EvoAgentX/issues/294)); the import sandbox can be bypassed ([#292](https://github.com/ANative-Lab/EvoAgentX/issues/292)) | EvoAgentX offers several optimisers over structure; each asi model call is a separate process with a fresh scratch directory ([per-call scratch]) |
-| [SakanaAI/AI-Scientist](https://github.com/SakanaAI/AI-Scientist) | 14,989 | Research output (experiment code, results, papers), not its own code | A model reviewer calibrated against 500 ICLR 2022 decisions; automatic ([paper, Sec. 4](https://arxiv.org/abs/2408.06292)) | Paper Sec. 8: it attempted to edit code to extend its own time limit, and the code has "minimal direct sandboxing". An open issue says the incidents described in the blog post do not appear in the released logs ([#40](https://github.com/SakanaAI/AI-Scientist/issues/40)) | AI Scientist measured its judge against human decisions; asi has no decline command and no declined status ([apply and rollback]) |
+| [SakanaAI/AI-Scientist](https://github.com/SakanaAI/AI-Scientist) | 14,989 | Research output (experiment code, results, papers), not its own code | A model reviewer calibrated against 500 ICLR 2022 decisions; automatic ([paper, Sec. 4](https://arxiv.org/abs/2408.06292)) | Paper Sec. 8: it attempted to edit code to extend its own time limit, and the code has "minimal direct sandboxing". An open issue says the incidents described in the blog post do not appear in the released logs ([#40](https://github.com/SakanaAI/AI-Scientist/issues/40)) | AI Scientist measured its judge against human decisions; asi records a decline (`asi decline`) but compares none with its judge ([apply and rollback]) |
 | [facebookresearch/HyperAgents](https://github.com/facebookresearch/HyperAgents) | 2,892 | Its own code, including the meta agent that does the improving | A fixed outer loop scores each child on training tasks, with test tasks held back; automatic ([paper, Sec. 6](https://arxiv.org/abs/2603.19461)) | Open report, not reproduced here: a test sample and its label appeared in the meta agent's history ([#39](https://github.com/facebookresearch/HyperAgents/issues/39)) | HyperAgents lets the improver improve itself, and reports gains that transfer across domains; asi's package, with its prompts, is outside the [candidate write path] |
 
 ### Prompt, skill and memory optimizers
@@ -428,11 +430,14 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   reports mean and standard deviation. asi reports no variance or confidence
   interval ([replay and cache]); repeated trials need a harness that runs the
   agent.
-- **PLANNED, not built: a decline step, then judge calibration.** AI Scientist
+- **ADOPTED, partly: a decline step; judge calibration not built.** AI Scientist
   measured its reviewer against 500 human decisions
-  ([paper, Sec. 4](https://arxiv.org/abs/2408.06292)). asi has no decline
-  command and no declined status ([apply and rollback]), so it has no human "no"
-  to compare its judge with.
+  ([paper, Sec. 4](https://arxiv.org/abs/2408.06292)). `asi decline` records an
+  operator's "no" on the candidate record, beside its gate and judge evidence: a
+  one-line reason, masked before it is stored, the time, and an operator label
+  asi does not check ([apply and rollback]). **Not built:** any comparison of
+  those decisions with the judge, any statistic or calibration, and decline
+  learning.
 - **ADOPTED, partly: "tried, did not work" for the next proposal.** GEPA reports
   repeated rejected mutations
   ([#379](https://github.com/gepa-ai/gepa/issues/379), open when checked), but warns

@@ -5,12 +5,13 @@ open candidates, and stands down when ``caps.max_open_candidates`` are open, and
 both said to "review or close" them. Measured before (3.11 and 3.13, a committed
 run with one validated candidate, which ``review`` then showed): the run for the
 next day refused the skill, or stood down, the same way, because a reviewed
-candidate stays ``validated`` and still counts; there is no command that closes
-one. Applying it released the skill, and deleting its record released the
-queue. With ``max_open_candidates = 0`` every run stood down with nothing open,
-saying the same. Both now say that a review leaves a candidate open, and that
-applying it or deleting its record closes it (``RELEASE_ADVICE`` in
-``app/daily.py``); a queue cap of 0 says only raising it resumes.
+candidate stays ``validated`` and still counts. Applying it released the
+skill, and deleting its record released the queue. With
+``max_open_candidates = 0`` every run stood down with nothing open, saying the
+same. Both now say that a review leaves a candidate open, and that applying it
+or declining it (``asi decline``) closes it (``RELEASE_ADVICE`` in
+``app/daily.py``), naming no deletion; a decline releases the skill too; a queue
+cap of 0 says only raising it resumes.
 """
 
 from __future__ import annotations
@@ -32,8 +33,7 @@ DAY, NEXT_DAY, THIRD_DAY = "2026-02-01", "2026-02-02", "2026-02-03"
 OLD = "review or close"
 RELEASE = (
     "a review leaves a candidate open, and one is closed by applying it (`asi apply`) or by "
-    "deleting its record (its <id>.json in the state directory's candidates/; "
-    "`asi candidates` lists the open ones)"
+    "declining it (`asi decline <id> --reason -`; `asi candidates` lists the open ones)"
 )
 
 
@@ -85,7 +85,7 @@ class _Held:
 class TheWordsTests(unittest.TestCase):
     """The phrase and the cap clause, reached through ``app/daily.py``."""
 
-    def test_the_release_advice_names_apply_and_the_record_to_delete(self) -> None:
+    def test_the_release_advice_names_apply_and_decline(self) -> None:
         self.assertEqual(daily.RELEASE_ADVICE, RELEASE)
 
     def test_a_cap_of_one_waits_for_none_and_a_wider_cap_for_fewer(self) -> None:
@@ -129,6 +129,32 @@ class APerSkillCapTests(unittest.TestCase):
         self.assertEqual(rc, 0, said)
         self.assertEqual(records[self.case.cid], "applied")
         self.assertIn(f"CAND-{THIRD_DAY}-01-tdd", records)
+        self.assertNotIn("open candidate(s) already target", said)
+
+
+class ADeclineReleasesItsSkillTests(unittest.TestCase):
+    """``max_open_candidates_per_skill`` 1: review, decline, then another day."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.case = _Held(Path(cls._tmp.name))
+        try:
+            cls.declined = run(cls.case.config, "decline", cls.case.cid, "--reason", "not now")
+        except SystemExit as stop:  # argparse's usage error: an asi with no decline command
+            cls.declined = (stop.code, "usage error: asi has no decline command")
+        cls.after_decline = cls.case.day(NEXT_DAY)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_declining_the_candidate_releases_its_skill(self) -> None:
+        self.assertEqual(self.declined[0], 0, self.declined[1])
+        rc, said, records = self.after_decline
+        self.assertEqual(rc, 0, said)
+        self.assertEqual(records[self.case.cid], "declined")
+        self.assertIn(f"CAND-{NEXT_DAY}-01-tdd", records)
         self.assertNotIn("open candidate(s) already target", said)
 
 
