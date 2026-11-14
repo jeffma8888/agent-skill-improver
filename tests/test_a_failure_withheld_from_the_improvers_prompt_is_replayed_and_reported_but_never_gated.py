@@ -326,7 +326,7 @@ class TurningWithholdingOnIsTheOnlyThingThatChangesBehaviour(_Base):
         self.assertNotIn("unseen", json.loads(as_json.stdout))
 
     def test_a_k_0_receipt_has_no_unseen_key(self):
-        """Off is byte-for-byte off in the receipt: no caps key, no candidate key, no note.
+        """Off leaves no unseen key, caps key or note in the receipt.
 
         Two-sided: the k = 1 receipt of the same fixture names both caps and the count,
         so a check that could never see an unseen key would fail here.
@@ -891,26 +891,37 @@ class TheFrozenV3Record(_Base):
         self.assertEqual(base.read_text(encoding="utf-8"), candidate.patch.new_text)
         self.assertEqual(state.read_candidate(CID).status, "applied")
 
-    def test_a_k_0_review_json_is_byte_identical_to_the_build_before_withholding(self):
-        """Off is byte-for-byte off in `review --json` too, pinned against b07045f.
+    def test_a_k_0_review_json_keeps_the_legacy_review_fields_of_the_build_before_withholding(
+        self,
+    ):
+        """k = 0 adds nothing to the legacy review fields: `review --json` with later
+        keys (`size_change`) set aside is the b07045f output byte for byte.
 
         The length and digest are of the build before withholding reviewing this same
-        record in this same tree. Two-sided: with k = 1 the report is the same one
-        plus `unseen` (not-recorded), so a check that could not see the key fails there.
+        record in this same tree, serialized as `review --json` serializes. Two-sided:
+        with k = 1 the report is the same one plus `unseen` (not-recorded), so a check
+        that could not see the key fails there.
         """
+        from agent_skill_improver.cli import escape_json_for_terminal
+        from agent_skill_improver.jsonio import dumps
+
         run, _, on = self.frozen_run()
         off = run.cli("--json", "review", CID)
         self.assertEqual(off.returncode, 0, off.stderr)
         report = json.loads(off.stdout)
-        self.assertEqual(sorted(report), BEFORE_REVIEW_KEYS)
-        pinned = off.stdout.replace(str(run.tree), "{TREE}").encode("utf-8")
+        self.assertEqual(sorted(report), sorted(BEFORE_REVIEW_KEYS + ["size_change"]))
+        report.pop("size_change")
+        pinned = (
+            escape_json_for_terminal(dumps(report)).replace(str(run.tree), "{TREE}").encode("utf-8")
+        )
         self.assertEqual(
             (len(pinned), hashlib.sha256(pinned).hexdigest()), BEFORE_REVIEW_JSON, off.stdout
         )
         shown_on = run.cli("--json", "review", CID, cfg=on)
         self.assertEqual(shown_on.returncode, 0, shown_on.stderr)
         report_on = json.loads(shown_on.stdout)
-        self.assertEqual(sorted(report_on), sorted(BEFORE_REVIEW_KEYS + ["unseen"]))
+        self.assertEqual(sorted(report_on), sorted(BEFORE_REVIEW_KEYS + ["size_change", "unseen"]))
+        report_on.pop("size_change")
         self.assertEqual(report_on.pop("unseen"), NOT_RECORDED)
         self.assertEqual(report_on, report)
         self.assertNotEqual(shown_on.stdout, off.stdout)

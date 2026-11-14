@@ -542,7 +542,7 @@ REVIEW_HEADERS = {
     "To promote this change, review the diff above, then run:",
     "Nothing has been written to any skill file yet.",
 }
-REVIEW_FIELD_PREFIXES = ("candidate ", "skill ", "file ", "base sha256 ", "gate ")
+REVIEW_FIELD_PREFIXES = ("candidate ", "skill ", "file ", "base sha256 ", "size ", "gate ")
 DIFF_LINE_PREFIXES = ("--- ", "+++ ", "@@ ", "+", "-", " ", "\\")
 
 

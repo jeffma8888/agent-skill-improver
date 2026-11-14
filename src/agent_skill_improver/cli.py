@@ -1413,7 +1413,7 @@ def _unseen_line(report: Mapping[str, Any]) -> str | None:
     cannot say whether withholding was off, did not exist yet, or was dropped
     by a rewrite, so ``review_report`` reports it only when withholding is on
     now; with the default (k = 0) a v3 report has no ``unseen`` key and a v3
-    review is line for line what it was before.
+    review prints no unseen line, as before.
     """
     unseen = report.get("unseen") or {}
     status = unseen.get("status")
@@ -1446,6 +1446,28 @@ def _unseen_line(report: Mapping[str, Any]) -> str | None:
             "the record cannot tell which)"
         )
     return None
+
+
+def _size_lines(report: Mapping[str, Any]) -> list[str]:
+    """The two review lines for the complete SKILL.md text change, never a cost.
+
+    Integers and the tool's own words only, so nothing here needs quoting or
+    masking: the skill id is on the ``skill`` line already. ``review_report``
+    computed the numbers after full integrity with the live base, so a refused
+    review never reaches them. The token figure is an estimate for no
+    particular model; the conversation count is the claims', not a count of use.
+    """
+    size = report["size_change"]
+    base, new, delta = size["base"], size["replacement"], size["delta"]
+    return [
+        f"size          SKILL.md {base['bytes']} -> {new['bytes']} bytes ({delta['bytes']:+d}), "
+        f"{base['words']} -> {new['words']} words ({delta['words']:+d}), "
+        f"{base['lines']} -> {new['lines']} lines ({delta['lines']:+d}), "
+        f"est. {delta['est_tokens']:+d} tokens",
+        f"  full SKILL.md text change; {size['cited_conversations']} conversation(s) cited as "
+        "failure evidence; not a measured cost (token est.: ceil(bytes/4) per text, then "
+        "subtract; no tokenizer, no particular model)",
+    ]
 
 
 def _replayed_case_lines(outcomes: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -1558,6 +1580,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         one_line(f"skill         {report['skill_id']}"),
         one_line(f"file          {report['canonical_path']}"),
         f"base sha256   {report['base_sha256']}",
+        *_size_lines(report),
         f"gate          {'PASS' if report['gate'].get('passed') else 'FAIL'}",
     ]
     for reason in report["gate"].get("reasons", []):

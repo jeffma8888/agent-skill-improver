@@ -454,11 +454,22 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   backfill, operator decline or rollback learning, confidence/repeated-trial
   statistics. The improver prompt still carries no earlier candidates
   ([pipeline]); saved calls do not prove better skills.
-- **PLANNED, not built: the running cost of a changed skill.** SICA ranks
+- **ADOPTED, partly: the running cost of a changed skill.** SICA ranks
   changed agents partly by per-task dollar cost and runtime
   ([paper, Sec. 3](https://arxiv.org/abs/2504.15228)), and gskill reports
-  proposer and agent cost. A longer `SKILL.md` costs tokens in every session
-  that loads it; asi's length caps are not a cost measure ([proposal checks]).
+  proposer and agent cost; asi's length caps are not a cost measure
+  ([proposal checks]). **Built:** before apply, `review` shows a report-only
+  size change of the complete SKILL.md text, base to replacement, in bytes,
+  words, lines and a declared token estimate (ceil(bytes/4) per text, then
+  subtract; no tokenizer, no particular model), and the daily receipt records
+  the same for every candidate with how many of the run's scored conversations
+  had a failure primarily attributed to the skill (rubric-prior-only
+  attribution included; not a count of conversations that used or loaded it).
+  These are properties of the complete SKILL.md text. A harness that injects
+  the complete file exposes this text delta; metadata-only discovery does not.
+  No prompt usage or per-session cost was measured. **Not built:** measured
+  token or prompt usage, a dollar cost, a runtime, ranking, a gate on any of
+  them, or a record of which harness loads the file and in what form.
 - **PLANNED, not built: trigger testing.** Skill-creator tests should-trigger
   and should-not-trigger queries; asi does not test whether a skill is selected
   ([proposal checks]).

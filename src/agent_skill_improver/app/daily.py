@@ -66,6 +66,7 @@ from ..domain.discovery import error_page, merge_pages, passed_over_note, shown_
 from ..domain.failure import FailureCase
 from ..domain.isolation import decide as decide_isolation
 from ..domain.redaction import redact
+from ..domain.skill_size import WINDOW_BASIS, size_change
 from ..domain.rubric import Rubric
 from ..domain.selection import bucket_coverage, bucket_key, select_fair
 from ..domain.skills import (
@@ -814,6 +815,10 @@ def _propose_and_validate(
         while state.candidate_path(candidate_id).exists():
             seq += 1
             candidate_id = f"CAND-{run_day}-{seq:02d}-{safe_name(skill_id)}"
+        # Report-only: how many scored conversations have a failure primarily
+        # attributed to this skill, from its whole pool, before withholding and
+        # before the per-candidate cap. Not a count of conversations that used it.
+        pool_conversations = len({c.conversation_id for c in cases})
         # Report-only withholding ([caps].unseen_withhold = k > 0): split the
         # skill's whole failure pool, before max_failures_per_candidate cuts it,
         # with the seed the validation record stores, so the record alone
@@ -939,6 +944,15 @@ def _propose_and_validate(
             "gate_metrics": validation.decision.metrics,
             "added_lines": candidate.patch.added_lines,
             "removed_lines": candidate.patch.removed_lines,
+            # Every candidate, validated or gate-failed: review shows validated
+            # ones only, so the receipt is where a gate-failed size is recorded.
+            "size_change": {
+                **size_change(base_text, candidate.patch.new_text),
+                "window": {
+                    "conversations_with_a_failure_attributed": pool_conversations,
+                    "basis": WINDOW_BASIS,
+                },
+            },
             "addressed_failure_case_ids": [r.failure_case_id for r in candidate.rubric_failures],
             "validation_notes": list(validation.notes),
             "persisted": not dry_run,

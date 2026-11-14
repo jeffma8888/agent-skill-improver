@@ -205,9 +205,11 @@ same day repeated all of it. A library caller gets the same refusal as a
 ### Withholding failures from the improver's prompt
 
 Off by default (`[caps].unseen_withhold = 0`: no split is made). At k = 0 the
-candidate record (`asi.validation.v3`), the run receipt and `review`, its text and
-its `--json` alike, are byte-identical to a build without the feature. With
-`unseen_withhold = k > 0` and a skill holding at least
+candidate record (`asi.validation.v3`) is byte-identical to a build without the
+feature, and so, as measured when withholding was added, were the run receipt and
+`review`, its text and its `--json` alike; both have since gained the SKILL.md
+size change, and `review --json` with it set aside is still pinned to that build's
+output, byte for byte. With `unseen_withhold = k > 0` and a skill holding at least
 `[caps].unseen_min_failures = N` failures in a run (N defaults to 4; k must be
 smaller than N, or the config is refused), `daily` withholds one or more whole
 conversations from the improver's prompt, taken in an order fixed by a hash of the
@@ -435,8 +437,15 @@ used by the gate)`, with `, n not replayed` after `x/w` when
 a withheld case could not be replayed. A gate-failed candidate's x/w is read here
 and in its record's `validation.unseen` block, since `review` refuses it. With
 withholding off the receipt carries neither this key nor the two `unseen_*` keys
-under `caps` (they are listed only when k > 0), so it is byte-identical to a build
-without the feature.
+under `caps` (they are listed only when k > 0): withholding off adds nothing to
+the receipt.
+
+**`candidates[].size_change`** — the SKILL.md text size change `review` shows, for
+every candidate the run made, gate-failed included, and
+`window.conversations_with_a_failure_attributed`: the number of distinct scored
+conversations with a failure primarily attributed to this skill, including
+rubric-prior-only attribution; not a count of conversations that used or loaded
+it. Read it against `counts.records_scored`. `window.basis` says the same.
 
 **`discovery.is_total`** — whether the source returned everything or a page. When
 `false`, `any_page_truncated_by_limit` is `true` and `honesty_note` says so. Do not
@@ -542,11 +551,13 @@ with the split's reason, and lists each replayed withheld case as an `[unseen]`
 row beside the gate's cases, unchanged ones included; `--json` carries them in
 `unseen`, never in `outcomes`. An `asi.validation.v3` record cannot say whether
 withholding was off, did not exist yet, or was dropped by a rewrite, so with
-withholding on now `review` prints `not recorded` and with it off prints nothing,
-line for line as before. `review --json` carries the `unseen` key for a v4
-record; for a v3 record it carries `{"schema": "asi.validation.v3", "status":
-"not-recorded"}` with withholding on and no `unseen` key with it off, byte for
-byte as before. A defective `unseen` block refuses `review` and `apply` like any
+withholding on now `review` prints `not recorded` and with it off prints no unseen
+line, as before. `review --json` carries the `unseen` key for a v4 record; for a
+v3 record it carries `{"schema": "asi.validation.v3", "status":
+"not-recorded"}` with withholding on and no `unseen` key with it off; with keys
+added since (`size_change`) set aside, that JSON is the one before withholding,
+byte for byte (the legacy projection the tests pin). A defective `unseen` block
+refuses `review` and `apply` like any
 other defect in the record: a withheld set the pool and seed do not recompute, an
 inconsistent edit (a verdict whose derived flags or counts disagree), or a count
 that does not add up. A rubric graded only by withheld cases that changed after
@@ -557,6 +568,21 @@ flags and the block's fixed count) verifies, is shown and applies; the change
 word `review` prints is derived from the verdict pair, not stored, so writing
 one into an outcome is refused as an unknown key; and a v4 record rewritten as
 v3 still verifies and applies, so the count's absence proves nothing.
+
+`review` prints `size` after `base sha256`: the bytes, words and lines of the
+complete SKILL.md text before and after, the signed change, and an estimated token
+change (ceil(bytes/4) per text, then subtract; no tokenizer, no particular model).
+The next line says it is a full SKILL.md text change, how many conversations the
+candidate cites as failure evidence (distinct conversations in the candidate's
+claimed rubric failures), and that it is not a measured cost. These are properties
+of the complete SKILL.md text. A harness that injects the complete file exposes
+this text delta; metadata-only discovery does not. No prompt usage or per-session
+cost was measured; asi records no token usage, price or runtime. Bytes are counted
+with line endings folded to LF, as the hashes are, whatever line endings the
+record holds; a CRLF document is one byte per converted newline larger on disk.
+Files beside SKILL.md are not counted. `review --json` carries the same in
+`size_change`, with the count in `cited_conversations`. A refused review prints no
+size. Nothing gates on it.
 
 The hypothesis, intended change, risks and rollback note are the model's own
 words, kept masked and clipped (each past 4,000 characters, a risk past 2,000,

@@ -63,6 +63,7 @@ from ..domain.candidate import (
 )
 from ..domain.integrity import repropose_advice, verify_full_integrity
 from ..domain.redaction import named_path, quoted_value, quoted_values, why_unreadable
+from ..domain.skill_size import CITED_BASIS, cited_conversations, size_change
 from .. import SCHEMA_VALIDATION_V3
 from ..domain.validation import UNSEEN_SCOPE, ReplayOutcome, ValidationRecord
 from ..errors import (
@@ -165,8 +166,9 @@ def review_report(
 
     ``unseen_withhold`` is the configured ``[caps].unseen_withhold``. It decides
     only whether a v3 record's report carries ``unseen``: with withholding off
-    (the default) a v3 report has no such key, so it is byte for byte what it
-    was before the unseen block existed; with it on, ``unseen`` says the record
+    (the default) a v3 report has no such key, so, with keys added since
+    (``size_change``) set aside, it is byte for byte what it was before the
+    unseen block existed; with it on, ``unseen`` says the record
     cannot tell (``not-recorded``). A v4 record's ``unseen`` is always reported.
 
     Refuses before it prints anything in four cases, checked in this order so
@@ -229,6 +231,14 @@ def review_report(
         "diff": candidate.patch.unified_diff,
         "added_lines": candidate.patch.added_lines,
         "removed_lines": candidate.patch.removed_lines,
+        # Report-only, from the live base and the replacement integrity has just
+        # checked against it: the complete SKILL.md text size change, never a
+        # measured cost, never stored, never gated.
+        "size_change": {
+            **size_change(base_text, candidate.patch.new_text),
+            "cited_conversations": cited_conversations(candidate.rubric_failures),
+            "cited_basis": CITED_BASIS,
+        },
         "gate": gate,
         # The gate's cases only. The unseen cases are in ``unseen``, never here.
         "outcomes": [_outcome_row(o) for o in validation.outcomes],
@@ -243,7 +253,7 @@ def review_report(
         ],
     }
     # Report-only: the gate above never read it. Left out for a v3 record
-    # while withholding is off, so the default report is the one before.
+    # while withholding is off, so the default report adds no unseen key.
     if validation.unseen is not None or unseen_withhold > 0:
         report["unseen"] = _unseen_report(validation)
     report["notes"] = list(candidate.notes)

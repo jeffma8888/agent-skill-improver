@@ -250,6 +250,12 @@ def improver(user: str) -> dict:
             new_text = new_text.replace("\n", "\r\n")
         elif mode == "repeat-no-fix-blank-line":
             new_text += "\n"
+    elif mode == "grow-double":
+        # A fixing replacement at least twice the base's length, one plain
+        # instruction line at a time: the SKILL.md size change review shows.
+        filler = "- Before each step, restate the goal in one plain sentence.\n"
+        while len(new_text) < 2 * len(base):
+            new_text += filler
     return {
         "schema": "asi.proposal.v1",
         "target_skill_id": (

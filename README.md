@@ -208,7 +208,7 @@ hosted-model option for a private source, are in
 | `discover` | `state/` directory modes only (created empty and owner-only if absent) | what the source would ingest, with pagination honesty |
 | `daily` | `state/` only | the whole automated pass. **Dry run by default**; `--commit` persists to `state/`. After a run that detected a skill tree mutation, the next one refuses (exit 5) until a committed run with `--commit --mutation-reviewed 2026-01-01` names that run's day |
 | `candidates` | `state/` directory modes only (created empty and owner-only if absent) | the review queue |
-| `review` | as `candidates` | a candidate's full argument, diff, validation evidence (per replayed case and judgement) and approval token |
+| `review` | as `candidates` | a candidate's full argument, diff, validation evidence (per replayed case and judgement), the SKILL.md full-text size change (bytes, words, lines, est. tokens; not a measured cost) and approval token |
 | `set-aside` | as `candidates` | what runs set aside: quarantined, refused and deferred records, newest first, with stage and reason |
 | `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | applies a candidate. Review-gated, see below |
 | `rollback` | a skill file, plus `state/` (candidate status, receipt) | restores a backup and verifies the hash |
