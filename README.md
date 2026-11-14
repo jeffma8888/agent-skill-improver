@@ -120,6 +120,20 @@ Limits:
 - A judge whose command differs from the improver's may still be the same model.
   asi does not test whether a skill is selected.
 
+Exact-repeat memory is a global FIFO (64 rejected fingerprints / 128 KiB,
+**no age bound**) learning only new committed stable **fully measured replacement
+failures** ([definition and clearing procedure](docs/OPERATIONS.md#exact-rejected-replacements-save-replay-not-a-verdict)).
+Target, holdout or measured unseen INSUFFICIENT never teaches. On the same
+skill/base/failure cases/examiner context it saves replay and judge calls,
+**not initial scoring or the improver call**; changed failures permit a new trial,
+holdout-only changes do not. With c240 unseen withholding on, shown failures are
+re-drawn per dated candidate, so exact repeats are rare and savings apply mainly
+with withholding off. It catches no near-duplicates and gives no prompt advice.
+Damaged, evicted or cleared memory permits replay again. Fully measured means
+complete, not correct: decided wrong scores or biased/tie judgements can teach
+memory; clear it to retest. Unreadable candidate queue records still stand daily
+down.
+
 The full comparison, with a source for each claim, is in [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
 
 ## Install and run, offline, in one minute

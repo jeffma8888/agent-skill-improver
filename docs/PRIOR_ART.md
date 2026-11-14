@@ -178,6 +178,16 @@ Each asi property is stated once, here, with the code that does it.
   excerpts, or text copied from the scorer's rationale or into the proposal's
   other fields.
 
+- **Exact rejected replacements.** A bounded private FIFO remembers only new
+  committed stable fully measured replacement losses, then refuses the same
+  LF-normalized replacement for the same skill, base, claimed failure cases and
+  examiner context before replay/judging. Initial scoring and the improver call
+  still happen. It is a cost policy, not evidence of a better skill; no prompt
+  advice or earlier patch text is shown ([`app/rejections.py`],
+  [`tests/test_a_rejected_replacement_is_not_replayed_again.py`],
+  [`tests/test_rejection_memory_is_bounded_and_only_remembers_completed_failures.py`],
+  [`tests/test_a_damaged_rejection_memory_does_not_block_a_proposal.py`]).
+
 ## The closest precedents
 
 ### anthropics/skills: the skill-creator skill
@@ -423,12 +433,21 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   ([paper, Sec. 4](https://arxiv.org/abs/2408.06292)). asi has no decline
   command and no declined status ([apply and rollback]), so it has no human "no"
   to compare its judge with.
-- **PLANNED, not built: "tried, did not work" for the next proposal.** GEPA can
-  repeat a rejected mutation
-  ([#379](https://github.com/gepa-ai/gepa/issues/379), open), and SICA notes
-  that failed iterations can serve as examples of what not to do
-  ([paper, Sec. 5.1](https://arxiv.org/abs/2504.15228)). The asi improver's
-  prompt carries no earlier candidates ([pipeline]).
+- **ADOPTED, partly: "tried, did not work" for the next proposal.** GEPA reports
+  repeated rejected mutations
+  ([#379](https://github.com/gepa-ai/gepa/issues/379), open when checked), but warns
+  that hard exclusion across minibatches can discard a mutation useful on another
+  sample. asi therefore binds its exact-repeat refusal to the **same claimed
+  failure cases**, as well as skill/base/replacement and examiner context. Its
+  bounded fingerprint-only memory learns new committed stable fully measured
+  replacement losses, never coverage/configuration/error-path lessons; replay and
+  judge are saved, not initial scoring or the improver call ([`app/rejections.py`]).
+  SICA notes that failed iterations may be negative examples while warning of
+  anchoring ([paper, Sec. 5.1](https://arxiv.org/abs/2504.15228)). **Not built:**
+  prompt advice/old patch examples, near-duplicate or semantic search, legacy
+  backfill, operator decline or rollback learning, confidence/repeated-trial
+  statistics. The improver prompt still carries no earlier candidates
+  ([pipeline]); saved calls do not prove better skills.
 - **PLANNED, not built: the running cost of a changed skill.** SICA ranks
   changed agents partly by per-task dollar cost and runtime
   ([paper, Sec. 3](https://arxiv.org/abs/2504.15228)), and gskill reports
@@ -477,3 +496,7 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
 [`cli.py`]: ../src/agent_skill_improver/cli.py
 [`domain/candidate.py`]: ../src/agent_skill_improver/domain/candidate.py
 [`app/receipt.py`]: ../src/agent_skill_improver/app/receipt.py
+[`app/rejections.py`]: ../src/agent_skill_improver/app/rejections.py
+[`tests/test_a_rejected_replacement_is_not_replayed_again.py`]: ../tests/test_a_rejected_replacement_is_not_replayed_again.py
+[`tests/test_rejection_memory_is_bounded_and_only_remembers_completed_failures.py`]: ../tests/test_rejection_memory_is_bounded_and_only_remembers_completed_failures.py
+[`tests/test_a_damaged_rejection_memory_does_not_block_a_proposal.py`]: ../tests/test_a_damaged_rejection_memory_does_not_block_a_proposal.py

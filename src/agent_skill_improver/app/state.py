@@ -65,6 +65,14 @@ from ..domain.candidate import (
 from ..domain.redaction import quoted_value, why_unreadable
 from ..errors import ConfigError, SafetyRefusal, StateUnreadable
 from ..jsonio import FILE_MODE, loads_untrusted, write_json, write_text_atomic
+from .rejections import (
+    MAX_REJECTION_MEMORY_BYTES,
+    REJECTION_MEMORY_NAME,
+    REJECTION_MEMORY_SCHEMA,
+    RejectionEntry,
+    RejectionMemoryRead,
+    parse_rejection_memory,
+)
 
 #: Owner-only on the state root and every directory beneath it.
 DIR_MODE = 0o700
@@ -368,6 +376,50 @@ class StateStore:
             )
         write()
         return path
+
+    def rejection_memory_path(self) -> Path:
+        return self.root / REJECTION_MEMORY_NAME
+
+    def read_rejection_memory(self) -> RejectionMemoryRead:
+        """Read at most the byte limit plus one; never follow an optional foreign leaf."""
+        path = self.rejection_memory_path()
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return RejectionMemoryRead()
+        except OSError:
+            return RejectionMemoryRead(problem="read failed", writable=False)
+        if not stat.S_ISREG(info.st_mode):
+            return RejectionMemoryRead(problem="not a regular file", writable=False)
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(path, flags)
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    return RejectionMemoryRead(problem="not a regular file", writable=False)
+                body = stream.read(MAX_REJECTION_MEMORY_BYTES + 1)
+        except OSError:
+            return RejectionMemoryRead(problem="read failed", writable=False)
+        if len(body) > MAX_REJECTION_MEMORY_BYTES:
+            return RejectionMemoryRead(problem="over byte limit", writable=False)
+        try:
+            raw = loads_untrusted(body.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            return RejectionMemoryRead(problem="invalid JSON", writable=False)
+        return parse_rejection_memory(raw)
+
+    def write_rejection_memory(self, entries: Iterable[RejectionEntry]) -> Path:
+        """Optional publication refuses a newly foreign leaf, even in a dry run."""
+        path = self.rejection_memory_path()
+        payload = {"schema": REJECTION_MEMORY_SCHEMA, "entries": [e.to_dict() for e in entries]}
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(info.st_mode):
+                raise SafetyRefusal("refusing to replace a foreign rejection memory leaf")
+        return self._persist(path, lambda: write_json(path, payload))
 
     # -- layout ----------------------------------------------------------
     def ensure(self) -> None:

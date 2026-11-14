@@ -30,13 +30,25 @@ Env knobs, so a test can force a specific pathology:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sys
+from pathlib import Path
 
 FIX_MARKER = "NEVER run a destructive git command without explicit confirmation"
 FAILING_THREAD = "1700000000002-1"
+REPEAT_MARKER = "- Check the planned edit carefully."
+REPLAY_FAULT_MODES = {
+    "replay-timeout-exit",
+    "replay-holdout-timeout-exit",
+    "replay-baseline-target-partial",
+    "replay-baseline-partial",
+    "replay-candidate-partial",
+    "replay-candidate-target-unresolvable-ref",
+    "replay-candidate-holdout-partial",
+}
 
 # The criteria the fake scorer reports as failing on the seeded bad thread.
 SEEDED_FAILURES = {
@@ -200,6 +212,28 @@ def scorer(user: str, mode: str) -> dict:
                 "confidence": 0.9,
             }
         )
+    replay = "## SKILL TEXT UNDER EVALUATION" in user
+    candidate_arm = REPEAT_MARKER in skill_text
+    target_thread = thread == FAILING_THREAD
+    drop = {"correction-not-repeated", "explicit-directive-followed"}
+    omit = replay and (
+        (mode == "replay-baseline-target-partial" and not candidate_arm and target_thread)
+        or (mode == "replay-baseline-partial" and not candidate_arm)
+        or (mode == "replay-candidate-partial" and candidate_arm)
+        or (mode == "replay-candidate-holdout-partial" and candidate_arm and not target_thread)
+    )
+    if omit:
+        out = [row for row in out if row["criterion_id"] not in drop]
+    if (
+        replay
+        and mode == "replay-candidate-target-unresolvable-ref"
+        and candidate_arm
+        and target_thread
+    ):
+        for row in out:
+            if row["criterion_id"] in drop:
+                for evidence in row["evidence"]:
+                    evidence["position"] += 500
     return {"schema": "asi.scorecard.v1", "conversation_id": thread, "criteria": out}
 
 
@@ -209,6 +243,13 @@ def improver(user: str) -> dict:
     lines.append("")
     lines.append(f"- {FIX_MARKER}. Ask first, every time.")
     new_text = "\n".join(lines) + "\n"
+    mode = os.environ.get("ASI_FAKE_MODE", "")
+    if mode.startswith("repeat-no-fix") or mode in REPLAY_FAULT_MODES:
+        new_text = base + "\n" + REPEAT_MARKER + "\n"
+        if mode == "repeat-no-fix-crlf":
+            new_text = new_text.replace("\n", "\r\n")
+        elif mode == "repeat-no-fix-blank-line":
+            new_text += "\n"
     return {
         "schema": "asi.proposal.v1",
         "target_skill_id": (
@@ -281,6 +322,25 @@ def main() -> int:
 
     role = request.get("role", "")
     user = request.get("user", "")
+
+    # Opt-in test log: metadata and hashes only, never prompt text. Explicit
+    # role env wiring is necessary: the adapter does not inherit arbitrary env.
+    replay = role == "scorer" and "## SKILL TEXT UNDER EVALUATION" in user
+    call_log = os.environ.get("ASI_TEST_ROLE_CALL_LOG", "")
+    if call_log:
+        row = {"role": role, "replay": replay}
+        if role == "improver":
+            row.update(
+                system_sha256=hashlib.sha256(request.get("system", "").encode("utf-8")).hexdigest(),
+                user_sha256=hashlib.sha256(user.encode("utf-8")).hexdigest(),
+            )
+        with Path(call_log).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row) + "\n")
+    if replay and (
+        mode == "replay-timeout-exit"
+        or (mode == "replay-holdout-timeout-exit" and _scored_thread(user) == "1700000000004-1")
+    ):
+        return 69
 
     if mode == "wrong_schema":
         sys.stdout.write(json.dumps({"schema": "totally.wrong.v9", "criteria": []}))

@@ -326,6 +326,13 @@ candidates_gate_passed        proposals with no-regression evidence
 candidates_gate_failed        kept, with reasons, for a human to read
 proposals_refused_by_policy   targets declined by a guard rule (includes the next line)
 skills_with_open_candidate    implicated skills skipped because a candidate of theirs awaits review
+replacements_refused_as_repeats  refused skill attempts matching the same skill, base, replacement,
+                              failure cases and examiner context; also in proposals_refused_by_policy,
+                              not candidates_gate_failed; the improver ran, replay and judge did not
+rejection_memory_ignored       0/1: the whole optional rejection-memory file was ignored; it was left
+                              untouched and repeats may be replayed again
+rejection_memory_write_failed  0/1: optional rejection-memory publication failed; the candidate,
+                              receipt and checkpoint are retained, but repeats may be replayed again
 candidate_records_unreadable  entries under state/candidates/ named *.json that do not read as a
                               candidate (a file that does not parse, or a directory, link or fifo
                               at a name a record could have, `<candidate id>.json`); one or more
@@ -353,6 +360,65 @@ validate stages live in the receipt's `skills` table and the `skills_*` counts,
 because the remedies differ: a quarantined record is a data or normalizer problem,
 a deferred skill is almost always a model problem. Either kind makes the run
 `partial`.
+
+### Exact rejected replacements: save replay, not a verdict
+
+**Fully measured** means every claimed target replayed with FAIL at baseline and
+a decided verdict for the replacement, every required judgement returned, and
+no validation notes. Both verdicts of every gate holdout must be decided too;
+**target, holdout or measured unseen INSUFFICIENT never teaches memory**. Coverage,
+too-few-holdouts, judge-independence and error-path failures do not teach, and
+holdout degradation is never a lesson. Fully measured means complete, not correct:
+a decided wrong scorer verdict, an all-tie judge or a biased decided preference
+can still teach memory. This conservative cost policy does not give unseen
+measurements any gate or apply authority.
+
+A repeat refusal matches the same skill, LF-normalized base and replacement,
+sorted **claimed failure case ids**, and examiner context: all enabled rubric
+byte hashes, gate and prompt policy, exact serialized caps (including active
+unseen settings), scorer/judge command ids and judge independence. Inactive
+unseen settings are omitted from the serialized caps while withholding is off.
+A changed skill, base, replacement, failure set or context permits a new trial;
+a changed holdout/withheld set alone does not. Command ids do not bind environment,
+script contents or model-backend changes, and same-id edited source is not a new
+case identity. Clear memory for a deliberate retest of such changes.
+
+Initial scoring has already been paid and the improver was called **once**;
+replay and judge are not called for that skill, and it uses its proposal slot
+without a retry. This is not a new failure verdict: `skills.<skill>.status=refused`,
+`stage=propose`, and `repeat.of_candidate_id` links the earlier candidate. The
+structured `repeat` also carries identity hashes, `validation_ran=false` and
+role-call counts. No new candidate or approval token is made; the original
+candidate remains gate-failed, with the usual review/apply interlocks unchanged.
+The otherwise normal run stays `ok`, exit 0; skill-tree mutation still blocks it,
+exit 5. The skill-keyed refusal leaf can be overwritten by a later refusal;
+the dated receipt and checkpoint retain the structured account.
+
+**Measured synthetic two-day CLI, CPython 3.11.15 and 3.13.0:** before memory,
+each day made 5 initial scorer + 8 replay scorer + 1 improver + 2 judge calls,
+32 total. After, the first day still made 16 calls and the repeat day made
+5 initial + 1 improver + 0 replay + 0 judge, 22 total: 10 saved (31.25%). These
+are calls, not measured tokens, dollars, latency or better skills. With c240
+unseen withholding on (`[caps].unseen_withhold > 0`), the shown failure set is
+re-drawn per dated candidate, so exact-repeat refusals are rare; savings apply
+mainly with withholding off. No frequency or savings with withholding on was
+measured here.
+
+`<config.state_dir>/rejected-replacements.json` is optional owner-only 0600
+fingerprint state, bounded globally to 64 entries / 128 KiB; it carries hashes,
+skill/candidate labels and a timestamp, not replacement/diff/transcript text.
+Hashes are not anonymization, and labels expose workflow: keep this state private.
+It starts absent, learns only new committed stable fully measured replacement
+losses, and stays absent with no qualifying failure. Dry-run writes no memory;
+`artifacts_withheld_dry_run` includes its prospective write only for a qualifying
+loss, and is still counted before the receipt/checkpoint. The ordinary passing
+fixture's withheld inventory is unchanged. The dry-run receipt note lists
+rejection memory among prospective writes.
+
+FIFO eviction happens only on a new distinct insertion; lookup and duplicate
+insertion do not renew order or timestamps. **There is no age bound**: an entry
+may persist indefinitely. Eviction allows replay again without deleting original
+candidate artifacts. No history backfill or prompt advice is built.
 
 **`candidates[].unseen_failures`** — present only when `[caps].unseen_withhold`
 is on: the split's `status` (`measured`, `too-few`, `one-conversation`,
@@ -592,6 +658,28 @@ another `asi` process is alive and holds it, and the message says which: find it
 before anything else, because two concurrent runs interleaving writes, or a
 promotion landing in the tree a run is reading, is exactly what the lock exists to
 prevent.
+
+**Rejection memory was ignored or could not be written.** Damaged, foreign,
+oversize or unreadable optional memory is named in the receipt notes,
+`rejection_memory_ignored=1`, left untouched and neither consulted nor updated;
+proposals validate normally and repeats may be replayed again. A missing file is
+silent empty history. An optional leaf recheck or publication built-in OSError or
+`SafetyRefusal` is nonfatal: the note says `write failed`,
+`rejection_memory_write_failed=1`, and candidate, receipt and checkpoint are
+retained. `ReadOnlyViolation` is not swallowed (exit 3). This recovery applies
+only to optional memory: unreadable candidate records still stand daily down
+before model calls because the queue cannot be counted.
+
+**Force another trial of an exact replacement.** Wait until no daily run owns the
+state lock, inspect if needed, then delete **only**
+`<config.state_dir>/rejected-replacements.json`, not candidates or the state tree.
+Moving it aside privately, or removing an individual entry while keeping the
+closed file format valid, also permits a retest. The next run sees empty history,
+replays normally, and creates memory only after a new qualifying committed stable
+failure. Deleting an old candidate alone does not clear its fingerprint. A stale
+or forged syntactically valid entry can refuse matching proposals until eviction
+or clearing; parsing/local write integrity is not authentication. Such an entry
+cannot authorize apply or mint a review token.
 
 **The queue is full and runs keep standing down.** That is the backlog guard
 working. A review does not shrink the queue: apply the candidates you want and

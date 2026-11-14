@@ -94,6 +94,7 @@ from ..ports import ModelRunner
 from .lock import RunLock
 from .pipeline import propose_candidate, read_canonical_text, score_and_isolate
 from .receipt import KIND_CONVERSATION, KIND_SKILL, STATUS_STOOD_DOWN, RunReceipt
+from .rejections import RejectionMemoryRun, RepeatedReplacement
 from .state import OPEN_STATUSES, StateStore, safe_name
 from .validate import validate_candidate
 
@@ -579,6 +580,9 @@ def run_daily(
             state.clear_deferred(record_id)
             receipt.record(record_id, status="scored", stage=STAGE_SCORE)
 
+        rejection_run = RejectionMemoryRun.load(
+            state, config=config, rubrics=rubrics, runner=runner, receipt=receipt
+        )
         candidates = _propose_and_validate(
             config,
             runner=runner,
@@ -594,6 +598,7 @@ def run_daily(
             run_day=run_day,
             run_seed=run_seed,
             dry_run=dry_run,
+            rejection_run=rejection_run,
         )
         return _finish(
             receipt,
@@ -605,6 +610,7 @@ def run_daily(
             run_day,
             conversations,
             candidates,
+            rejection_run=rejection_run,
         )
 
 
@@ -715,6 +721,7 @@ def _propose_and_validate(
     run_day: str,
     run_seed: str,
     dry_run: bool,
+    rejection_run: RejectionMemoryRun | None = None,
 ) -> list[Any]:
     by_skill: dict[str, list[FailureCase]] = {}
     unattributed = 0
@@ -838,6 +845,8 @@ def _propose_and_validate(
             base_text = read_canonical_text(
                 skill_store.read_text, Path(candidate.target.canonical_path), skill_id=skill_id
             )
+            if rejection_run is not None:
+                rejection_run.refuse_if_repeated(candidate, base_text=base_text)
         except SafetyRefusal as exc:
             # A deliberate policy refusal is NOT a defect, and it must not land in
             # the quarantine count. A counter that sums "this record is broken" with
@@ -848,6 +857,8 @@ def _propose_and_validate(
             receipt.record(
                 skill_id, status="refused", stage=STAGE_PROPOSE, reason=str(exc), kind=KIND_SKILL
             )
+            if rejection_run is not None and isinstance(exc, RepeatedReplacement):
+                rejection_run.record_repeat(receipt, skill_id, exc)
             continue
         except RecordDefect as exc:
             state.quarantine(skill_id, stage=STAGE_PROPOSE, reason=str(exc))
@@ -957,6 +968,10 @@ def _propose_and_validate(
         # The store withholds this in a dry run and counts it among the writes a
         # committed run would have made.
         state.write_candidate(candidate)
+        if rejection_run is not None:
+            rejection_run.stage_candidate(
+                candidate, base_text=base_text, rubrics=rubrics, receipt=receipt
+            )
         produced.append(entry)
     return produced
 
@@ -1132,6 +1147,8 @@ def _finish(
     run_day: str,
     conversations: Mapping[str, NormalizedConversation],
     candidates: Sequence[dict[str, Any]],
+    *,
+    rejection_run: RejectionMemoryRun | None = None,
 ) -> RunReceipt:
     # The tree is compared entry by entry, not digest to digest, so the receipt
     # can name each document that differs and say what was seen: a content hash
@@ -1154,6 +1171,8 @@ def _finish(
     receipt.counts["open_candidates_after"] = len(state.open_candidates())
     # Taken before the receipt and the day checkpoint are handed to the store, so
     # those two withheld writes are not in this count; the receipt says so.
+    if rejection_run is not None:
+        rejection_run.publish_if_stable(state, receipt=receipt, mutation_detected=mutation_detected)
     receipt.counts["artifacts_withheld_dry_run"] = len(state.withheld_writes)
     receipt.counts["state_modes_repaired"] = len(state.repaired_paths)
     if state.repaired_paths:
@@ -1168,7 +1187,8 @@ def _finish(
         receipt.note(
             f"dry run: {len(state.withheld_writes)} state write(s) were withheld (conversations, "
             "scorecards, failure cases, quarantine/refusal/deferral records and their removals, "
-            "candidates), and the receipt and day checkpoint that follow are withheld too. "
+            "candidates and rejection memory), and the receipt and day checkpoint that follow "
+            "are withheld too. "
             "Beyond the layout, its README and the lock, no content under state/ changed; "
             "the only change a dry run makes to existing state is to reset a drifted mode "
             "to owner-only. Re-run with --commit."
