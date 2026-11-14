@@ -10,8 +10,8 @@ Storing a derived value next to its input creates a way for the two to disagree,
 and the disagreement is silent unless somebody recomputes. That is not
 hypothetical: the approval token is derived from the *stored* patch hash, so
 editing ``patch.new_text`` while leaving ``patch.new_text_sha256`` alone left the
-token matching and the reviewed bytes replaced. The token then authorised text no
-human had seen, which is the one property the whole human gate exists to provide.
+token matching and the reviewed bytes replaced. The token then authorised bytes
+that differed from those shown for review, defeating the review interlock.
 
 So every derived field is recomputed from its inputs before a candidate is
 reviewed, applied or validated, and any disagreement is a refusal rather than a
@@ -175,7 +175,7 @@ def derived_field_mismatches(candidate: Candidate, *, base_text: str | None = No
     if patch.unified_diff != expected_patch.unified_diff:
         problems.append(
             "patch.unified_diff is not the diff between the live base text and new_text: the "
-            "diff a human reviewed does not describe this change"
+            "diff shown for review does not describe this change"
         )
     if patch.added_lines != expected_patch.added_lines:
         problems.append(

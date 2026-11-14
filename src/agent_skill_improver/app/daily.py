@@ -238,7 +238,9 @@ def run_daily(
     if not getattr(skill_store, "read_only", False):
         raise SafetyRefusal(
             "the daily driver refuses a writable skill store. Automation may propose and "
-            "validate; only `asi apply` may write, and only with a human approval token."
+            "validate; only `asi apply` may write, with an approval token and acknowledgement, "
+            "a matching base hash and no active automation marker. These are review interlocks, "
+            "not caller authentication."
         )
     started = clock.now()
     # The day names the checkpoint, the receipt and every candidate, and is

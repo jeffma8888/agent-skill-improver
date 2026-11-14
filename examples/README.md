@@ -18,7 +18,9 @@ asi --config config/example.config.toml daily
 
 `daily` is a dry run by default: it reports what it would do and persists
 nothing. Add `--commit` to write candidates into `state/`. Neither form can
-edit a skill file; only `asi apply` can, and only with a human approval token.
+edit a skill file. `asi apply` writes a candidate with review interlocks, not
+caller authentication; `asi rollback` restores a verified backup and refuses
+under the automation marker, with no approval token or acknowledgement required.
 
 ## What is here
 

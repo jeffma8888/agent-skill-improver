@@ -283,7 +283,7 @@ def apply_candidate(
             earlier = _earlier_write_of(candidate, live_sha, skill_store, state)
             if earlier is not None:
                 # An earlier run of this apply wrote the skill and stopped before
-                # it recorded the write. The human gate holds as for a first run;
+                # it recorded the write. The review interlocks hold as for a first run;
                 # the base the diff is checked against is no longer the live
                 # text, and that run checked it before it wrote.
                 approval.verify(expected_token=candidate.required_approval_token)
@@ -358,7 +358,7 @@ def apply_candidate(
             expected_sha256=candidate.target.base_sha256,
             backup_dir=lambda: state.backup_dir_for(candidate.id, stamp),
             skill_id=candidate.target.skill_id,
-            actor=f"human:{operator or 'unspecified'}",
+            actor=f"operator:{operator or 'unspecified'}",
             candidate_id=candidate.id,
         )
         return _record_apply(
@@ -395,7 +395,7 @@ def _record_apply(
         validation=candidate.validation,
         notes=candidate.notes
         + (
-            f"applied {iso(clock.now())} by human:{operator or 'unspecified'}; "
+            f"applied {iso(clock.now())} by operator:{operator or 'unspecified'}; "
             + (FINISHING_NOTE if finishing else "")
             + f"rollback: {receipt.rollback_command}",
         ),
@@ -559,7 +559,10 @@ def rollback_candidate(
     state: StateStore,
     clock: Clock,
 ) -> dict[str, Any]:
-    """Restore the file this candidate overwrote, from its verified backup. Review-gated."""
+    """Restore the file this candidate overwrote, from its verified backup.
+
+    Refused under the automation marker; requires no approval token or acknowledgement.
+    """
     if automation_active():
         raise AutomationRefused("rollback refused: automation marker is set. " + ROLLBACK_ENV_HINT)
     # The manifest is chosen under the lock too: chosen before it, a rollback

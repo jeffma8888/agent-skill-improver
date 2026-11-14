@@ -1008,7 +1008,7 @@ class FilesystemSkillStore:
         expected_sha256: str,
         backup_dir: Path | Callable[[], Path],
         skill_id: str = "",
-        actor: str = "human",
+        actor: str = "unspecified",
         candidate_id: str = "",
     ) -> WriteReceipt:
         """The single method in this package that modifies a skill file.

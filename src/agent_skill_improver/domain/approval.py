@@ -1,4 +1,4 @@
-"""Human approval interlock.
+"""Review interlocks for promotion, not caller authentication.
 
 Be precise about what this is and is not.
 

@@ -399,10 +399,10 @@ def evaluate_gate(
     judge_independent: bool = True,
     target_refs: Sequence[TargetCaseRef] = (),
 ) -> GateDecision:
-    """Decide whether a candidate may be *offered* for human approval.
+    """Decide whether a candidate may be *offered* for review.
 
-    Passing this gate is necessary and not sufficient: a human still has to
-    approve, and apply re-checks the base hash at write time.
+    Passing this gate is necessary and not sufficient: apply still requires
+    review interlocks, not caller authentication, and re-checks the base hash at write time.
 
     ``judge_independent`` is passed in rather than inferred, because independence
     is a property of the *configuration* (which command runs which role) and the

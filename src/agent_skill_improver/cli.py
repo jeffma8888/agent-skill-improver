@@ -1875,7 +1875,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         (
             "daily does not import the promotion path",
             not _module_imported(daily_src, "promote"),
-            "app/daily.py must not import app.promote; promotion is a human-only path",
+            "app/daily.py must not import app.promote; promotion is a separate review-interlocked path",
         )
     )
     checks.append(

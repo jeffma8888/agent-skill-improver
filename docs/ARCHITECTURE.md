@@ -38,7 +38,7 @@ filesystem, a subprocess or a clock.
     ▼
   app/                       use cases: sequence the stages, write state, decide
     │   daily.py             the automated pass (never promotes)
-    │   promote.py           the human pass (the only skill writer)
+    │   promote.py           the separate write path (apply/rollback)
     │   pipeline.py          score → isolate → propose
     │   validate.py          baseline vs candidate replay, blind judge, gate
     │   prompts.py           prompt assembly, untrusted content fenced
@@ -377,7 +377,7 @@ Nothing is deleted; a human can still read why. `STATUS_BLOCKED_RUN` is the othe
 closed-by-automation status: the run that produced the candidate saw the skill
 tree change under it.
 
-## What separates automated from human
+## What separates the daily pass from the write path
 
 The interlock is structural, not a flag:
 
@@ -402,8 +402,9 @@ The interlock is structural, not a flag:
   Vixie and OpenBSD; BusyBox needs the export prefix on each command. Apply does
   not authenticate its caller: a separate unmarked process, including a job
   written without the marker, can still apply. Do not schedule apply.
-- The only filesystem write path for a skill is `skill_fs.write_canonical`.
-  After the read-only check, and before the path is resolved or a byte is read,
+- Skill writes use `skill_fs.write_canonical` for apply and `skill_fs.rollback`
+  for restoring a verified backup. For apply, after the read-only check, and before
+  the path is resolved or a byte is read,
   `_assert_no_link_below_root` judges every component beneath the configured
   root with `lstat` and refuses a target reached through a symbolic link: a link
   planted at a skill with a same-text twin would pass the hash check and land the
@@ -488,6 +489,11 @@ work made after the apply is a second incident rather than a fix. A symbolic
 link planted at the recorded path is refused before any hash is read, and the
 restore itself is an atomic replace of the directory entry, never a copy through
 whatever sits there.
+
+Apply records `actor` as `operator:<operator>` in the backup manifest; a direct
+library write without an actor records `unspecified`. Records written before
+this wording change carry `human:<operator>` (or the default `human`), and asi
+never reads the `actor` field.
 
 The manifest is held to the candidate. It is a plain file under the state tree,
 and every check above is made against the manifest's own values, so

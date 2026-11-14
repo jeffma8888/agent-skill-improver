@@ -169,7 +169,7 @@ class SkillWriteFailed(SafetyRefusal):
 
 
 class ApprovalRequired(SafetyRefusal):
-    """Promotion attempted without a valid human approval token."""
+    """The approval token is missing or mismatched, acknowledgement is missing, or origin is not CLI."""
 
 
 class BlockedRunUnreviewed(SafetyRefusal):

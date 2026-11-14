@@ -19,7 +19,7 @@ regressions, no holdout degradations, at least one holdout, and a blind judge
 preference for the candidate in at least half of the decided cases.
 
 ```
-                         AUTOMATED (safe to schedule)                    HUMAN ONLY
+                         AUTOMATED (safe to schedule)                    UNSCHEDULED (see below)
   ┌────────┐   ┌──────────┐   ┌───────┐   ┌─────────┐   ┌─────────┐   │  ┌───────┐
   │discover│──▶│ normalize│──▶│ score │──▶│ isolate │──▶│ propose │──▶│  │ apply │
   └────────┘   └──────────┘   └───────┘   └─────────┘   └─────────┘   │  └───────┘
@@ -210,7 +210,7 @@ hosted-model option for a private source, are in
 | `candidates` | `state/` directory modes only (created empty and owner-only if absent) | the review queue |
 | `review` | as `candidates` | a candidate's full argument, diff, validation evidence (per replayed case and judgement) and approval token |
 | `set-aside` | as `candidates` | what runs set aside: quarantined, refused and deferred records, newest first, with stage and reason |
-| `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | the only skill writer. Review-gated, see below |
+| `apply` | **a skill file**, plus `state/` (backup, candidate status, receipt) | applies a candidate. Review-gated, see below |
 | `rollback` | a skill file, plus `state/` (candidate status, receipt) | restores a backup and verifies the hash |
 | `scheduler-template` | nothing | prints a launchd or cron template. Installs nothing |
 | `selftest` | nothing | re-checks the structural safety invariants on the deployed source |
