@@ -669,11 +669,15 @@ promotion landing in the tree a run is reading, is exactly what the lock exists 
 prevent.
 
 **Rejection memory was ignored or could not be written.** Damaged, foreign,
-oversize or unreadable optional memory is named in the receipt notes,
-`rejection_memory_ignored=1`, left untouched and neither consulted nor updated;
-proposals validate normally and repeats may be replayed again. A missing file is
-silent empty history. An optional leaf recheck or publication built-in OSError or
-`SafetyRefusal` is nonfatal: the note says `write failed`,
+oversize or unreadable optional memory (any read error, such as an ownership or
+ACL permission error on a file already at 0600; a plain `chmod 000` is reset to
+0600 by `StateStore.ensure` and then used; a file at another mode that asi
+cannot repair instead stops the run with a state-permission refusal) is named
+in the receipt notes, `rejection_memory_ignored=1`, left untouched and neither
+consulted nor updated; proposals validate normally and repeats may be replayed
+again. A missing file is silent empty history. An optional leaf recheck or
+publication built-in OSError or `SafetyRefusal` is nonfatal: the note says
+`write failed`,
 `rejection_memory_write_failed=1`, and candidate, receipt and checkpoint are
 retained. `ReadOnlyViolation` is not swallowed (exit 3). This recovery applies
 only to optional memory: unreadable candidate records still stand daily down

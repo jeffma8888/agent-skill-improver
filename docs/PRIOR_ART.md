@@ -443,7 +443,8 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
   replacement losses, never coverage/configuration/error-path lessons; replay and
   judge are saved, not initial scoring or the improver call ([`app/rejections.py`]).
   SICA notes that failed iterations may be negative examples while warning of
-  anchoring ([paper, Sec. 5.1](https://arxiv.org/abs/2504.15228)). **Not built:**
+  path dependency: initial feature ideas often heavily influence later variations
+  on the same theme ([paper, Sec. 5.1](https://arxiv.org/abs/2504.15228)). **Not built:**
   prompt advice/old patch examples, near-duplicate or semantic search, legacy
   backfill, operator decline or rollback learning, confidence/repeated-trial
   statistics. The improver prompt still carries no earlier candidates

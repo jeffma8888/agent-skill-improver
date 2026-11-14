@@ -28,6 +28,14 @@ from tests.support import FIXTURE_EXPORTS, build_env, run_cli
 DAY1 = "2026-02-01"
 DAY2 = "2026-02-02"
 SEED = "c242-fixed-seed"
+# Per-two-day call count measured before c242 on Python 3.13.0 and 3.11.15.
+BEFORE_C242_TOTAL_CALLS = 32
+BEFORE_C242_PER_DAY_CALLS = {
+    "initial_scorer": 5,
+    "replay_scorer": 8,
+    "improver": 1,
+    "judge": 2,
+}
 
 
 def wire_modes(config: Path, log: Path, *, mode: str = "repeat-no-fix") -> None:
@@ -222,20 +230,21 @@ class ARejectedReplacementIsNotReplayedAgainTests(unittest.TestCase):
             self.assertIn("gate-failed", result.stdout + result.stderr)
         nonexistent = run_cli(["--config", str(self.config), "review", "CAND-2026-02-02-01-tdd"])
         self.assertEqual(nonexistent.returncode, 4, nonexistent.stdout + nonexistent.stderr)
+        self.assertEqual(2 * sum(BEFORE_C242_PER_DAY_CALLS.values()), BEFORE_C242_TOTAL_CALLS)
+        after_total = sum(sum(role_counts(calls).values()) for calls in (calls1, calls2))
+        saved_calls = BEFORE_C242_TOTAL_CALLS - after_total
+        saved_fraction = saved_calls / BEFORE_C242_TOTAL_CALLS
+        self.assertEqual(saved_calls, 10)
+        self.assertEqual(saved_fraction, 0.3125)
         report = {
             "python": sys.version.split()[0],
             "days": [DAY1, DAY2],
-            "per_day_calls": expected,
-            "before_per_day_calls": {
-                "initial_scorer": 5,
-                "replay_scorer": 8,
-                "improver": 1,
-                "judge": 2,
-            },
-            "before_total": 32,
-            "after_total": sum(sum(row.values()) for row in expected),
-            "saved_calls": 10,
-            "saved_fraction": 0.3125,
+            "per_day_calls": [role_counts(calls1), role_counts(calls2)],
+            "before_per_day_calls": BEFORE_C242_PER_DAY_CALLS,
+            "before_total": BEFORE_C242_TOTAL_CALLS,
+            "after_total": after_total,
+            "saved_calls": saved_calls,
+            "saved_fraction": saved_fraction,
             "day2_exit": 0,
             "day2_status": second["status"],
             "repeat": repeat,

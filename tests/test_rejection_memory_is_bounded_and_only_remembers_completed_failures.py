@@ -219,6 +219,8 @@ class RejectionMemoryIsBoundedAndOnlyRemembersCompletedFailuresTests(_MemoryHarn
         real_validate = daily.validate_candidate
         scenarios = {
             "coverage-only": False,
+            "mixed-coverage-and-loss": False,
+            "mixed-judgecount-and-loss": False,
             "holdout-size-only": False,
             "independence-only": False,
             "degradation-only": False,
@@ -253,6 +255,8 @@ class RejectionMemoryIsBoundedAndOnlyRemembersCompletedFailuresTests(_MemoryHarn
                         )
                     if "size" in name:
                         outcomes = [o for o in outcomes if o.case.kind == CASE_TARGET]
+                    if "judgecount" in name:
+                        changes["judgements"] = tuple(result.judgements[1:])
                     if "independence" in name:
                         changes["judge_command_id"] = result.improver_command_id
                     if "degradation" in name or "regression" in name:
@@ -286,8 +290,20 @@ class RejectionMemoryIsBoundedAndOnlyRemembersCompletedFailuresTests(_MemoryHarn
                     )
 
                 receipt, _ = self.invoke(stack=configure)
-                self.assertEqual(self.memory.exists(), eligible, receipt)
                 result = seen[0]
+                metrics, policy = result.decision.metrics, result.decision.policy
+                if name.startswith("mixed-"):
+                    self.assertLess(metrics["fixes"], policy.min_fixes)
+                if "coverage" in name:
+                    self.assertLess(metrics["target_refs_replayed"], metrics["target_refs_claimed"])
+                    self.assertEqual(metrics["judgements"], metrics["target_cases"])
+                if "judgecount" in name:
+                    self.assertEqual(
+                        metrics["target_refs_replayed"], metrics["target_refs_claimed"]
+                    )
+                    self.assertGreater(metrics["target_refs_claimed"], 0)
+                    self.assertNotEqual(metrics["judgements"], metrics["target_cases"])
+                self.assertEqual(self.memory.exists(), eligible, receipt)
                 candidate = Candidate.from_dict(json.loads(self.candidates()[0].read_text()))
                 cfg = load_config(self.config)
                 verify_full_integrity(
