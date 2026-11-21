@@ -299,6 +299,36 @@ whose copy discovery has since passed over is refused by `review`, `apply` and
 `rollback` with that entry and discovery's reason, not only as a target in no
 configured root.
 
+Each listed document is read through handles pinned from its root, one component
+at a time, and judged on the open handle. What is refused is the kind of entry
+the walk meets, not every replacement: a symlink or a non-directory on the path
+the walk opens (with links followed, the path the one resolve gave), a document
+that is not a regular file (a fifo, a socket, a directory, …), and, while links
+are not followed, a link anywhere on its path below the root. Put there after
+the listing and before the walk opens that component, such an entry is refused,
+so the document is passed over, never read through or waited on, with one of
+these reasons: `a symlink when it was read; this store does not follow links`,
+`not a regular file when it was read (<kind>)`, or `below <directory>, which was
+a symlink or not a directory when the document was read`; with links followed,
+`a symlink that resolved outside its root when it was read`, `a symlink that
+resolved to its root or to an entry directly in it when it was read` (it has no
+skill directory) or `a path that could not be resolved when it was read (…)`;
+and, on a platform that cannot open a file relative to a directory handle, every
+document is passed over with `not read: this platform cannot open a document
+through a directory handle pinned to its root`. Two substitutions are read, not
+refused, and in both the bytes come from inside the root: an in-root regular
+file renamed over the document before its open is read as that document; and,
+with links followed, a link put in place before the one resolve that resolves
+inside the root is read at its resolved target, as the skill whose directory
+holds that target (a link to `tdd/notes.md` is `tdd`, one to
+`code-review/SKILL.md` is `code-review`). Once a component's handle is open, a
+later rename or swap of that path does not change what is read: the bytes come
+through the handle pinned inside the root. With links followed, the listed link
+is resolved once: one re-pointed after that is read from the in-root file it
+named then, never from the file it names afterwards. Containment is by path
+below the root, not by inode: a regular file there that is also hard-linked
+elsewhere is read.
+
 **`counts`** — the honest arithmetic:
 
 ```

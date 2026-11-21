@@ -75,6 +75,12 @@ PINNED_IO_SUPPORTED = (
     and os.unlink in os.supports_dir_fd
 )
 
+#: Discovery only reads, so it needs only ``os.open`` with ``dir_fd``: it reads
+#: each listed document through handles opened from its root down. Where that
+#: is missing (and so ``PINNED_IO_SUPPORTED`` is false too), nothing is read
+#: and every listed document is passed over with the reason.
+PINNED_READ_SUPPORTED = os.open in os.supports_dir_fd
+
 DEFAULT_MAX_DEPTH = 3
 
 
@@ -207,6 +213,204 @@ def _read_regular_file(path: Path) -> bytes | None:
         return b"".join(chunks)
     finally:
         os.close(fd)
+
+
+class _PinnedWalkStopped(Exception):
+    """A directory below a root that could not be opened on the pinned walk."""
+
+    def __init__(self, walked: Path, cause: OSError) -> None:
+        super().__init__(str(walked))
+        self.walked = walked
+        self.cause = cause
+
+
+def _open_below_root(root_form: Path, parts: Sequence[str]) -> int:
+    """A handle on ``root_form / parts``, opened from the root down.
+
+    The root is opened as it is (it may legitimately be a link); every
+    component below it is opened relative to the previous handle with
+    ``O_DIRECTORY | O_NOFOLLOW``, so a link on the way is ``ELOOP`` (or
+    ``ENOTDIR``) rather than a redirection, and a directory swapped for a link
+    after a component was opened is simply not what the handle refers to. An
+    ``OSError`` opening the root itself propagates; one below it is raised as
+    ``_PinnedWalkStopped`` with the directory being opened, the root joined to
+    every component so far. The caller closes the handle. The write path
+    (``_open_parent_pinned``) and discovery (``_read_discovered``) both walk
+    through here.
+    """
+    fd = os.open(str(root_form), os.O_RDONLY | os.O_DIRECTORY)
+    walked = root_form
+    try:
+        for part in parts:
+            walked = walked / part
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                raise _PinnedWalkStopped(walked, exc) from exc
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_leaf(parent_fd: int, leaf: str) -> int:
+    """``leaf`` in the pinned directory, opened without following a link or waiting.
+
+    ``O_NOFOLLOW`` makes a link at the name ``ELOOP``; ``O_NONBLOCK`` makes a
+    fifo open at once instead of waiting for a writer. The ``OSError`` of a
+    refused open propagates; the caller judges and closes the handle.
+    """
+    return os.open(
+        leaf, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd
+    )
+
+
+def _read_open_regular(fd: int) -> tuple[bytes | None, int]:
+    """The bytes and ``st_mode`` of an open handle; bytes ``None`` unless it is a regular file.
+
+    Judged by ``fstat`` on the handle, so what is judged is what is read. The
+    handle is closed whatever happens; an ``OSError`` of the ``fstat`` or the
+    read propagates.
+    """
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            return None, mode
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), mode
+    finally:
+        os.close(fd)
+
+
+def _unresolved(exc: BaseException) -> str:
+    """Why a path could not be resolved, without the path the error carries.
+
+    Python 3.11's ``Path.resolve`` raises ``RuntimeError`` for a link loop
+    (3.13's does not); an ``OSError`` is named by the system's words.
+    """
+    if isinstance(exc, RuntimeError):
+        return "a symlink loop"
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    return type(exc).__name__
+
+
+def _read_discovered(path: Path, base: Path, *, follow: bool) -> tuple[bytes, Path] | str:
+    """A listed document's bytes and its path below ``base``, or why it is passed over.
+
+    The walk judged ``path`` by name; this reads it through handles pinned from
+    ``base`` down (``_open_below_root``, the write path's own walk): each
+    directory below the root with ``O_DIRECTORY | O_NOFOLLOW`` relative to the
+    one before, the document with ``O_NOFOLLOW | O_NONBLOCK`` relative to its
+    directory, and ``fstat`` ``S_ISREG`` on that handle. No path is resolved or
+    stat'ed by name after the walk starts, so a link, a loop or a non-directory
+    put on the walked path after the listing (with links followed, after the
+    resolve that gives that path), before the walk opens that component,
+    refuses the open (``ELOOP``/``ENOTDIR``) rather than redirecting it, and a
+    leaf that is not a regular file is refused, a fifo judged without waiting.
+    What is refused is a kind of entry, not a replacement: an in-root regular
+    file renamed over the document before its open is read, and its bytes come
+    from inside the root. Once a component's handle is open, a later rename or
+    swap of that path does not change what is read: the bytes come through the
+    handle pinned inside the root. While links are not followed the path below
+    the root is the one the walk listed, and a link anywhere on it below the
+    root is refused; while they are, the listed link is resolved once, the
+    result must lie under ``base`` and be at least as deep as
+    ``<skill>/SKILL.md`` (a link resolved to the root itself or to an entry
+    directly in it has no skill directory), and that resolved path is walked
+    the same way, so a link or a non-directory put on it after the resolve,
+    before the walk opens that component, refuses too. A link put in place
+    before the resolve that resolves inside the root is read at its target, as
+    the skill whose directory holds that target. The listed link itself is not
+    checked again: one re-pointed after the resolve is read from the in-root
+    file it named then, never from the file it names afterwards. Containment is
+    by path below ``base``, not by inode: a regular file there that is also
+    hard-linked elsewhere is read. Every refusal is returned as the reason,
+    never raised. Where ``PINNED_READ_SUPPORTED`` is false nothing is read:
+    each document is passed over.
+    """
+    if follow:
+        try:
+            rel = path.resolve().relative_to(base)
+        except ValueError:
+            return "a symlink that resolved outside its root when it was read"
+        except (OSError, RuntimeError) as exc:
+            return f"a path that could not be resolved when it was read ({_unresolved(exc)})"
+    else:
+        try:
+            rel = path.relative_to(base)
+        except ValueError:
+            return "a document listed outside its root"
+    if len(rel.parts) < 2:
+        # Shallower than ``<skill>/SKILL.md``: no leaf below a directory to
+        # open (``rel.parts[-1]``) and no skill directory to name it by
+        # (``_snapshot`` takes ``rel.parts[-2]``). Followed, this is a listed
+        # document replaced (or a listed link re-pointed) after the listing
+        # by a link to the root itself or to an entry directly in it.
+        # Unfollowed, ``rel`` is the listed path, and the listing passes a
+        # shallower one over (``_iter_skill_files``), so this is defense in
+        # depth. Measured before this guard, with links followed: an
+        # IndexError, and ``skills``, ``doctor``, ``daily``, ``review``,
+        # ``apply`` and ``rollback`` all exit 70.
+        if follow:
+            return (
+                "a symlink that resolved to its root or to an entry directly in it "
+                "when it was read"
+            )
+        return "a document listed at its root or directly in it, not in a skill directory"
+    if not PINNED_READ_SUPPORTED:
+        return (
+            "not read: this platform cannot open a document through a directory handle "
+            "pinned to its root"
+        )
+    try:
+        parent_fd = _open_below_root(base, rel.parts[:-1])
+    except _PinnedWalkStopped as stopped:
+        if stopped.cause.errno in (errno.ELOOP, errno.ENOTDIR):
+            return (
+                f"below {named_path(stopped.walked)}, which was a symlink or not a directory "
+                "when the document was read"
+            )
+        return f"a document this process cannot read ({stopped.cause.strerror or stopped.cause})"
+    except OSError as exc:
+        return f"a document this process cannot read ({exc.strerror or exc})"
+    try:
+        fd = _open_leaf(parent_fd, rel.parts[-1])
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            if follow:
+                return "a symlink when it was read, after its link was resolved inside the root"
+            return "a symlink when it was read; this store does not follow links"
+        return f"a document this process cannot read ({exc.strerror or exc})"
+    finally:
+        os.close(parent_fd)
+    try:
+        raw, mode = _read_open_regular(fd)
+    except OSError as exc:
+        return f"a document this process cannot read ({exc.strerror or exc})"
+    if raw is None:
+        return f"not a regular file when it was read ({_mode_kind(mode)})"
+    return raw, rel
+
+
+def _mode_kind(mode: int) -> str:
+    """What a non-regular handle is, from its ``fstat`` mode, in ``_entry_kind``'s words."""
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a fifo"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+        return "a device"
+    return "neither a file nor a directory"
 
 
 def _entry_kind(path: Path) -> str:
@@ -805,19 +1009,37 @@ class FilesystemSkillStore:
                 # propose stage reads the canonical copy again later. Measured
                 # before: one unreadable SKILL.md ended `doctor` and `daily`
                 # alike with exit 70 and a PermissionError traceback from here.
-                try:
-                    raw = skill_file.read_bytes()
-                except OSError as exc:
+                # Read through handles pinned from the root down
+                # (``_read_discovered``): a document swapped after the listing
+                # and before the walk opens that component for a link out of
+                # the root (or any link, while links are not followed), a fifo
+                # or another entry that is not a regular file, or with a
+                # directory on the way replaced by a link (with links followed,
+                # one out of the root or put there after the resolve) or a
+                # non-directory, is passed over as a copy of its skill, never
+                # read through or waited on. That refuses kinds of entry, not
+                # replacements: an in-root regular file renamed over the
+                # document before its open is read, from inside the root. Once
+                # a component's handle is open, a later rename or swap of that
+                # path does not change what is read: the bytes come through the
+                # handle pinned inside the root. With links followed, a link
+                # that resolves inside the root at its one resolve is read at
+                # its target, one re-pointed after that resolve is read from
+                # the in-root file it named then, and one resolved to the root
+                # itself or to an entry directly in it is passed over.
+                taken = _read_discovered(skill_file, base, follow=self._follow_symlinks)
+                if isinstance(taken, str):
                     passed_over.append(
                         PassedOverDocument(
                             root.id,
                             skill_file,
-                            f"a document this process cannot read ({exc.strerror or exc})",
+                            taken,
                             skill_id=self._skill_id_at(base, skill_file),
                         )
                     )
                     continue
-                found.append(self._snapshot(root, base, skill_file, raw))
+                raw, rel = taken
+                found.append(self._snapshot(root, base, skill_file, raw, rel))
         found.sort(key=lambda s: (s.skill_id, s.root_id))
         self._snapshot_cache = found
         self._passed_over = passed_over
@@ -1779,36 +2001,25 @@ class FilesystemSkillStore:
                         f"refusing to {verb} {named_path(spelled)}: it is the skill root {root.id} itself, "
                         f"not a document in it. Nothing was touched."
                     )
-                fd = os.open(str(root_form), os.O_RDONLY | os.O_DIRECTORY)
                 # The directory each refusal names is the one being opened, the
                 # root joined to every component so far. Measured before: it was
                 # the root joined to the last component alone, so a copy at
                 # ``<root>/x/tdd`` named ``<root>/tdd``, a directory that need
                 # not exist.
-                walked = root_form
                 try:
-                    for part in below.parts[:-1]:
-                        walked = walked / part
-                        try:
-                            nxt = os.open(
-                                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-                            )
-                        except OSError as exc:
-                            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                                raise LinkedTargetRefused(
-                                    f"refusing to {verb} {named_path(spelled)}: {named_path(walked)} is a "
-                                    f"symbolic link or not a directory on the way to the "
-                                    f"document, judged on the open handle. Nothing was touched."
-                                ) from exc
-                            raise BaseHashMismatch(
-                                f"refusing to {verb} {named_path(spelled)}: {named_path(walked)} could not be "
-                                f"opened ({exc.strerror}). Nothing was touched."
-                            ) from exc
-                        os.close(fd)
-                        fd = nxt
-                except BaseException:
-                    os.close(fd)
-                    raise
+                    fd = _open_below_root(root_form, below.parts[:-1])
+                except _PinnedWalkStopped as stopped:
+                    exc, walked = stopped.cause, stopped.walked
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise LinkedTargetRefused(
+                            f"refusing to {verb} {named_path(spelled)}: {named_path(walked)} is a "
+                            f"symbolic link or not a directory on the way to the "
+                            f"document, judged on the open handle. Nothing was touched."
+                        ) from exc
+                    raise BaseHashMismatch(
+                        f"refusing to {verb} {named_path(spelled)}: {named_path(walked)} could not be "
+                        f"opened ({exc.strerror}). Nothing was touched."
+                    ) from exc
                 return fd, below.parts[-1]
         raise LinkedTargetRefused(
             f"refusing to {verb} {named_path(spelled)}: it lies under no configured skill root, so there "
@@ -1848,9 +2059,7 @@ class FilesystemSkillStore:
         whatever it points to.
         """
         try:
-            fd = os.open(
-                leaf, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd
-            )
+            fd = _open_leaf(parent_fd, leaf)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise LinkedTargetRefused(
@@ -1861,22 +2070,13 @@ class FilesystemSkillStore:
                 f"refusing to {verb} {named_path(target)}: the document could not be opened "
                 f"({exc.strerror}). Nothing was touched."
             ) from exc
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise BaseHashMismatch(
-                    f"refusing to {verb} {named_path(target)}: the document is not a regular file. "
-                    f"Nothing was touched."
-                )
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(fd, 1 << 16)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            os.close(fd)
-        return b"".join(chunks), stat.S_IMODE(info.st_mode)
+        data, mode = _read_open_regular(fd)
+        if data is None:
+            raise BaseHashMismatch(
+                f"refusing to {verb} {named_path(target)}: the document is not a regular file. "
+                f"Nothing was touched."
+            )
+        return data, stat.S_IMODE(mode)
 
     def assert_canonical_target(
         self, target: Path, *, action: str, candidate_id: str = ""
@@ -2125,6 +2325,14 @@ class FilesystemSkillStore:
                     skip(candidate, "a symlink that resolves outside its root")
                     continue
                 rel = Path(candidate.name)
+            except RuntimeError:
+                # A loop put on the way after the listing: Python 3.11's
+                # ``resolve`` raises ``RuntimeError`` for it, 3.13's does not.
+                skip(candidate, "a path that could not be resolved (a symlink loop)")
+                continue
+            except OSError as exc:
+                skip(candidate, f"a path that could not be resolved ({exc.strerror or exc})")
+                continue
             if len(rel.parts) > self._max_depth:
                 skip(
                     candidate,
@@ -2321,7 +2529,9 @@ class FilesystemSkillStore:
         unlistable.extend(unexamined.items())
         return tuple(found), tuple(unlistable)
 
-    def _snapshot(self, root: SkillRoot, base: Path, skill_file: Path, raw: bytes) -> SkillSnapshot:
+    def _snapshot(
+        self, root: SkillRoot, base: Path, skill_file: Path, raw: bytes, rel: Path
+    ) -> SkillSnapshot:
         undecodable: list[str] = []
         try:
             text = raw.decode("utf-8")
@@ -2336,9 +2546,12 @@ class FilesystemSkillStore:
             ]
         fields, has_open, warnings = parse_frontmatter(text)
         warnings = undecodable + warnings
-        rel = skill_file.resolve().relative_to(base)
-        # ``_iter_skill_files`` passes a root-level document over, so the
-        # parent here is always a directory below the root.
+        # ``rel`` is the path ``_read_discovered`` walked, below ``base``.
+        # ``_iter_skill_files`` passes a root-level document over and
+        # ``_read_discovered`` refuses a path shallower than
+        # ``<skill>/SKILL.md`` (a followed link resolved to the root or to an
+        # entry directly in it), so the parent here is always a directory
+        # below the root.
         skill_id = rel.parts[-2]
         declared = fields.get("name", "")
         if declared and declared != skill_id:
