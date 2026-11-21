@@ -2533,9 +2533,11 @@ class FilesystemSkillStore:
         self, root: SkillRoot, base: Path, skill_file: Path, raw: bytes, rel: Path
     ) -> SkillSnapshot:
         undecodable: list[str] = []
+        strict_utf8 = True
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
+            strict_utf8 = False
             # Inventoried so the operator sees it, with the bytes replaced so the
             # rest of the document still reads; the strict read on the write
             # path refuses it, and the warning says so here rather than there.
@@ -2599,4 +2601,5 @@ class FilesystemSkillStore:
             payload_files=payloads,
             unlistable_dirs=unlistable,
             warnings=tuple(warnings),
+            strict_utf8=strict_utf8,
         )

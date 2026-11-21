@@ -127,6 +127,12 @@ class SkillSnapshot:
     #: incomplete while this is non-empty; reported for the same reason the
     #: payloads are.
     unlistable_dirs: tuple[tuple[str, str], ...] = ()
+    #: Whether the document's bytes decoded as UTF-8 without replacement. When
+    #: False, ``sha256`` is of text with the undecodable bytes replaced, so it
+    #: names the copy but is compared with no record (``asi history`` says the
+    #: copy is not valid UTF-8 instead). Not in ``to_dict``: ``skills`` and
+    #: ``doctor`` print the decode warning, which says the same.
+    strict_utf8: bool = True
 
     @property
     def payload_count(self) -> int:

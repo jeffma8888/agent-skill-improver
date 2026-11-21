@@ -121,7 +121,7 @@ remedy in each reason is to move it aside or repair it by hand.
 | 1 | the command ran and the answer is negative (`doctor` not ready, `selftest` failed, a gate not met) |
 | 2 | usage error: an unknown subcommand or flag, or a value argparse refuses before any config is read (a `--day` that could not name a candidate, a `--limit` below 1); argparse's code, never returned by a command |
 | 3 | a refusal or a domain error, with the exception class named on stderr (`SafetyRefusal`, `BaseHashMismatch`, `AutomationRefused`, `MirrorEditRefused`, `NonDocumentWriteRefused`, `ConfigError`, ...) |
-| 4 | a required file was missing |
+| 4 | a required file was missing (for `history`: no configured skill root holds the skill, no readable candidate record names it and no unreadable one is named like its records) |
 | 5 | `daily` is `blocked`: the live skill tree changed while the run was reading it. Not a negative answer and not a refusal. Do not re-run until you know what wrote to the tree. The next `daily` exits 5 as well (`BlockedRunUnreviewed`, before the lock, any record written or any conversation read) until one committed run is started with `--commit --mutation-reviewed 2026-01-01` naming the blocked run's day |
 | 70 | an exception no command anticipated, with its traceback on stderr. A bug report, never a negative answer; 70 is `EX_SOFTWARE` from `sysexits.h` |
 | 129 | stopped by SIGHUP, which a closed terminal sends, before the command finished: `stopped by SIGHUP` on stderr. A model or source command it had started was ended with it; records are written whole or not at all (a temporary file renamed into place), and the next run starts as usual. A SIGHUP the caller ignores (`nohup` ignores it) does not stop the run |
@@ -131,6 +131,13 @@ remedy in each reason is to move it aside or repair it by hand.
 missing receipt of a decline already on the record, or finds the decline done;
 2 for a usage error, such as no `--reason`; 3 for a refusal, with its class on
 stderr; 4 when the candidate has no record.
+
+`history` exits 0 whenever it has something to show, including unreadable,
+untrusted or unknown-status rows; 2 for a `--limit` that is not a whole number
+from 1 to 1000; 3 when the state directory is refused, as for every reader (a
+symlinked state root, for one); 4 as in the table. An unreadable record named
+like one of the skill's records is something to show: `history` of a skill no
+root holds, with only such a record, exits 0 with its UNREADABLE line, not 4.
 
 A refusal is exit 3, not a crash. If you are scripting around this, treat 3 as
 "the tool declined and told you why", and 70 as "file a bug": no crash inside a
@@ -814,6 +821,161 @@ Records written before this wording change carry `human:<operator>`, `by human:<
 or the default actor `human`; asi never reads `actor` or parses the note
 label, although candidate notes are still read, masked and displayed as prose.
 Neither label authenticates the operator or affects apply or rollback.
+
+## Reading a skill's history
+
+```bash
+asi history <skill-id>
+asi --json history <skill-id> --limit 200
+```
+
+`asi history` lists the candidate records whose target names the skill id
+exactly as `asi skills` prints it (no prefix match, no case folding), with what
+their receipts say. It writes nothing: it reads the state tree through readers
+that create no directory and repair no mode, and it does not take the run lock,
+so it answers beside a `daily` that holds the lock without waiting for it, and
+an absent state tree stays absent.
+
+Rows are the most recent `--limit` records (default 50, at most 1000) by
+creation time, then id, printed oldest first. When some are cut, a line before
+the rows says how many earlier records are not shown; the footer and the JSON
+`counts` cover every record, shown or not, so a cut never hides that one exists.
+
+The text output, line by line:
+
+- The header names the skill, how many records there are and how many are
+  shown, the time it read them, and that it read them without the run lock.
+- The `live:` line names the skill's canonical copy and its hash, followed by
+  "the copy read during this command's discovery"; or the canonical copy and
+  why its bytes are not valid UTF-8, with the same words; or
+  `live: no canonical copy (<reason>)` when discovery found more than one copy
+  or passed its copy over; or `live: not in the configured skill roots now`.
+- The `live match:` line covers only the shown candidates it compared. It
+  names those whose replacement the copy read during this command's discovery
+  held (one whose base equals its replacement counts), or says it
+  `matched no replacement among the <n> candidate(s) compared`. When `--limit`
+  cuts earlier records it says `shown candidate(s) compared` instead and ends
+  `; <k> earlier candidate(s) not shown`: it says nothing about those records.
+  It is left out when there was no hash to compare: no canonical copy, a copy
+  that is not valid UTF-8, or a skill no root holds.
+- Each candidate's first line: id, creation time, status, gate verdict, the four
+  scores (fixes, regressions, holdout cases, judge preference) and the lines
+  added and removed; an open record that recomputes ends with the `review`
+  command for it. A status this asi does not know reads
+  `status unknown to this asi: <value>` and is counted under unknown status.
+- `  DOES NOT RECOMPUTE (<n> problem(s)): <first problem>` when the record
+  fails its own integrity checks. Such a row claims no live match, its receipt
+  lines begin `(record untrusted)`, and it is counted as untrusted, not as open
+  or closed.
+- `  change` (the intended change), `  hashes` (base and replacement, 12 hex
+  digits each), and `  base       (not a sha256 digest: ...)` when the record's
+  base is not one, shown masked and cut.
+- `  gate said` for a failed gate: its first five reasons and how many more.
+- `  invalid` names, dotted (`gate.metrics`, `apply.approval`), the fields that
+  were missing or did not have the type asi writes. The row is kept, with no
+  value for those fields. Every such field is counted, but only the first five,
+  each once in the order they were found, are named: the line ends
+  `(+<n> more)` for the rest, and JSON gives the same five in `invalid_fields`
+  and the count of the rest in `invalid_not_shown`. Wherever this section says
+  a field is named invalid or counted among the invalid fields, this cap
+  applies: the field's name is on the `invalid` line and in `invalid_fields`
+  only when it is among the first five; otherwise it is only counted, in
+  `invalid_not_shown` and `(+<n> more)`.
+- The receipt lines, one each:
+  `  applied <time>  operator label "<label>" (unauthenticated)  note "<note>"`
+  from the apply receipt,
+  `  rolled back <time>  from <manifest>  (a rollback records no operator)`
+  from the rollback receipt, and
+  `  declined <time>  operator label "<label>" (unauthenticated)  reason "<reason>"`
+  for a decline.
+- `  apply      receipt unreadable: <why>`, and the same for rollback and
+  decline, when a receipt cannot be used: not a regular file (a fifo, a
+  directory); an apply or rollback receipt that names another candidate
+  (`names another candidate`); a receipt, apply, rollback or decline, whose
+  `schema` is a string other than the one asi writes (`holds schema <schema>,
+  not asi.apply_receipt.v1`, or the rollback or decline one), whose fields are
+  then not read; or a decline receipt beside a record that holds no decline,
+  when the receipt names another candidate (`names another candidate`) or none
+  (`holds no candidate id`). It is never shown as this candidate's receipt. A
+  decline receipt whose `schema` is another string, beside the record's
+  decline, gets this line after the record's `declined` line, is not compared
+  with it, and is named in JSON by `decline.receipt_unreadable`. A receipt
+  whose `schema` is missing or not a string does not get this line for its
+  schema: the schema is counted among the invalid fields (`apply.schema`,
+  `rollback.schema`, `decline_receipt.schema`), named on the `invalid` line
+  and in `invalid_fields` only when it is among the first five shown, and
+  otherwise counted in `invalid_not_shown` and the text `(+<n> more)` (the
+  `invalid` line, above); the candidate id rules above still apply, and the
+  receipt's other values are still shown, each guarded like any other field.
+- `  decline disagrees  <field>: record "<value>", receipt "<value>"`, one line
+  for each of candidate id, operator, time, reason and status before that the
+  record and its decline receipt hold differently. The values shown above it are
+  the record's. The two one-sided cases are named by
+  `  no decline receipt found` and
+  `  decline receipt present but the record holds no decline`. The second is
+  left out when the receipt holds another candidate's id, holds none, or holds
+  a `schema` string other than `asi.decline_receipt.v1`; that receipt is then
+  unreadable (above), and none of its values is shown. A receipt alone whose
+  `schema` is missing or not a string, and which holds this candidate's id,
+  still gets the line: `decline_receipt.schema` is counted among the invalid
+  fields (named only when it is among the first five shown, as the `invalid`
+  line above says), and the receipt's other guarded values (its time, operator
+  label and reason) are shown as the row's decline.
+- A line beginning `  apply receipt present but the record says validated`
+  names an apply that stopped between its two writes, or is running now
+  (`asi apply` finishes it).
+- `  backup     <path>` when a backup manifest for the candidate is found.
+- `  live match` with one of three answers, each about the copy read during this
+  command's discovery: it held this candidate's base, its replacement, or
+  neither (`base`, `replacement`, `neither` in JSON); or `not compared` with
+  the reason: the record does not recompute, its base is not a sha256 digest,
+  the record names a path that is not this skill's canonical copy now (that
+  path is never opened), the skill has no canonical copy now, the canonical
+  copy is not valid UTF-8, or the skill is not in the configured skill roots now.
+- UNREADABLE, then the file name and the reason, for a record that did not
+  read and whose file name ends like one of this skill's records; other
+  unreadable records
+  are counted in the footer as not attributed. A record of a schema this asi
+  does not read is one of these, not an error.
+- `set aside   <kind> at <stage> <time>: "<reason>"` for the skill's deferrals
+  and refusals at the propose and validate stages, newest first.
+- The footer: open, closed, unknown-status and untrusted counts, unreadable
+  records named for this skill and elsewhere, and "this is what state/ says,
+  not proof of what happened".
+
+Prose from records and receipts, such as the intended change and the apply
+note, is masked and cut to 200 characters; file names are masked; each output
+line stays one line. No patch text is printed; `review` shows the diff of an
+open candidate. `--json` gives the same facts as schema `asi.history.v1`, with
+`operator_verified` false wherever an operator label is shown,
+`read_without_run_lock` true, and `live.basis` and each row's
+`live_match_basis` set to "the copy read during this command's discovery".
+
+What it does not claim:
+
+- **The live match is about the copy discovery read during this command**,
+  through handles pinned from the skill root, and only when its bytes are valid
+  UTF-8. A change to the file after that read is not seen, and the output names
+  that copy, never the file as it is afterwards.
+- **Consistency is not origin.** `history` reads records and receipts as they
+  are and recomputes what a record lets it: the patch hash, the approval
+  challenge and the validation's bindings to the candidate. A record that
+  recomputes is consistent with itself; that says nothing about who wrote it.
+  Every file in the state tree is writable by its owner, a record edited so that
+  it still recomputes is shown as trusted, and a receipt is tied to its
+  candidate by the id it holds, not by a signature.
+- **Operator labels are not identities.** They are the `--operator` value or
+  `$USER` as given at the time; a rollback records none.
+- **It reads without the run lock.** asi writes each record and receipt whole,
+  but a record and its receipt are two reads, so a run writing at the same time
+  can show an in-between state, such as the apply line above.
+- **Absence is not evidence.** A record that was deleted is not shown, and
+  `history` cannot know it existed.
+
+`history` of an id that no configured root holds and that no record names is
+exit 4, with one line on stderr naming the id (masked and cut) and pointing at
+`asi skills`. A skill removed from the roots whose records remain is listed
+with `live: not in the configured skill roots now` and exit 0.
 
 ## Recovery
 

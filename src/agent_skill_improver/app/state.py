@@ -124,6 +124,10 @@ CLOSED_STATUSES = (
     STATUS_DECLINED,
 )
 
+#: The receipts ``action_receipt_if_present`` reads: its own tuple, so the
+#: history view does not depend on what ``action_receipt_path`` allows.
+HISTORY_RECEIPT_ACTIONS = ("apply", "rollback", "decline")
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -681,6 +685,19 @@ class StateStore:
         _refuse_unless_real_dir(path, self.root)
         return path
 
+    def _looked_in(self, name: str, *, create: bool) -> Path | None:
+        """``dir(name)`` when ``create``; else its refusals only, and None if it is absent.
+
+        The readers ``asi history`` uses pass ``create=False``: ``dir`` makes the
+        root and the subdirectory and resets their modes, which a command that
+        writes nothing must not do. ``check_dir`` makes the same refusals (a
+        symlinked root or ancestor, a non-directory) and creates nothing.
+        """
+        if create:
+            return self.dir(name)
+        path = self.check_dir(name)
+        return path if path.is_dir() else None
+
     def _note_repair(self, rel: str) -> None:
         if rel not in self._pending_repairs:
             self._pending_repairs.append(rel)
@@ -790,7 +807,7 @@ class StateStore:
             )
         return candidate
 
-    def scan_candidates(self) -> CandidateScan:
+    def scan_candidates(self, *, create: bool = True) -> CandidateScan:
         """Every candidate record, readable or not, each unreadable one with its reason.
 
         A record that does not parse is never guessed at and never acted on
@@ -813,10 +830,14 @@ class StateStore:
         it proposed 0 with the record in place, for each of a directory (empty
         or holding the record), a link to the record moved elsewhere, a link
         to nothing, a link to a directory and a fifo.
+
+        With ``create=False`` nothing is created or re-moded (``_looked_in``):
+        an absent ``candidates/`` is no records.
         """
         readable: list[Candidate] = []
         unreadable: list[UnreadableRecord] = []
-        for path in sorted(self.dir("candidates").glob("*.json")):
+        directory = self._looked_in("candidates", create=create)
+        for path in sorted(directory.glob("*.json")) if directory is not None else []:
             # A link or any other non-file is not a record this tool wrote: it is
             # named by ``foreign_entries`` (a directory by
             # ``misplaced_directories``) and left alone, and ``read_candidate``
@@ -960,7 +981,7 @@ class StateStore:
         if not path.is_symlink() and path.is_file():
             self._persist(path, path.unlink)
 
-    def scan_set_aside(self) -> SetAsideScan:
+    def scan_set_aside(self, *, create: bool = True) -> SetAsideScan:
         """Every quarantine, refusal and deferral record, newest first.
 
         A link or other non-file is not a record and is skipped
@@ -971,11 +992,15 @@ class StateStore:
         unreadable with the reason, never dropped. Newest first because the
         question this answers is "what went wrong lately"; ties keep the kind
         order of ``SET_ASIDE_KINDS``, then path order within a kind.
+
+        With ``create=False`` nothing is created or re-moded (``_looked_in``):
+        an absent kind directory is no records of that kind.
         """
         readable: list[SetAsideRecord] = []
         unreadable: list[UnreadableRecord] = []
         for kind, directory in SET_ASIDE_KINDS:
-            for path in sorted(self.dir(directory).glob("*.json")):
+            found = self._looked_in(directory, create=create)
+            for path in sorted(found.glob("*.json")) if found is not None else []:
                 if path.is_symlink() or not path.is_file():
                     continue
                 try:
@@ -1367,6 +1392,32 @@ class StateStore:
             ) from exc
         return _read_state_object(path, what=f"{action} receipt")
 
+    def action_receipt_if_present(self, action: str, candidate_id: str) -> dict[str, Any] | None:
+        """``read_action_receipt`` for a reader that creates nothing (``asi history``).
+
+        None when ``receipts/`` or the receipt is absent (``os.lstat`` raising
+        ``FileNotFoundError``); ``receipts/`` is judged by ``check_dir`` and never
+        made or re-moded. Anything at the path that is not a regular file holding
+        a JSON object is ``StateUnreadable`` naming the path, as there. The action
+        allowlist is this reader's own (``HISTORY_RECEIPT_ACTIONS``).
+        """
+        if action not in HISTORY_RECEIPT_ACTIONS:
+            raise SafetyRefusal(f"unknown candidate receipt action {action!r}")
+        receipts = self._looked_in("receipts", create=False)
+        if receipts is None:
+            return None
+        path = receipts / f"{action}--{validate_candidate_id(candidate_id)}.json"
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StateUnreadable(
+                f"refusing to use the {action} receipt record {_shown(path)}: it could not be "
+                f"examined ({why_unreadable(exc)}). Nothing was written."
+            ) from exc
+        return _read_state_object(path, what=f"{action} receipt")
+
     def backup_dir_for(self, candidate_id: str, stamp: str, *, make: bool = True) -> Path:
         """A per-apply backup directory, created only as a direct child.
 
@@ -1398,7 +1449,7 @@ class StateStore:
             return _judge_child_dir(backups, name, self.root)
         return _ensure_child_dir(backups, name, self.root)
 
-    def latest_backup_manifest(self, candidate_id: str) -> Path | None:
+    def latest_backup_manifest(self, candidate_id: str, *, create: bool = True) -> Path | None:
         """The newest ``backup.json`` written by an apply of exactly this candidate.
 
         A backup directory is named ``<candidate id>--<stamp>``, and a candidate
@@ -1406,11 +1457,17 @@ class StateStore:
         by splitting at the LAST ``--`` (the stamp never contains one), never by
         string prefix: a prefix match would hand ``CAND-a`` the backup of
         ``CAND-a--b`` and let a rollback restore the wrong candidate's file.
+
+        With ``create=False`` nothing is created or re-moded (``_looked_in``):
+        an absent ``backups/`` is no backup.
         """
         wanted = validate_candidate_id(candidate_id)
+        backups = self._looked_in("backups", create=create)
+        if backups is None:
+            return None
         dirs = sorted(
             p
-            for p in self.dir("backups").glob(f"{wanted}--*")
+            for p in backups.glob(f"{wanted}--*")
             if p.is_dir() and not p.is_symlink() and p.name.rsplit("--", 1)[0] == wanted
         )
         for path in reversed(dirs):

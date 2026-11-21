@@ -2511,6 +2511,8 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         ("set-aside",),
         ("--json", "set-aside", "--kind", "deferred"),
         ("--json", "review", "{candidate}"),
+        ("history", "tdd"),
+        ("--json", "history", "tdd"),
         ("scheduler-template", "launchd"),
         ("scheduler-template", "cron"),
     )
@@ -2551,7 +2553,7 @@ class ReadOnlyCommandsTests(unittest.TestCase):
         the README admits to."""
         state = self.base / "state"
         self.assertFalse(state.exists())
-        for args in (("skills",), ("rubrics",), ("scheduler-template", "cron")):
+        for args in (("skills",), ("rubrics",), ("history", "tdd"), ("scheduler-template", "cron")):
             with self.subTest(command=args):
                 proc = run_cli([*self.cfg, *args])
                 self.assertEqual(proc.returncode, RC_OK, proc.stderr)

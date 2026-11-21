@@ -161,8 +161,11 @@ Each asi property is stated once, here, with the code that does it.
   the time, the approval, the write, the gate and an operator string taken from
   `--operator` or the `USER` variable, which asi does not verify
   ([`app/promote.py`], [`cli.py`]). Rollback receipts record the candidate, the
-  time, the backup manifest and the result ([`app/promote.py`]). asi has no
-  per-skill history command ([`cli.py`]).
+  time, the backup manifest and the result ([`app/promote.py`]). `asi history`
+  reads them back per skill, without the run lock and without writing
+  ([`cli.py`], [`app/history.py`]). It shows what they say and recomputes
+  what a candidate record lets it; that a record is consistent with itself
+  does not show who wrote it.
 - **Proposal checks.** asi does not test whether a skill is selected: the
   validator refuses a changed frontmatter name or a dropped description, and a
   changed description passes ([`app/pipeline.py`]). The length caps refuse a
@@ -473,9 +476,15 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
 - **PLANNED, not built: trigger testing.** Skill-creator tests should-trigger
   and should-not-trigger queries; asi does not test whether a skill is selected
   ([proposal checks]).
-- **PLANNED, not built: a per-skill history view.** Reef ties each served
-  version to its patch, score and activation state; asi has no per-skill history
-  command ([receipts]).
+- **ADOPTED, partly: a per-skill history view.** Reef ties each served
+  version to its patch, score and activation state. `asi history SKILL_ID`
+  lists each candidate recorded for a skill with its gate verdict and scores,
+  its apply, rollback and decline receipts (operator labels unauthenticated)
+  and whether the copy read during this command's discovery held its base or
+  replacement, by hash ([`cli.py`], [`app/history.py`]). Not adopted: a
+  served-version timeline beyond what the candidate records and receipts
+  hold, diffs in the view, cost, any activation state other than the hash
+  match, and any proof of who wrote a record or receipt ([receipts]).
 
 [replay and cache]: #what-asi-does-exactly
 [proposal checks]: #what-asi-does-exactly
@@ -513,6 +522,7 @@ of [What asi does, exactly](#what-asi-does-exactly) it rests on.
 [`cli.py`]: ../src/agent_skill_improver/cli.py
 [`domain/candidate.py`]: ../src/agent_skill_improver/domain/candidate.py
 [`app/receipt.py`]: ../src/agent_skill_improver/app/receipt.py
+[`app/history.py`]: ../src/agent_skill_improver/app/history.py
 [`app/rejections.py`]: ../src/agent_skill_improver/app/rejections.py
 [`tests/test_a_rejected_replacement_is_not_replayed_again.py`]: ../tests/test_a_rejected_replacement_is_not_replayed_again.py
 [`tests/test_rejection_memory_is_bounded_and_only_remembers_completed_failures.py`]: ../tests/test_rejection_memory_is_bounded_and_only_remembers_completed_failures.py

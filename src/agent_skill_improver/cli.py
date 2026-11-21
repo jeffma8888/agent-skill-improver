@@ -9,6 +9,8 @@ Command surface, and which of them can change anything on disk:
     daily               writes only under the gitignored state directory.
                         DRY RUN BY DEFAULT: nothing under state/ is written; --commit persists.
     candidates          read-only.
+    history             read-only. One skill's candidates oldest first: gate, receipts, live
+                        match. Creates nothing and reads without the run lock.
     review              read-only. Prints the argument, the diff, and the approval token.
     apply               writes a candidate (approval token + acknowledgement). Review-gated.
     rollback            restores a verified backup; no token or acknowledgement.
@@ -71,6 +73,7 @@ from .domain.isolation import (
     source_class,
 )
 from .errors import AsiError, BlockedRunUnreviewed, ConfigError, SafetyRefusal
+from .hashing import short
 from .jsonio import dumps
 from .adapters.bounded_process import children_reaped_by_the_kernel
 from .adapters.skill_fs import root_presence
@@ -82,6 +85,12 @@ from .domain.redaction import (
     named_path,
     quoted_value,
     redact,
+)
+from .app.history import (
+    HISTORY_DEFAULT_LIMIT,
+    HISTORY_LIVE_BASIS,
+    HISTORY_MAX_LIMIT,
+    skill_history,
 )
 from .app.state import DIR_MODE, OPEN_STATUSES, SET_ASIDE_KINDS, STATE_FILE_MODE, StateStore
 from .app.wiring import build_runner, build_skill_store, build_source, build_state
@@ -1319,6 +1328,241 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    """One skill's records, oldest first. Writes nothing: every state reader is
+    called with ``create=False`` and the run lock is not taken (``app/history``)."""
+    config = _load(args)
+    state = _open_state(config)
+    store = build_skill_store(config)
+    groups = store.groups()
+    payload = skill_history(
+        state, groups, args.skill_id, read_at=iso(SystemClock().now()), limit=args.limit
+    )
+    if (
+        payload["live"]["state"] == "not-in-roots"
+        and not payload["counts"]["candidates"]
+        and not payload["counts"]["unreadable"]
+    ):
+        # The whole sentence through one_line: listed_value masks and cuts but
+        # keeps a line break, and the handler writes what it is given.
+        raise FileNotFoundError(
+            one_line(
+                f"no skill {listed_value(args.skill_id, limit=LISTED_SKILL_ID_CHARS)} in the "
+                "configured roots and no candidate record names it (asi skills lists the ids)"
+            )
+        )
+    _emit(payload, as_json=args.json, lines=_history_lines(payload))
+    return 0
+
+
+def _quoted(value: object) -> str:
+    return "-" if value is None else f'"{value}"'
+
+
+def _plain(value: object) -> str:
+    return "-" if value is None else str(value)
+
+
+def _history_receipt_lines(row: dict[str, Any], prefix: str) -> list[str]:
+    lines: list[str] = []
+    apply = row["apply"]
+    if apply is not None and "unreadable" in apply:
+        lines.append(f"  {prefix}apply      receipt unreadable: {apply['unreadable']}")
+    elif apply is not None:
+        operator = apply["operator"] or ("unspecified" if apply["operator"] == "" else None)
+        line = (
+            f"  {prefix}applied    {_plain(apply['applied_at'])}  operator label "
+            f"{_quoted(operator)} (unauthenticated)  note {_quoted(apply['note'])}"
+        )
+        if apply["finishes_an_earlier_run"]:
+            line += "  (finished an earlier run)"
+        lines.append(line)
+    if apply is not None and "unreadable" not in apply and row["status"] == STATUS_VALIDATED:
+        lines.append(
+            f"  {prefix}apply receipt present but the record says validated: an apply stopped "
+            "between its two writes, or is running now (asi apply finishes it)"
+        )
+    if apply is None and row["status"] == "applied":
+        lines.append(f"  {prefix}no apply receipt found")
+    rollback = row["rollback"]
+    if rollback is not None and "unreadable" in rollback:
+        lines.append(f"  {prefix}rollback   receipt unreadable: {rollback['unreadable']}")
+    elif rollback is not None:
+        lines.append(
+            f"  {prefix}rolled back {_plain(rollback['rolled_back_at'])}  from "
+            f"{_plain(rollback['manifest'])}  (a rollback records no operator)"
+        )
+    decline = row["decline"]
+    if decline is not None and "unreadable" in decline:
+        lines.append(f"  {prefix}decline    receipt unreadable: {decline['unreadable']}")
+    elif decline is not None:
+        lines.append(
+            f"  {prefix}declined   {_plain(decline['declined_at'])}  operator label "
+            f"{_quoted(decline['operator'])} (unauthenticated)  reason {_quoted(decline['reason'])}"
+        )
+        for entry in decline["disagreements"]:
+            lines.append(
+                f"  {prefix}decline disagrees  {entry['field']}: record {_quoted(entry['record'])}, "
+                f"receipt {_quoted(entry['receipt'])}"
+            )
+        if decline["receipt_unreadable"] is not None:
+            lines.append(
+                f"  {prefix}decline    receipt unreadable: {decline['receipt_unreadable']}"
+            )
+        elif decline["from"] == "record":
+            lines.append(f"  {prefix}no decline receipt found")
+        elif decline["from"] == "receipt":
+            lines.append(
+                f"  {prefix}decline receipt present but the record holds no decline "
+                "(the values above are the receipt's)"
+            )
+    return lines
+
+
+def _history_lines(payload: dict[str, Any]) -> list[str]:
+    """The text form of ``asi.history.v1``: what state/ says, one line per fact."""
+    counts = payload["counts"]
+    total = counts["candidates"]
+    shown = payload["candidates"]
+    lines = [
+        f"history of {payload['skill_id']}: {total} candidate(s) recorded, {len(shown)} of "
+        f"{total} shown (--limit {payload['limit']}), oldest first; read at "
+        f"{payload['read_at']} without the run lock"
+    ]
+    live = payload["live"]
+    if live["state"] == "canonical" and live["sha256"] is not None:
+        lines.append(
+            f"live: canonical {live['canonical_path']} sha256 {short(live['sha256'])}, "
+            f"{HISTORY_LIVE_BASIS}"
+        )
+    elif live["state"] == "canonical":
+        lines.append(
+            f"live: canonical {live['canonical_path']}, not valid UTF-8 ({live['reason']}), "
+            f"{HISTORY_LIVE_BASIS}"
+        )
+    elif live["state"] == "no-canonical":
+        lines.append(f"live: no canonical copy ({live['reason']})")
+    else:
+        lines.append("live: not in the configured skill roots now")
+    # The summary covers the rows it compared and nothing else: rows cut by
+    # --limit are not in it, and a row whose base equals its replacement held both.
+    compared = [row for row in shown if row["live_match"] != "not-compared"]
+    held = [
+        row["id"]
+        for row in compared
+        if row["live_match"] == "replacement"
+        or (row["live_match"] == "base" and row["base_sha256"] == row["replacement_sha256"])
+    ]
+    cut = payload["earlier_not_shown"]
+    not_shown = f"; {cut} earlier candidate(s) not shown" if cut else ""
+    scope = "shown candidate(s) compared" if cut else "candidate(s) compared"
+    if held:
+        lines.append(
+            f"live match: {HISTORY_LIVE_BASIS} held the replacement of {', '.join(held)}{not_shown}"
+        )
+    elif live["sha256"] is not None:
+        lines.append(
+            f"live match: {HISTORY_LIVE_BASIS} matched no replacement among the "
+            f"{len(compared)} {scope}{not_shown}"
+        )
+    if not total:
+        lines.append("0 candidate(s) recorded for this skill")
+    if payload["earlier_not_shown"]:
+        lines.append(
+            f"{payload['earlier_not_shown']} earlier candidate record(s) for this skill not "
+            f"shown (--limit N shows up to {HISTORY_MAX_LIMIT})"
+        )
+    for row in shown:
+        lines.extend(_history_row_lines(row))
+    if payload["unreadable_not_shown"]:
+        lines.append(
+            f"{payload['unreadable_not_shown']} earlier unreadable record(s) named for this "
+            "skill not shown"
+        )
+    for record in payload["unreadable"]:
+        lines.append(f"UNREADABLE  {record['name']}  {record['reason']}")
+    for record in payload["set_aside"]:
+        lines.append(
+            f"set aside   {record['kind']} at {record['stage']} {record['at']}: "
+            f"{_quoted(record['reason'])}"
+        )
+    if payload["set_aside_not_shown"]:
+        lines.append(f"{payload['set_aside_not_shown']} older set-aside record(s) not shown")
+    lines.append(
+        f"{total} candidate(s): {counts['open']} open, {counts['closed']} closed, "
+        f"{counts['unknown_status']} of unknown status, {counts['untrusted']} untrusted; "
+        f"{counts['unreadable']} unreadable record(s) named for this skill, "
+        f"{payload['unattributed_unreadable']} elsewhere in candidates/ not attributed; "
+        "this is what state/ says, not proof of what happened"
+    )
+    return lines
+
+
+def _history_row_lines(row: dict[str, Any]) -> list[str]:
+    gate = row["gate"]
+    if not gate["ran"]:
+        verdict = "not run"
+    elif gate["passed"] is None:
+        verdict = "unknown"
+    else:
+        verdict = "pass" if gate["passed"] else "fail"
+    status = (
+        row["status"] if row["status_known"] else f"status unknown to this asi: {row['status']}"
+    )
+    head = (
+        f"{row['id']}  {row['created_at']}  {status}  gate={verdict} fixes={_plain(gate['fixes'])} "
+        f"regressions={_plain(gate['regressions'])} holdout={_plain(gate['holdout_cases'])} "
+        f"judge={_plain(gate['judge_candidate_preference_ratio'])}  "
+        f"+{row['added_lines']}/-{row['removed_lines']}"
+    )
+    integrity = row["integrity"]
+    if row["open"] and integrity["recomputes"]:
+        head += f"  (open: asi review {row['id']})"
+    lines = [head]
+    if not integrity["recomputes"]:
+        count = len(integrity["problems"]) + integrity["problems_not_shown"]
+        lines.append(f"  DOES NOT RECOMPUTE ({count} problem(s)): {integrity['problems'][0]}")
+    lines.append(f"  change     {_quoted(row['intended_change'])}")
+    if row["base_sha256"] is None:
+        lines.append(f"  base       (not a sha256 digest: {_quoted(row['base_sha256_invalid'])})")
+        lines.append(f"  hashes     replacement {short(row['replacement_sha256'])}")
+    else:
+        lines.append(
+            f"  hashes     base {short(row['base_sha256'])}  "
+            f"replacement {short(row['replacement_sha256'])}"
+        )
+    if gate["passed"] is False and gate["reasons"]:
+        said = "; ".join(_quoted(r) for r in gate["reasons"])
+        if gate["reasons_not_shown"]:
+            said += f" (+{gate['reasons_not_shown']} more)"
+        lines.append(f"  gate said  {said}")
+    if row["invalid_fields"]:
+        names = ", ".join(row["invalid_fields"])
+        if row["invalid_not_shown"]:
+            names += f" (+{row['invalid_not_shown']} more)"
+        lines.append(f"  invalid    {names}")
+    prefix = "" if integrity["recomputes"] else "(record untrusted) "
+    lines.extend(_history_receipt_lines(row, prefix))
+    if row["backup_manifest"] is not None:
+        lines.append(f"  backup     {row['backup_manifest']}")
+    match = row["live_match"]
+    if match == "not-compared":
+        lines.append(f"  live match  not compared: {row['live_match_reason']}")
+    elif match == "neither":
+        lines.append(
+            f"  live match  {HISTORY_LIVE_BASIS} held neither this candidate's base nor its "
+            "replacement"
+        )
+    elif match == "base" and row["base_sha256"] == row["replacement_sha256"]:
+        lines.append(
+            f"  live match  {HISTORY_LIVE_BASIS} held this candidate's base and replacement "
+            "(they are equal)"
+        )
+    else:
+        lines.append(f"  live match  {HISTORY_LIVE_BASIS} held this candidate's {match}")
+    return lines
+
+
 #: How long a set-aside record's id may be and still be listed whole. The id
 #: is a conversation's, held to ``MAX_THREAD_ID_LENGTH`` (256) where it is
 #: discovered, or a skill's, a directory name of at most 255 bytes, so a cut
@@ -2284,6 +2528,27 @@ def _run_day_argument(value: str) -> str:
 _WHOLE_NUMBER_TEXT = re.compile(r"[+-]?(\d+(?:_\d+)*)")
 
 
+def _history_limit_argument(value: str) -> int:
+    """``history --limit``: a whole number from 1 to ``HISTORY_MAX_LIMIT``. The
+    refusal names the range; the value is quoted bounded, and a number longer
+    than Python reads from text is told so, as ``_positive_int_argument`` does."""
+    wanted = f"a whole number from 1 to {HISTORY_MAX_LIMIT}"
+    try:
+        number = int(value)
+    except ValueError:
+        spelled = _WHOLE_NUMBER_TEXT.fullmatch(value.strip())
+        digits = spelled.group(1).replace("_", "") if spelled else ""
+        readable = sys.get_int_max_str_digits()
+        if digits and readable and len(digits) > readable:
+            raise argparse.ArgumentTypeError(
+                f"must be {wanted}; got {len(digits)} digits: {quoted_value(value)}"
+            ) from None
+        raise argparse.ArgumentTypeError(f"must be {wanted}, got {quoted_value(value)}") from None
+    if number < 1 or number > HISTORY_MAX_LIMIT:
+        raise argparse.ArgumentTypeError(f"must be {wanted}, got {quoted_value(value)}")
+    return number
+
+
 def _positive_int_argument(value: str) -> int:
     """``--limit``: a page size of 0 or less has no meaning, and the page
     description would otherwise say ``N of at most -1``. The value is quoted
@@ -2471,6 +2736,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="include closed candidates (applied, rolled-back, gate-failed, blocked-run, declined)",
     )
     p_candidates.set_defaults(func=cmd_candidates)
+
+    p_history = add(
+        "history",
+        "one skill's candidates, oldest first: gate, receipts, live match (writes nothing)",
+    )
+    p_history.add_argument("skill_id")
+    p_history.add_argument(
+        "--limit",
+        type=_history_limit_argument,
+        default=HISTORY_DEFAULT_LIMIT,
+        help=f"the most recent N records shown, oldest first (1 to {HISTORY_MAX_LIMIT}; "
+        f"default {HISTORY_DEFAULT_LIMIT}); the counts cover every record",
+    )
+    p_history.set_defaults(func=cmd_history)
 
     p_set_aside = add("set-aside", "list what runs set aside: quarantined, refused, deferred")
     p_set_aside.add_argument(
